@@ -65,7 +65,7 @@ def verify(env_file: Path, allow_placeholders: bool = False) -> None:
         raise ValueError("API 数据库地址与独立 PostgreSQL 凭据不匹配")
     if api_env["REDIS_URL"] != "redis://redis:6379/0" or api_env["FRONTEND_ORIGIN"] != "https://1.ipip99.com":
         raise ValueError("Redis 或前端来源配置不符")
-    if api_env["SUPPLIER_AUTO_PROCUREMENT_ENABLED"] != "false":
+    if api_env.get("SUPPLIER_AUTO_PROCUREMENT_ENABLED", "false") != "false":
         raise ValueError("自动采购必须关闭")
     if api_env["JWT_SECRET_KEY"] == api_env["SESSION_TOKEN_HASH_KEY"]:
         raise ValueError("JWT 与会话哈希密钥必须不同")
