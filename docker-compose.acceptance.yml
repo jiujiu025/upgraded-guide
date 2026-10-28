@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ops_acceptance
+      POSTGRES_USER: ops_acceptance
+      POSTGRES_PASSWORD: acceptance-only-password
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops_acceptance -d ops_acceptance"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  postgres-acceptance:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    environment:
+      ENVIRONMENT: test
+      DATABASE_URL: postgresql+psycopg://ops_acceptance:acceptance-only-password@postgres/ops_acceptance
+      TEST_POSTGRES_URL: postgresql+psycopg://ops_acceptance:acceptance-only-password@postgres/ops_acceptance
+      TEST_REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      LOGIN_RATE_LIMIT: 1
+      REGISTRATION_RATE_LIMIT: 1
+    command:
+      - sh
+      - -c
+      - >-
+        alembic upgrade head &&
+        alembic downgrade base &&
+        alembic upgrade head &&
+        alembic check &&
+        pytest -q -m "postgres or redis" tests/test_postgres_acceptance.py tests/test_security_hardening.py tests/test_redis_process_acceptance.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  api:
+    image: 99ipxin-api:acceptance
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://ops_acceptance:acceptance-only-password@postgres/ops_acceptance
+      JWT_SECRET_KEY: Acceptance_Only_Random_Secret_2026!AbCdEfGh
+      SESSION_TOKEN_HASH_KEY: Distinct_Acceptance_Refresh_Hash_Secret_2026!AbCdEfGh
+      FRONTEND_ORIGIN: https://acceptance.example.invalid
+      RATE_LIMIT_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      TRUSTED_PROXY_CIDRS: 172.16.0.0/12
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      postgres-acceptance:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  web:
+    image: 99ipxin-web:acceptance
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:18080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    depends_on:
+      api:
+        condition: service_healthy
+
+  tls:
+    image: nginx:1.29-alpine
+    volumes:
+      - ./scripts/acceptance-tls.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./.ci-tls:/tls:ro
+    ports:
+      - "127.0.0.1:18443:443"
+    depends_on:
+      web:
+        condition: service_healthy

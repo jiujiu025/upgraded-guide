@@ -1,0 +1,42 @@
+# 环境变量与本地密钥
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+
+# Python 环境、缓存和测试产物
+**/.venv/
+**/venv/
+**/__pycache__/
+*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/coverage.xml
+**/htmlcov/
+
+# 本地数据库、备份和日志
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# 前端依赖和构建产物
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+npm-debug.log*
+
+# 临时证书、浏览器配置和验收产物
+.ci-tls/
+**/playwright-report/
+**/test-results/
+**/browser-profile/
+
+# 编辑器和操作系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

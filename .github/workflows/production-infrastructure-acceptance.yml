@@ -1,0 +1,34 @@
+name: Isolated production infrastructure acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare isolated trusted test certificate
+        run: python scripts/prepare_acceptance_tls.py
+      - name: Build production and acceptance images
+        run: docker compose -f docker-compose.acceptance.yml build --pull
+      - name: PostgreSQL migrations, concurrency, rollback and Redis process tests
+        run: docker compose -f docker-compose.acceptance.yml run --rm postgres-acceptance
+      - name: Start production images behind isolated TLS entry
+        run: docker compose -f docker-compose.acceptance.yml up -d api web tls
+      - name: Inspect images, runtime and Redis interruption
+        run: python scripts/verify_production_images.py
+      - name: Verify trusted test certificate chain and HTTPS
+        run: python scripts/verify_acceptance_tls.py
+      - name: Always remove isolated infrastructure
+        if: always()
+        run: |
+          docker compose -f docker-compose.acceptance.yml down --remove-orphans --volumes
+          rm -rf .ci-tls

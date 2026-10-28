@@ -1,0 +1,54 @@
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: ${DATABASE_URL:?必须配置生产 PostgreSQL DATABASE_URL}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?必须配置高熵 JWT_SECRET_KEY}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-10}
+      REFRESH_SESSION_DAYS: ${REFRESH_SESSION_DAYS:-7}
+      SESSION_TOKEN_HASH_KEY: ${SESSION_TOKEN_HASH_KEY:?必须配置独立会话哈希密钥}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:?必须配置 HTTPS FRONTEND_ORIGIN}
+      RATE_LIMIT_BACKEND: redis
+      REDIS_URL: ${REDIS_URL:?必须配置共享限流 REDIS_URL}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?必须配置可信代理 IP 或 CIDR}
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
+      REGISTRATION_RATE_LIMIT: ${REGISTRATION_RATE_LIMIT:-5}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers"]
+    expose:
+      - "8000"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
