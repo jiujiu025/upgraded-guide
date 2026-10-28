@@ -22,11 +22,11 @@ def initialize_admin(username: str, password: str) -> int:
         raise ValueError("生产环境禁止通过 ADMIN_PASSWORD 注入初始密码")
     if not re.fullmatch(r"[a-z][a-z0-9_.-]{2,79}", username):
         raise ValueError("用户名格式无效")
+    if password.lower() in {"admin123", "password123", "change-this-in-production"}:
+        raise ValueError("禁止使用默认密码")
     if not 12 <= len(password) or len(password.encode("utf-8")) > 72 or not all(re.search(pattern, password) for pattern in
                                                  (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]")):
         raise ValueError("密码必须至少 12 字符、至多 72 字节，包含大小写字母、数字和特殊字符")
-    if password.lower() in {"admin123", "password123", "change-this-in-production"}:
-        raise ValueError("禁止使用默认密码")
 
     with SessionLocal() as db:
         with db.begin():
