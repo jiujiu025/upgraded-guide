@@ -9,7 +9,6 @@ x-api-environment: &api-environment
   RATE_LIMIT_BACKEND: redis
   REDIS_URL: redis://redis:6379/0
   TRUSTED_PROXY_CIDRS: ${OPS_EDGE_WEB_IP:-172.29.99.10}/32,${OPS_EDGE_GATEWAY_IP:-172.29.99.1}/32
-  SUPPLIER_AUTO_PROCUREMENT_ENABLED: "false"
 
 services:
   postgres:
