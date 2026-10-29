@@ -1,8 +1,8 @@
 <script setup>
 import BrandLogo from '../components/BrandLogo.vue'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
-  Activity, AlertTriangle, Box, Check, CircleDollarSign, Database, History, KeyRound,
+  Activity, AlertTriangle, Box, Check, CircleDollarSign, Copy, Database, History, KeyRound,
   LogOut, Menu, MessageSquare, PackageSearch, RefreshCw, Save, ShieldOff, X,
 } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
@@ -11,7 +11,7 @@ import { logout as endSession } from '../api'
 import {
   getAdminCatalogProducts, getAdminCatalogRegions, getCatalogPublications, getSupplierInventory, getSupplierOverview,
   getSupplierProducts, getSupplierQuotes, getSupplierRegions, getSupplierRules, getSupplierSyncRuns,
-  mapSupplierProduct, mapSupplierRegion, publishCatalogSnapshot, saveSupplierRule, syncSupplierCities,
+  checkSupplierInventory, deleteSupplierCredential, mapSupplierProduct, mapSupplierRegion, publishCatalogSnapshot, saveSupplierCredential, saveSupplierRule, syncSupplierCities,
   syncSupplierCountries, syncSupplierInventory, syncSupplierProducts, syncSupplierQuotes,
   withdrawCatalogPublication,
 } from '../api'
@@ -36,8 +36,19 @@ const localProducts = ref([])
 const localRegions = ref([])
 const publications = ref([])
 const inventoryCountry = ref('US')
+const inventoryCheckQuantity = ref(1)
+const inventoryCheckResult = ref(null)
+const inventoryCheckError = ref('')
+const selectedSegment = ref('')
+const inventoryCheckAt = ref(null)
+const quoteProductFilter = ref('')
+const quoteCountryFilter = ref('')
+const credentialDraft = ref('')
+const credentialBusy = ref(false)
+const credentialClearPending = ref(false)
 const ruleDraft = reactive({ product_id: '', region_id: '', supplier_product_id: '', supplier_region_id: '', is_enabled: true })
 const publishDraft = reactive({ product_id: '', region_id: '', inventory_snapshot_id: '', quote_snapshot_id: '', price: '' })
+const apiRebuildCommand = 'docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps api'
 
 const nav = [
   ['订单处理', '/admin', Box],
@@ -48,7 +59,7 @@ const nav = [
 const tabs = [
   ['overview', '状态概览'],
   ['mappings', '商品与地区映射'],
-  ['snapshots', '库存与报价'],
+  ['snapshots', '库存、报价与网段'],
   ['publish', '审核发布'],
   ['history', '同步历史'],
 ]
@@ -77,8 +88,27 @@ const syncTypeText = {
 const storedUser = computed(() => {
   return session.user || {}
 })
+const canManageCredential = computed(() => storedUser.value.role === 'super_admin')
 const mappedProducts = computed(() => supplierProducts.value.filter((item) => item.local_product_id).length)
 const mappedRegions = computed(() => supplierRegions.value.filter((item) => item.local_region_id).length)
+const countryOptions = computed(() => {
+  const countries = new Map()
+  for (const region of supplierRegions.value) {
+    if (region.country_code) countries.set(region.country_code, region.country_name || region.country_code)
+  }
+  return [...countries].map(([code, name]) => ({ code, name })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+})
+const quoteProductOptions = computed(() => [...new Set(quotes.value.map((item) => item.external_product_ref))].sort((a, b) => Number(a) - Number(b)))
+const quoteCountryOptions = computed(() => [...new Set(quotes.value.map((item) => item.country_code).filter(Boolean))].sort())
+const visibleQuotes = computed(() => quotes.value.filter((item) =>
+  (!quoteProductFilter.value || item.external_product_ref === quoteProductFilter.value)
+  && (!quoteCountryFilter.value || item.country_code === quoteCountryFilter.value)))
+const localSalePrice = (quote) => {
+  const supplierProduct = supplierProducts.value.find((item) => item.id === quote.supplier_product_id)
+  const product = localProducts.value.find((item) => item.id === supplierProduct?.local_product_id)
+  return product?.price != null ? `¥${Number(product.price).toFixed(2)}` : '未映射'
+}
+const selectedSegmentRecord = computed(() => inventoryCheckResult.value?.segments?.find((item) => item.cidr === selectedSegment.value))
 const currentState = (value) => stateMeta[value] || { label: value || '未知', tone: 'muted' }
 const dateTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
 const money = (value) => value == null ? '—' : `¥${Number(value).toFixed(4)}`
@@ -116,12 +146,22 @@ async function load() {
       overview.value, supplierProducts.value, supplierRegions.value, inventory.value, quotes.value,
       rules.value, syncRuns.value, localProducts.value, localRegions.value, publications.value,
     ] = responses.map((response) => response.data)
+    if (countryOptions.value.length && !countryOptions.value.some((item) => item.code === inventoryCountry.value)) {
+      inventoryCountry.value = countryOptions.value[0].code
+    }
   } catch (requestError) {
     error.value = errorText(requestError, '资源池数据加载失败，请重试')
   } finally {
     loading.value = false
   }
 }
+
+watch([inventoryCountry, inventoryCheckQuantity], () => {
+  inventoryCheckResult.value = null
+  inventoryCheckError.value = ''
+  selectedSegment.value = ''
+  inventoryCheckAt.value = null
+})
 
 async function runDirectorySync() {
   busy.value = 'directory'
@@ -155,6 +195,94 @@ async function runInventorySync() {
   } finally {
     busy.value = ''
     await load()
+  }
+}
+
+async function runInventoryCheck() {
+  const country = inventoryCountry.value.trim().toUpperCase()
+  if (!/^[A-Z]{2}$/.test(country)) {
+    inventoryCheckError.value = '请选择已同步的国家'
+    return
+  }
+  if (!Number.isInteger(inventoryCheckQuantity.value) || inventoryCheckQuantity.value < 1 || inventoryCheckQuantity.value > 300) {
+    inventoryCheckError.value = '数量需在 1 到 300 之间'
+    return
+  }
+  busy.value = 'inventory-check'
+  inventoryCheckError.value = ''
+  inventoryCheckResult.value = null
+  selectedSegment.value = ''
+  inventoryCheckAt.value = null
+  try {
+    const { data } = await checkSupplierInventory({
+      product_type_id: 2,
+      quantity: inventoryCheckQuantity.value,
+      country_code: country,
+    })
+    inventoryCheckResult.value = data
+    inventoryCheckAt.value = new Date()
+    selectedSegment.value = ''
+    notify(data.segments?.length ? `已读取 ${data.segments.length} 个候选网段` : '官方未返回候选网段')
+  } catch (requestError) {
+    inventoryCheckError.value = errorText(requestError, '网段查询失败，请检查 Key 与同步历史')
+  } finally {
+    busy.value = ''
+    await load()
+  }
+}
+
+async function copyApiRebuildCommand() {
+  try {
+    await navigator.clipboard.writeText(apiRebuildCommand)
+    notify('API 容器重建命令已复制')
+  } catch {
+    error.value = '浏览器未允许剪贴板访问，请按页面显示的命令手动复制'
+  }
+}
+
+async function copyEncryptionCommand() {
+  try {
+    await navigator.clipboard.writeText('openssl rand -hex 32')
+    notify('加密密钥生成命令已复制')
+  } catch {
+    error.value = '浏览器未允许剪贴板访问，请手动选择命令复制'
+  }
+}
+
+async function submitSupplierCredential() {
+  const value = credentialDraft.value.trim()
+  if (!value) {
+    error.value = '请输入供应商 API Key'
+    return
+  }
+  credentialBusy.value = true
+  error.value = ''
+  try {
+    await saveSupplierCredential(value)
+    credentialDraft.value = ''
+    credentialClearPending.value = false
+    notify('供应商凭据已加密保存；后端同步将使用新凭据')
+    await load()
+  } catch (requestError) {
+    error.value = errorText(requestError, '凭据保存失败，请检查加密配置后重试')
+  } finally {
+    credentialBusy.value = false
+  }
+}
+
+async function removeSupplierCredential() {
+  credentialBusy.value = true
+  error.value = ''
+  try {
+    await deleteSupplierCredential()
+    credentialDraft.value = ''
+    credentialClearPending.value = false
+    notify('后台保存的凭据已清除')
+    await load()
+  } catch (requestError) {
+    error.value = errorText(requestError, '凭据清除失败')
+  } finally {
+    credentialBusy.value = false
   }
 }
 
@@ -289,9 +417,32 @@ onMounted(load)
         <section v-else-if="error && !overview" class="workspace-state error-state"><AlertTriangle :size="30" /><h2>资源池数据暂时无法显示</h2><p>{{ error }}</p><button class="outline-action" @click="load"><RefreshCw :size="15" />重新加载</button></section>
         <template v-else-if="overview">
           <div v-if="error" class="workspace-alert"><span>{{ error }}</span><button @click="error = ''">关闭</button></div>
-          <div v-if="!overview.supplier.api_key_configured" class="supplier-config-warning">
-            <KeyRound :size="18" /><span><b>供应商 API Key 未配置</b><small>请由运维通过环境变量 GLOBAL_PROXY_API_KEY 注入。页面不会生成演示数据，同步操作将安全失败。</small></span>
-          </div>
+          <section class="supplier-key-panel" :data-ready="overview.supplier.api_key_configured">
+            <div class="key-status-line">
+              <KeyRound :size="18" />
+              <span><b>{{ overview.supplier.api_key_configured ? '供应商 API Key 已配置' : '供应商 API Key 未配置' }}</b><small>{{ overview.supplier.credential_source === 'admin' ? '凭据由后台录入并以密文保存，页面不会回显 Key。' : overview.supplier.credential_source === 'environment' ? '当前使用服务器环境变量中的凭据；超级管理员可录入后台密文凭据覆盖。' : '请由超级管理员在此录入，或由运维通过服务器环境变量配置；页面不会生成演示数据。' }}</small></span>
+            </div>
+            <div v-if="!overview.supplier.credential_encryption_ready" class="credential-config-error" role="alert">后台密文保存未启用。请运维先配置 SUPPLIER_SECRET_ENCRYPTION_KEY 并重启 API 服务；不要在未配置加密密钥时录入供应商 Key。</div>
+            <form v-else-if="canManageCredential" class="credential-form" @submit.prevent="submitSupplierCredential">
+              <label for="supplier-api-key">{{ overview.supplier.credential_source === 'admin' ? '替换供应商 API Key' : '供应商 API Key' }}</label>
+              <div class="credential-input-row"><input id="supplier-api-key" v-model="credentialDraft" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" maxlength="4096" :disabled="credentialBusy" :placeholder="overview.supplier.credential_source === 'admin' ? '留空表示不修改当前凭据' : '仅提交到后端加密保存'" /><button class="primary-action" type="submit" :disabled="credentialBusy || !credentialDraft.trim()">{{ credentialBusy ? '保存中…' : '加密保存 Key' }}</button></div>
+              <small>仅超级管理员可更新。提交后输入框会清空，Key 不会写入明文数据库、审计或页面回显。</small>
+              <button v-if="overview.supplier.credential_source === 'admin' && !credentialClearPending" class="credential-clear" type="button" :disabled="credentialBusy" @click="credentialClearPending = true">清除后台凭据</button>
+              <div v-if="credentialClearPending" class="credential-clear-confirm"><span>清除后会回退到服务器环境配置；若环境 Key 为空，供应商查询将停止。</span><button class="credential-clear" type="button" :disabled="credentialBusy" @click="credentialClearPending = false">保留凭据</button><button class="credential-clear-danger" type="button" :disabled="credentialBusy" @click="removeSupplierCredential">{{ credentialBusy ? '处理中…' : '确认清除' }}</button></div>
+            </form>
+            <p v-else class="credential-readonly">凭据仅允许超级管理员录入或替换；当前账号可以查看同步状态和执行获准的只读查询。</p>
+            <details class="key-setup">
+              <summary>查看服务器加密配置与同步步骤</summary>
+              <ol>
+                <li>后台录入前，运维需在 <code>/opt/99ipxin/.env.production</code> 配置随机生成的 64 位十六进制 <code>SUPPLIER_SECRET_ENCRYPTION_KEY</code>，并备份该值；丢失或更换会导致已存 Key 无法解密。</li>
+                <li>保存环境文件并设置权限 <code>600</code>，然后仅重建 API 容器。供应商 API Key 可在上方直接录入，无需写进环境文件。</li>
+                <li>确认页面显示“供应商 API Key 已配置”，再点击“同步目录与报价”，并按国家同步库存或查询候选 IP 段。</li>
+              </ol>
+              <div class="key-command"><code>openssl rand -hex 32</code><button class="secondary-action" type="button" @click="copyEncryptionCommand"><Copy :size="14" />复制生成命令</button></div>
+              <code class="rebuild-command">{{ apiRebuildCommand }}</code><button class="secondary-action rebuild-copy" type="button" @click="copyApiRebuildCommand"><Copy :size="14" />复制 API 重建命令</button>
+              <small class="local-key-note">环境变量方式仍受支持：运维可将供应商 Key 放在 <code>GLOBAL_PROXY_API_KEY</code>。后台已保存的密文凭据优先于该环境值。</small>
+            </details>
+          </section>
           <div v-if="publicationWarning" class="supplier-config-warning"><AlertTriangle :size="18" /><span><b>供应商快照过期或同步异常</b><small>已发布商品保持现状；禁止新增发布。下架须由管理员确认。</small></span></div>
 
           <section class="supplier-summary" aria-label="资源池概览">
@@ -311,7 +462,7 @@ onMounted(load)
               <div class="section-heading"><div><h2>手动同步</h2><p>所有查询由管理员明确触发，不存在后台自动采购或自动同步。</p></div><span class="status-chip" :data-tone="currentState(batchState).tone">{{ batchState === 'idle' ? '等待操作' : currentState(batchState).label }}</span></div>
               <div class="sync-actions">
                 <button class="primary-action" :disabled="busy || !overview.supplier.api_key_configured" @click="runDirectorySync"><RefreshCw :size="15" :class="{ spinning: busy === 'directory' }" />{{ busy === 'directory' ? '同步执行中' : '同步目录与报价' }}</button>
-                <label><span>库存国家</span><input v-model="inventoryCountry" maxlength="2" placeholder="US" /></label>
+                <label><span>库存国家</span><select v-if="countryOptions.length" v-model="inventoryCountry"><option v-for="item in countryOptions" :key="item.code" :value="item.code">{{ item.name }} · {{ item.code }}</option></select><input v-else v-model="inventoryCountry" maxlength="2" placeholder="先同步国家列表" /></label>
                 <button class="secondary-action" :disabled="busy || !overview.supplier.api_key_configured" @click="runInventorySync"><PackageSearch :size="15" />{{ busy === 'inventory' ? '查询中' : '同步库存' }}</button>
               </div>
             </section>
@@ -359,6 +510,28 @@ onMounted(load)
           </template>
 
           <template v-else-if="activeTab === 'snapshots'">
+            <section class="supplier-section segment-check-section">
+              <div class="section-heading"><div><h2>实时 IP 段检测</h2><p>官方产品 2 按国家和数量返回候选 CIDR。检测不锁库存，也不会创建订单或触发采购。</p></div><small v-if="inventoryCheckAt">查询于 {{ dateTime(inventoryCheckAt) }}</small></div>
+              <div class="segment-query-controls">
+                <label>国家<select v-if="countryOptions.length" v-model="inventoryCountry" :disabled="!!busy"><option v-for="item in countryOptions" :key="item.code" :value="item.code">{{ item.name }} · {{ item.code }}</option></select><input v-else v-model="inventoryCountry" maxlength="2" placeholder="先同步国家列表" :disabled="!!busy" /></label>
+                <label>所需数量<input v-model.number="inventoryCheckQuantity" type="number" min="1" max="300" step="1" inputmode="numeric" :disabled="!!busy" /></label>
+                <button class="primary-action" :disabled="busy || !overview.supplier.api_key_configured" @click="runInventoryCheck"><PackageSearch :size="15" :class="{ spinning: busy === 'inventory-check' }" />{{ busy === 'inventory-check' ? '查询中' : '查询候选 IP 段' }}</button>
+              </div>
+              <p v-if="inventoryCheckError" class="segment-error" role="alert">{{ inventoryCheckError }}</p>
+              <div v-if="inventoryCheckResult" class="segment-results" aria-live="polite">
+                <div class="segment-result-summary"><b>{{ inventoryCheckResult.is_sufficient ? '当前数量检测充足' : '当前数量检测不足' }}</b><span>{{ inventoryCountry }} · {{ inventoryCheckQuantity }} 条 · {{ inventoryCheckResult.segments?.length || 0 }} 个 CIDR</span></div>
+                <div v-if="inventoryCheckResult.segments?.length" class="segment-list">
+                  <button v-for="segment in inventoryCheckResult.segments" :key="segment.cidr" type="button" class="segment-option" :class="{ selected: selectedSegment === segment.cidr, unavailable: !segment.is_sufficient }" :disabled="!segment.is_sufficient" @click="selectedSegment = segment.cidr">
+                    <span class="segment-radio"><Check v-if="selectedSegment === segment.cidr" :size="14" /></span>
+                    <span class="segment-address"><b>{{ segment.cidr }}</b><small>{{ segment.is_sufficient ? '本次检测满足所需数量' : '本次检测不满足所需数量' }}</small></span>
+                    <em class="status-chip" :data-tone="segment.is_sufficient ? 'healthy' : 'critical'">{{ segment.is_sufficient ? '可选' : '不足' }}</em>
+                  </button>
+                </div>
+                <p v-else class="supplier-empty">官方未返回候选网段，不会生成演示 CIDR。</p>
+                <p v-if="selectedSegmentRecord" class="segment-selection">已选择 {{ selectedSegmentRecord.cidr }}。选择仅供本次人工核对，刷新页面后清除，不会进入客户商品或订单。</p>
+              </div>
+            </section>
+
             <section class="supplier-section">
               <div class="section-heading"><div><h2>库存快照</h2><p>“实时可售”仅表示快照新鲜且供应商返回可用，不构成库存承诺。</p></div><span>{{ inventory.length }} 条</span></div>
               <div v-if="!inventory.length" class="supplier-empty">未同步库存，不展示推测数据</div>
@@ -366,9 +539,14 @@ onMounted(load)
             </section>
 
             <section class="supplier-section">
-              <div class="section-heading"><div><h2>供应商成本快照</h2><p>仅管理员可见。官网售价继续由玖玖IP商品目录控制。</p></div><span>{{ quotes.length }} 条</span></div>
+              <div class="section-heading"><div><h2>供应商成本快照</h2><p>仅管理员可见。官网售价继续由玖玖IP商品目录控制。</p></div><span>{{ visibleQuotes.length }} / {{ quotes.length }} 条</span></div>
+              <div v-if="quotes.length" class="quote-filters">
+                <label>供应商产品<select v-model="quoteProductFilter"><option value="">全部产品</option><option v-for="item in quoteProductOptions" :key="item" :value="item">产品 {{ item }}</option></select></label>
+                <label>国家<select v-model="quoteCountryFilter"><option value="">全部国家</option><option v-for="item in quoteCountryOptions" :key="item" :value="item">{{ item }}</option></select></label>
+              </div>
               <div v-if="!quotes.length" class="supplier-empty">未同步报价，不展示演示成本</div>
-              <div v-else class="data-table quote-table"><div class="data-head"><span>供应商产品</span><span>国家/周期</span><span>单位成本</span><span>总成本</span><span>数据状态</span><span>报价时间</span></div><div v-for="item in quotes" :key="item.id" class="data-row"><span>产品 {{ item.external_product_ref }}</span><span>{{ item.country_code || '通用' }} · {{ item.duration_days ? `${item.duration_days} 天` : '基础档' }}</span><span class="cost-value">{{ money(item.unit_cost) }} {{ item.currency }}</span><span class="cost-value">{{ money(item.total_cost) }}</span><span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em></span><span>{{ dateTime(item.quoted_at) }}</span></div></div>
+              <div v-else-if="!visibleQuotes.length" class="supplier-empty">当前筛选条件没有报价快照</div>
+              <div v-else class="data-table quote-table"><div class="data-head"><span>供应商产品</span><span>国家/周期</span><span>单位成本</span><span>总成本</span><span>当前官网售价</span><span>数据状态</span><span>报价时间</span></div><div v-for="item in visibleQuotes" :key="item.id" class="data-row"><span>产品 {{ item.external_product_ref }}</span><span>{{ item.country_code || '通用' }} · {{ item.duration_days ? `${item.duration_days} 天` : '基础档' }}</span><span class="cost-value">{{ money(item.unit_cost) }} {{ item.currency }}</span><span class="cost-value">{{ money(item.total_cost) }}</span><span>{{ localSalePrice(item) }}</span><span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em></span><span>{{ dateTime(item.quoted_at) }}</span></div></div>
             </section>
           </template>
 
@@ -411,4 +589,12 @@ onMounted(load)
 @media(max-width:768px){.supplier-header{height:82px}.supplier-header p{font-size:10px}.supplier-content{padding:15px}.procurement-lock{font-size:0}.supplier-summary{grid-template-columns:1fr 1fr}.supplier-tabs{overflow-x:auto}.supplier-tabs button{white-space:nowrap}.supplier-section{padding:14px}.section-heading{align-items:flex-start}.sync-actions{display:grid;grid-template-columns:1fr 90px}.sync-actions .primary-action{grid-column:1/-1}.sync-actions .secondary-action{align-self:end}.rule-fields{grid-template-columns:1fr}.rule-list>div{grid-template-columns:1fr 1fr}.supplier-loading{grid-template-columns:1fr 1fr}.supplier-loading span:nth-child(n+6){grid-column:span 2;height:180px}}
 @media(max-width:480px){.supplier-summary{grid-template-columns:1fr}.supplier-summary>div{border-right:0}.state-grid{grid-template-columns:1fr}.state-grid>div{border-right:0}.data-row,.product-mapping-table .data-row,.region-mapping-table .data-row,.inventory-table .data-row,.quote-table .data-row,.history-table .data-row{grid-template-columns:1fr}.sync-actions{grid-template-columns:1fr}.sync-actions label,.sync-actions input{width:100%}.sync-actions .primary-action{grid-column:auto}.rule-list>div{grid-template-columns:1fr}}
 .publish-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding-top:14px}.publish-fields label{display:grid;gap:5px;min-width:0;font-size:11px;color:#657973}.publish-fields select,.publish-fields input{width:100%;height:36px;min-width:0;padding:0 8px;border:1px solid #c8d6d2;border-radius:5px;background:#fff;color:#263b37}.publish-fields button{justify-self:start}.publication-list{display:grid;margin-top:14px}.publication-list>div{display:grid;grid-template-columns:minmax(0,2fr) minmax(90px,1fr) auto auto;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid #dce5e2;font-size:11px}.publication-list small{display:block;color:#82918c}.publication-list b{display:block}.publication-list .secondary-action{min-width:72px}@media(max-width:768px){.publish-fields{grid-template-columns:1fr}.publication-list>div{grid-template-columns:minmax(0,1fr) auto}.publication-list>div>:first-child{grid-column:1/-1}}
+.supplier-key-panel{margin-bottom:14px;padding:13px 14px;border:1px solid #d6e2dd;border-radius:6px;background:#f8fbf9;color:#315c52}.supplier-key-panel[data-ready="false"]{border-color:#e5c99e;background:#fff8eb;color:#79541f}.key-status-line{display:flex;align-items:flex-start;gap:10px}.key-status-line span{display:grid;gap:3px}.key-status-line b{font-size:12px}.key-status-line small,.local-key-note{font-size:10px;color:#6d817a}.supplier-key-panel[data-ready="false"] .key-status-line small{color:#8d6b39}.key-setup{margin:9px 0 0 28px;font-size:11px;color:#445d56}.key-setup summary{width:max-content;max-width:100%;cursor:pointer;font-weight:700;text-decoration:underline;text-underline-offset:3px}.key-setup ol{display:grid;gap:7px;padding-left:18px;line-height:1.65}.key-setup code{padding:2px 4px;border-radius:3px;background:#e9f0ed;color:#315c52;overflow-wrap:anywhere}.key-command{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 10px;border:1px solid #d7e1dd;border-radius:5px;background:#fff}.key-command code{font-size:10px}.key-command .secondary-action{flex:none}.segment-query-controls{display:grid;grid-template-columns:minmax(180px,1fr) minmax(130px,.5fr) auto;align-items:end;gap:10px;padding-top:14px}.segment-query-controls label,.quote-filters label{display:grid;gap:5px;font-size:10px;color:#657973}.segment-query-controls select,.segment-query-controls input,.quote-filters select{width:100%;height:36px;min-width:0;padding:0 9px;border:1px solid #c8d6d2;border-radius:5px;background:#fff;color:#263b37;font-size:11px}.segment-query-controls select:focus,.segment-query-controls input:focus,.quote-filters select:focus,.sync-actions select:focus,.sync-actions input:focus{outline:2px solid #4a9c8e;outline-offset:1px}.segment-error{margin:12px 0 0;padding:9px 10px;border:1px solid #ebc5bf;border-radius:5px;background:#fff3f1;color:#973d33;font-size:11px}.segment-results{margin-top:14px}.segment-result-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;background:#edf3f1;color:#315d54}.segment-result-summary b{font-size:12px}.segment-result-summary span{font-size:10px;color:#6b817a}.segment-list{display:grid;margin-top:5px}.segment-option{display:flex;align-items:center;gap:10px;min-height:52px;padding:8px 10px;border-bottom:1px solid #e0e8e5;text-align:left;background:transparent}.segment-option:hover:not(:disabled){background:#f1f7f4}.segment-option:focus-visible{outline:2px solid #2d8978;outline-offset:-2px}.segment-option:disabled{cursor:not-allowed;opacity:.62}.segment-option.selected{background:#eaf5f0}.segment-radio{width:18px;height:18px;flex:none;display:grid;place-items:center;border:1px solid #a9bdb6;border-radius:50%;color:#fff}.segment-option.selected .segment-radio{border-color:#267d70;background:#267d70}.segment-address{display:grid;gap:3px;min-width:0;margin-right:auto}.segment-address b{font-size:12px;font-variant-numeric:tabular-nums}.segment-address small{font-size:10px;color:#71847e}.segment-option em{flex:none;font-style:normal}.segment-selection{margin:10px 0 0;color:#276c5b;font-size:11px}.quote-filters{display:grid;grid-template-columns:minmax(150px,220px) minmax(150px,220px);gap:10px;padding-top:13px}.sync-actions select{width:180px;height:36px;border:1px solid #c8d6d2;border-radius:5px;background:#fff;padding:0 8px;color:#263b37;font-size:11px}
+@media(max-width:768px){.key-setup{margin-left:0}.key-command{align-items:flex-start;flex-direction:column}.key-command code{width:100%}.segment-query-controls{grid-template-columns:1fr 1fr}.segment-query-controls .primary-action{grid-column:1/-1}.segment-result-summary{align-items:flex-start;flex-direction:column}.quote-filters{grid-template-columns:1fr}}
+@media(max-width:480px){.segment-query-controls{grid-template-columns:1fr}.segment-query-controls .primary-action{grid-column:auto}.segment-option{align-items:flex-start}.segment-option em{margin-left:auto}}
+.quote-table .data-head,.quote-table .data-row{grid-template-columns:.7fr .95fr .8fr .8fr .8fr .65fr 1fr}
+@media(max-width:1200px){.quote-table .data-head,.quote-table .data-row{grid-template-columns:.7fr 1fr .8fr .85fr .65fr 1fr}.quote-table .data-head span:nth-child(4),.quote-table .data-row span:nth-child(4){display:none}}
+@media(prefers-reduced-motion:reduce){.spinning,.supplier-loading span{animation:none}}
+.credential-form{display:grid;gap:7px;margin:12px 0 0 28px}.credential-form>label{font-size:11px;font-weight:700;color:#405a53}.credential-input-row{display:flex;align-items:center;gap:8px}.credential-input-row input{flex:1;min-width:0;height:38px;padding:0 10px;border:1px solid #b9cbc4;border-radius:5px;background:#fff;color:#243b34;font-size:13px}.credential-input-row input:focus{outline:2px solid #4a9c8e;outline-offset:1px}.credential-input-row input:disabled{background:#eef2f0}.credential-form>small,.credential-readonly{font-size:10px;color:#6d817a}.credential-readonly{margin:10px 0 0 28px}.credential-clear{justify-self:start;padding:4px 0;color:#536b64;font-size:10px;text-decoration:underline;text-underline-offset:2px}.credential-clear-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:9px 10px;border:1px solid #e4c99e;border-radius:5px;background:#fff8eb;color:#765820;font-size:10px}.credential-clear-confirm span{flex:1 1 240px}.credential-clear-danger{padding:6px 9px;border-radius:4px;background:#9c3f36;color:#fff;font-size:10px}.credential-config-error{margin:10px 0 0 28px;padding:9px 10px;border:1px solid #e6b8b2;border-radius:5px;background:#fff2f0;color:#923c34;font-size:11px}.rebuild-command{display:block;margin-top:9px;padding:9px 10px;border:1px solid #d7e1dd;border-radius:5px;background:#fff;font-size:10px;overflow-wrap:anywhere}.rebuild-copy{margin-top:7px}
+@media(max-width:768px){.credential-form,.credential-readonly,.credential-config-error{margin-left:0}.credential-input-row{align-items:stretch;flex-direction:column}.credential-input-row .primary-action{width:100%}}
 </style>

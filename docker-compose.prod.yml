@@ -69,6 +69,7 @@ services:
     environment:
       <<: *api-environment
       GLOBAL_PROXY_API_KEY: ${GLOBAL_PROXY_API_KEY:-}
+      SUPPLIER_SECRET_ENCRYPTION_KEY: ${SUPPLIER_SECRET_ENCRYPTION_KEY:?必须配置供应商凭据加密密钥}
     networks:
       data:
       edge:

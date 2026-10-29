@@ -61,6 +61,9 @@ def verify(env_file: Path, allow_placeholders: bool = False) -> None:
     api_env = services["api"]["environment"]
     if "GLOBAL_PROXY_API_KEY" not in api_env:
         raise ValueError("供应商 API Key 必须仅注入后端 API")
+    encryption_key = api_env.get("SUPPLIER_SECRET_ENCRYPTION_KEY", "")
+    if len(encryption_key) != 64 or any(char not in "0123456789abcdefABCDEF" for char in encryption_key):
+        raise ValueError("后台供应商凭据加密密钥必须是 64 位十六进制字符串")
     if any("GLOBAL_PROXY_API_KEY" in services[name].get("environment", {})
            for name in ("postgres", "redis", "migrate", "web")):
         raise ValueError("供应商 API Key 不得注入数据库、迁移或前端服务")
@@ -75,7 +78,7 @@ def verify(env_file: Path, allow_placeholders: bool = False) -> None:
     if api_env["JWT_SECRET_KEY"] == api_env["SESSION_TOKEN_HASH_KEY"]:
         raise ValueError("JWT 与会话哈希密钥必须不同")
     if not allow_placeholders and any("REPLACE_WITH_" in value for value in (
-            api_env["DATABASE_URL"], api_env["JWT_SECRET_KEY"], api_env["SESSION_TOKEN_HASH_KEY"])):
+            api_env["DATABASE_URL"], api_env["JWT_SECRET_KEY"], api_env["SESSION_TOKEN_HASH_KEY"], encryption_key)):
         raise ValueError("环境文件仍包含占位密钥")
 
 

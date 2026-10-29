@@ -16,6 +16,7 @@ def production_settings(**overrides) -> dict:
         "environment": "production",
         "jwt_secret_key": VALID_SECRET,
         "session_token_hash_key": "Distinct_Refresh_Hash_Secret_2026_AbCdEfGh!",
+        "supplier_secret_encryption_key": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         "database_url": VALID_DATABASE_URL,
         "frontend_origin": VALID_FRONTEND_ORIGIN,
         "rate_limit_backend": "redis",
@@ -81,6 +82,12 @@ def test_valid_production_settings_and_postgresql_driver_can_load():
         assert engine.dialect.driver == "psycopg"
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("key", ["", "not-hex", "00" * 32, "11" * 31])
+def test_production_requires_high_entropy_supplier_encryption_key(key):
+    with pytest.raises(ValidationError, match="SUPPLIER_SECRET_ENCRYPTION_KEY"):
+        Settings(**production_settings(supplier_secret_encryption_key=key))
 
 
 @pytest.mark.parametrize(

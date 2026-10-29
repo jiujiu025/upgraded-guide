@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +16,10 @@ from app.models import (
 )
 from app.services.audit_service import write_audit
 from app.services.catalog_publication_service import PublicationError, publish_catalog, withdraw_catalog
+from app.services.supplier_credentials import (
+    SupplierCredentialError, clear_api_key, credential_encryption_ready, credential_source, has_configured_api_key,
+    resolve_api_key, save_api_key,
+)
 from app.services.supplier_service import (
     CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, INVENTORY_ENDPOINT, begin_sync_run,
     configure_manual_supply_rule, ensure_pool_one, finish_sync_run, map_supplier_product,
@@ -88,9 +92,12 @@ class CatalogPublishIn(BaseModel):
     price: float = Field(gt=0, allow_inf_nan=False)
 
 
-def get_global_proxy_adapter() -> Generator[GlobalProxyReadOnlyAdapter, None, None]:
+def get_global_proxy_adapter(db: Session = Depends(get_db)) -> Generator[GlobalProxyReadOnlyAdapter, None, None]:
     settings = get_settings()
-    key = settings.global_proxy_api_key.get_secret_value() if settings.global_proxy_api_key else None
+    try:
+        key = resolve_api_key(db)
+    except SupplierCredentialError as exc:
+        raise HTTPException(status_code=503, detail={"code": "SUPPLIER_CONFIGURATION_ERROR", "message": str(exc)}) from exc
     adapter = GlobalProxyReadOnlyAdapter(
         api_key=key,
         base_url=settings.global_proxy_base_url,
@@ -125,9 +132,57 @@ def serialize_model(record) -> dict:
     return {column.name: getattr(record, column.name) for column in record.__table__.columns}
 
 
-def api_key_configured() -> bool:
-    key = get_settings().global_proxy_api_key
-    return bool(key and key.get_secret_value())
+def api_key_configured(db: Session) -> bool:
+    return has_configured_api_key(db)
+
+
+@router.put("/credential")
+async def update_supplier_credential(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin")),
+):
+    if request.headers.get("content-length", "").isdigit() and int(request.headers["content-length"]) > 8192:
+        raise HTTPException(status_code=413, detail={"code": "SUPPLIER_CREDENTIAL_INVALID", "message": "凭据请求格式无效"})
+    try:
+        raw_body = await request.body()
+        if len(raw_body) > 8192:
+            raise ValueError
+        payload = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=422, detail={"code": "SUPPLIER_CREDENTIAL_INVALID", "message": "凭据请求格式无效"}) from None
+    if not isinstance(payload, dict) or set(payload) != {"api_key"} or not isinstance(payload["api_key"], str):
+        raise HTTPException(status_code=422, detail={"code": "SUPPLIER_CREDENTIAL_INVALID", "message": "凭据请求格式无效"})
+    value = payload["api_key"].strip()
+    if not value or len(value) > 4096:
+        raise HTTPException(status_code=422, detail={"code": "SUPPLIER_CREDENTIAL_INVALID", "message": "凭据长度无效"})
+    try:
+        save_api_key(db, user, value)
+        db.commit()
+    except SupplierCredentialError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail={"code": "SUPPLIER_CREDENTIAL_NOT_READY", "message": str(exc)}) from exc
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail={"code": "SUPPLIER_CREDENTIAL_SAVE_FAILED", "message": "凭据保存失败，请重试"}) from None
+    return {"configured": True, "source": "admin"}
+
+
+@router.delete("/credential")
+def delete_supplier_credential(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin")),
+):
+    try:
+        clear_api_key(db, user)
+        db.commit()
+    except SupplierCredentialError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "SUPPLIER_CREDENTIAL_NOT_FOUND", "message": str(exc)}) from exc
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail={"code": "SUPPLIER_CREDENTIAL_CLEAR_FAILED", "message": "凭据清除失败，请重试"}) from None
+    return {"configured": api_key_configured(db), "source": credential_source(db)}
 
 
 def fail_sync_run(db: Session, user: User, run_id: int, error_code: str, message: str) -> None:
@@ -181,7 +236,9 @@ def list_suppliers(db: Session = Depends(get_db), _: User = Depends(require_role
         "name": item.name,
         "status": item.status,
         "base_url": item.base_url,
-        "api_key_configured": api_key_configured(),
+        "api_key_configured": api_key_configured(db),
+        "credential_source": credential_source(db),
+        "credential_encryption_ready": credential_encryption_ready(),
         "auto_purchase_enabled": False,
     } for item in suppliers]
 
@@ -212,7 +269,9 @@ def supplier_overview(db: Session = Depends(get_db), _: User = Depends(require_r
             "name": supplier.name,
             "status": supplier.status,
             "base_url": supplier.base_url,
-            "api_key_configured": api_key_configured(),
+            "api_key_configured": api_key_configured(db),
+            "credential_source": credential_source(db),
+            "credential_encryption_ready": credential_encryption_ready(),
             "auto_purchase_enabled": False,
             "last_sync_at": recent_run.finished_at if recent_run else None,
             "last_sync_status": recent_run.status if recent_run else "not_synced",

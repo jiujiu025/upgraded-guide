@@ -16,7 +16,7 @@ from app.core.security import create_access_token, hash_password
 from app.db import get_db
 from app.main import app
 from app.models import (
-    AuditLog, CatalogPublication, Customer, Product, ProductSupplyRule, Region, SupplierInventorySnapshot, SupplierProduct, SupplierQuote,
+    AuditLog, CatalogPublication, Customer, Product, ProductSupplyRule, Region, Supplier, SupplierInventorySnapshot, SupplierProduct, SupplierQuote,
     SupplierRegion, SupplierSyncRun, User,
 )
 from app.models.base import Base, utcnow
@@ -233,8 +233,9 @@ def supplier_api():
     admin = User(username="supplier_admin", password_hash=hash_password("Admin_123456"), role="admin", display_name="供应商管理员")
     customer = User(username="supplier_customer", password_hash=hash_password("Customer_123456"), role="customer", display_name="客户")
     sales = User(username="supplier_sales", password_hash=hash_password("Sales_123456"), role="sales", display_name="销售")
+    super_admin = User(username="supplier_super_admin", password_hash=hash_password("Super_123456"), role="super_admin", display_name="超级管理员")
     region = Region(name="美国", country_code="US")
-    db.add_all([admin, customer, sales, region])
+    db.add_all([admin, customer, sales, super_admin, region])
     db.flush()
     product = Product(name="玖玖云美国线路", product_type="直播线路", price=199, billing_days=30, region_id=region.id)
     db.add(product)
@@ -254,10 +255,12 @@ def supplier_api():
     admin_session, _ = create_session(db, admin)
     customer_session, _ = create_session(db, customer)
     sales_session, _ = create_session(db, sales)
+    super_admin_session, _ = create_session(db, super_admin)
     db.commit()
     client.admin_token = create_access_token(admin.id, admin.role, admin_session.id, admin.auth_version)
     client.customer_token = create_access_token(customer.id, customer.role, customer_session.id, customer.auth_version)
     client.sales_token = create_access_token(sales.id, sales.role, sales_session.id, sales.auth_version)
+    client.super_admin_token = create_access_token(super_admin.id, super_admin.role, super_admin_session.id, super_admin.auth_version)
     client.product = product
     client.region = region
     yield client
@@ -600,3 +603,91 @@ def test_withdraw_restores_original_stock_and_customer_reads_internal_catalog(su
     assert withdrawn.status_code == 200, withdrawn.text
     restored = supplier_api.get("/api/public/products").json()[0]
     assert restored["price"] == 199 and restored["is_in_stock"] is False
+
+
+def test_supplier_credential_is_encrypted_super_admin_only_and_never_returned(supplier_api, monkeypatch):
+    from app.core.config import Settings
+    from app.api import supplier_routes
+    from app.services import supplier_credentials
+
+    master_key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+    settings = Settings(supplier_secret_encryption_key=master_key, _env_file=None)
+    monkeypatch.setattr(supplier_credentials, "get_settings", lambda: settings)
+    monkeypatch.setattr(supplier_routes, "get_settings", lambda: settings)
+    super_headers = auth(supplier_api.super_admin_token)
+    supplier_api.get("/api/admin/suppliers/overview", headers=super_headers)
+    api_key = "supplier-secret-never-return-or-log"
+
+    denied = supplier_api.put("/api/admin/suppliers/credential", json={"api_key": api_key}, headers=auth(supplier_api.admin_token))
+    assert denied.status_code == 403
+
+    saved = supplier_api.put("/api/admin/suppliers/credential", json={"api_key": api_key}, headers=super_headers)
+    assert saved.status_code == 200
+    assert saved.json() == {"configured": True, "source": "admin"}
+    supplier_api.db.expire_all()
+    supplier = supplier_api.db.scalar(select(Supplier))
+    assert supplier.encrypted_api_key != api_key
+    assert supplier_credentials.decrypt_api_key(supplier.encrypted_api_key) == api_key
+    assert supplier_credentials.resolve_api_key(supplier_api.db) == api_key
+
+    overview = supplier_api.get("/api/admin/suppliers/overview", headers=super_headers)
+    assert overview.status_code == 200
+    assert overview.json()["supplier"]["credential_source"] == "admin"
+    assert api_key not in overview.text and api_key not in saved.text
+    audit = supplier_api.db.scalar(select(AuditLog).where(AuditLog.resource_type == "supplier_credential"))
+    assert audit and api_key not in (audit.detail or "")
+
+    oversized_key = "sensitive-input-" + ("X" * 4096)
+    invalid = supplier_api.put("/api/admin/suppliers/credential", json={"api_key": oversized_key}, headers=super_headers)
+    assert invalid.status_code == 422
+    assert oversized_key not in invalid.text
+
+    replacement_key = "replacement-secret-value"
+    replaced = supplier_api.put("/api/admin/suppliers/credential", json={"api_key": replacement_key}, headers=super_headers)
+    assert replaced.status_code == 200
+    supplier_api.db.expire_all()
+    supplier = supplier_api.db.scalar(select(Supplier))
+    assert supplier_credentials.decrypt_api_key(supplier.encrypted_api_key) == replacement_key
+
+    cleared = supplier_api.delete("/api/admin/suppliers/credential", headers=super_headers)
+    assert cleared.status_code == 200
+    assert cleared.json() == {"configured": False, "source": "none"}
+    supplier_api.db.expire_all()
+    assert supplier_api.db.scalar(select(Supplier)).encrypted_api_key is None
+
+
+def test_supplier_credential_clear_falls_back_to_environment(supplier_api, monkeypatch):
+    from app.core.config import Settings
+    from app.api import supplier_routes
+    from app.services import supplier_credentials
+
+    settings = Settings(
+        supplier_secret_encryption_key="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        global_proxy_api_key="environment-only-secret",
+        _env_file=None,
+    )
+    monkeypatch.setattr(supplier_credentials, "get_settings", lambda: settings)
+    monkeypatch.setattr(supplier_routes, "get_settings", lambda: settings)
+    headers = auth(supplier_api.super_admin_token)
+    supplier_api.get("/api/admin/suppliers/overview", headers=headers)
+    saved = supplier_api.put("/api/admin/suppliers/credential", json={"api_key": "admin-secret-value"}, headers=headers)
+    assert saved.status_code == 200
+    response = supplier_api.delete("/api/admin/suppliers/credential", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"configured": True, "source": "environment"}
+    assert supplier_credentials.credential_source(supplier_api.db) == "environment"
+    assert supplier_credentials.resolve_api_key(supplier_api.db) == "environment-only-secret"
+
+
+def test_empty_environment_supplier_key_is_not_configured(supplier_api, monkeypatch):
+    from app.core.config import Settings
+    from app.api import supplier_routes
+    from app.services import supplier_credentials
+
+    settings = Settings(global_proxy_api_key="", _env_file=None)
+    monkeypatch.setattr(supplier_credentials, "get_settings", lambda: settings)
+    monkeypatch.setattr(supplier_routes, "get_settings", lambda: settings)
+    supplier_api.get("/api/admin/suppliers/overview", headers=auth(supplier_api.super_admin_token))
+    overview = supplier_api.get("/api/admin/suppliers/overview", headers=auth(supplier_api.super_admin_token))
+    assert overview.json()["supplier"]["api_key_configured"] is False
+    assert overview.json()["supplier"]["credential_source"] == "none"

@@ -203,6 +203,7 @@ class Supplier(TimestampMixin, Base):
     adapter_type: Mapped[str] = mapped_column(String(80))
     base_url: Mapped[str] = mapped_column(String(255))
     secret_ref: Mapped[str] = mapped_column(String(160))
+    encrypted_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="active", index=True)
     auto_purchase_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
