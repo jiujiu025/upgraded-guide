@@ -151,44 +151,40 @@ def upgrade() -> None:
     sales_users = connection.execute(sa.text(
         "SELECT id FROM users WHERE role = 'sales' AND is_active IS TRUE"
     )).all()
-    account_ids: dict[int, int] = {}
-    next_account_id = 1
+    customer_user_ids: set[int] = set()
     for row in customers:
         amount = Decimal(str(row.balance or 0)) * 100
         if amount != amount.to_integral_value() or amount < 0:
             raise RuntimeError("客户旧余额存在负数或不足整分金额；请先人工盘点修正，再执行财务迁移")
         user_id = int(row.user_id)
-        account_ids[user_id] = next_account_id
+        customer_user_ids.add(user_id)
         connection.execute(sa.text(
-            "INSERT INTO wallet_accounts (id, user_id, balance_cents, currency, created_at, updated_at) "
-            "VALUES (:id, :user_id, :balance, 'CNY', :created_at, :updated_at)"
-        ), {"id": next_account_id, "user_id": user_id, "balance": int(amount), "created_at": now, "updated_at": now})
-        next_account_id += 1
+            "INSERT INTO wallet_accounts (user_id, balance_cents, currency, created_at, updated_at) "
+            "VALUES (:user_id, :balance, 'CNY', :created_at, :updated_at)"
+        ), {"user_id": user_id, "balance": int(amount), "created_at": now, "updated_at": now})
     for row in sales_users:
         user_id = int(row.id)
-        if user_id in account_ids:
+        if user_id in customer_user_ids:
             continue
-        account_ids[user_id] = next_account_id
         connection.execute(sa.text(
-            "INSERT INTO wallet_accounts (id, user_id, balance_cents, currency, created_at, updated_at) "
-            "VALUES (:id, :user_id, 0, 'CNY', :created_at, :updated_at)"
-        ), {"id": next_account_id, "user_id": user_id, "created_at": now, "updated_at": now})
-        next_account_id += 1
+            "INSERT INTO wallet_accounts (user_id, balance_cents, currency, created_at, updated_at) "
+            "VALUES (:user_id, 0, 'CNY', :created_at, :updated_at)"
+        ), {"user_id": user_id, "created_at": now, "updated_at": now})
 
-    opening_id = 1
     for row in customers:
         amount = int(Decimal(str(row.balance or 0)) * 100)
         if amount == 0:
             continue
-        account_id = account_ids[int(row.user_id)]
+        account_id = connection.execute(sa.text(
+            "SELECT id FROM wallet_accounts WHERE user_id = :user_id"
+        ), {"user_id": int(row.user_id)}).scalar_one()
         connection.execute(sa.text(
-            "INSERT INTO wallet_transactions (id, wallet_account_id, transaction_type, amount_cents, "
+            "INSERT INTO wallet_transactions (wallet_account_id, transaction_type, amount_cents, "
             "balance_before_cents, balance_after_cents, idempotency_key, remark, created_at, updated_at) "
-            "VALUES (:id, :account_id, 'opening_balance', :amount, 0, :amount, :idem, :remark, :created_at, :updated_at)"
-        ), {"id": opening_id, "account_id": account_id, "amount": amount,
+            "VALUES (:account_id, 'opening_balance', :amount, 0, :amount, :idem, :remark, :created_at, :updated_at)"
+        ), {"account_id": account_id, "amount": amount,
             "idem": f"opening:{int(row.user_id)}", "remark": "旧客户余额迁移期初流水",
             "created_at": now, "updated_at": now})
-        opening_id += 1
 
     connection.execute(sa.text(
         "INSERT INTO payment_channel_configs (id, channel_types, min_amount_cents, max_amount_cents, online_enabled, created_at, updated_at) "
