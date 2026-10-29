@@ -1,3 +1,5 @@
+name: 99ipxin-acceptance
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -45,7 +47,7 @@ services:
         alembic downgrade base &&
         alembic upgrade head &&
         alembic check &&
-        python -m pytest -q -m "postgres or redis" tests/test_postgres_acceptance.py tests/test_security_hardening.py tests/test_redis_process_acceptance.py
+        python -m pytest -q -m "postgres or redis" tests/test_postgres_acceptance.py tests/test_bootstrap_admin.py tests/test_security_hardening.py tests/test_redis_process_acceptance.py
     depends_on:
       postgres:
         condition: service_healthy

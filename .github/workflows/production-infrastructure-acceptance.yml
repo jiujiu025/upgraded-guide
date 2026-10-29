@@ -27,8 +27,26 @@ jobs:
         run: python scripts/verify_production_images.py
       - name: Verify trusted test certificate chain and HTTPS
         run: python scripts/verify_acceptance_tls.py
+      - name: Prepare independent production-shaped stack
+        run: python scripts/prepare_production_acceptance_env.py
+      - name: Validate independent production Compose
+        run: python scripts/verify_production_compose.py
+      - name: Build and migrate fresh independent PostgreSQL
+        run: |
+          docker compose --env-file .env.production -f docker-compose.prod.yml build --pull api web
+          docker compose --env-file .env.production -f docker-compose.prod.yml up -d postgres redis
+          docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate
+          docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate alembic check
+      - name: Inspect independent production containers
+        run: |
+          docker compose --env-file .env.production -f docker-compose.prod.yml up -d api web
+          python scripts/verify_production_runtime.py
       - name: Always remove isolated infrastructure
         if: always()
         run: |
+          if [ -f .env.production ]; then
+            docker compose --env-file .env.production -f docker-compose.prod.yml down --remove-orphans --volumes
+            rm -f .env.production
+          fi
           docker compose -f docker-compose.acceptance.yml down --remove-orphans --volumes
           rm -rf .ci-tls
