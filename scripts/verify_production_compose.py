@@ -59,6 +59,11 @@ def verify(env_file: Path, allow_placeholders: bool = False) -> None:
             or services["api"]["networks"].keys() != {"data", "edge"}):
         raise ValueError("服务网络隔离配置不符")
     api_env = services["api"]["environment"]
+    if "GLOBAL_PROXY_API_KEY" not in api_env:
+        raise ValueError("供应商 API Key 必须仅注入后端 API")
+    if any("GLOBAL_PROXY_API_KEY" in services[name].get("environment", {})
+           for name in ("postgres", "redis", "migrate", "web")):
+        raise ValueError("供应商 API Key 不得注入数据库、迁移或前端服务")
     database_url = urlsplit(api_env["DATABASE_URL"])
     if (database_url.hostname != "postgres" or database_url.username != "ops_platform"
             or database_url.path != "/ops_platform" or unquote(database_url.password or "") != services["postgres"]["environment"]["POSTGRES_PASSWORD"]):
