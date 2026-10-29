@@ -62,6 +62,16 @@ docker compose --env-file .env.production -f docker-compose.prod.yml ps
 
 如果已有用户而没有超级管理员，不要清空用户表来绕过初始化限制；先做数据核查和人工恢复方案。
 
+### 忘记超级管理员密码
+
+通过 SSH 登录服务器后，在项目目录运行以下命令。它只重置指定的现有启用中超级管理员，不删除账号或业务数据；新密码由交互终端隐藏读取，所有已有登录会话会撤销，且下次登录必须修改密码。不得把密码放在命令行参数、环境变量、工单或聊天中。
+
+```sh
+docker compose --env-file .env.production -f docker-compose.prod.yml exec api python -m app.recover_super_admin
+```
+
+此命令只接受生产 PostgreSQL 和 TTY 交互输入，并写入审计记录；不要用 `app.seed`、直接 SQL 更新密码哈希或删除数据库来恢复账号。
+
 ## 宿主机 Nginx 与 Cloudflare
 
 只为 `1.ipip99.com` 准备独立站点配置，不编辑其他项目的 upstream、server block、证书路径或全局配置。若此域名已有 server block，应先核对归属，不能叠加冲突配置。下列片段由服务器管理员在确认现有 Nginx 布局后使用；这里不写入服务器。
