@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import BigInteger, String, case, cast, func, literal, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from app.api.deps import require_roles
@@ -11,7 +13,10 @@ from app.models import (
     AuditLog, Customer, CustomerLine, Order, PaymentOrder, PaymentRefund,
     Product, Region, User, WalletAccount, WalletTransaction, Node,
 )
+from app.core.security import hash_password
+from app.services.session_service import revoke_user_sessions
 from app.services.audit_service import write_audit
+from app.services.wallet_service import ensure_wallet
 
 
 router = APIRouter(prefix="/admin/customers", tags=["管理员客户管理"])
@@ -23,9 +28,87 @@ class CustomerUpdateIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     email: str | None = Field(default=None, min_length=3, max_length=160)
     phone: str | None = Field(default=None, max_length=40)
+    username: str | None = Field(default=None, min_length=3, max_length=80)
     status: str | None = Field(default=None, min_length=1, max_length=30)
     level: str | None = Field(default=None, min_length=1, max_length=20)
     sales_id: int | None = Field(default=None, gt=0)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", normalized):
+            raise ValueError("邮箱格式不正确")
+        return normalized
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{2,79}", normalized):
+            raise ValueError("用户名需为 3 至 80 位英文、数字、点、下划线或短横线")
+        return normalized
+
+
+class CustomerCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=10, max_length=128)
+    email: str | None = Field(default=None, max_length=160)
+    phone: str | None = Field(default=None, max_length=40)
+    sales_id: int | None = Field(default=None, gt=0)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("客户姓名不能为空")
+        return normalized
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{2,79}", normalized):
+            raise ValueError("用户名需为 3 至 80 位英文、数字、点、下划线或短横线")
+        return normalized
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", normalized):
+            raise ValueError("邮箱格式不正确")
+        return normalized
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        checks = (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]")
+        if not all(re.search(pattern, value) for pattern in checks) or len(value.encode("utf-8")) > 72:
+            raise ValueError("密码需至少 10 位并包含大小写字母、数字和特殊字符，UTF-8 长度不超过 72 字节")
+        return value
 
 
 def _customer_or_404(db: Session, customer_id: int) -> Customer:
@@ -143,6 +226,57 @@ def list_customer_sales_options(
 ):
     sales = db.scalars(select(User).where(User.role == "sales").order_by(User.display_name, User.id)).all()
     return [{"id": item.id, "display_name": item.display_name, "username": item.username, "is_active": item.is_active} for item in sales]
+
+
+@router.post("", status_code=201)
+def create_admin_customer(
+    payload: CustomerCreateIn,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_roles("super_admin", "admin")),
+):
+    if not payload.email and not payload.phone:
+        raise HTTPException(status_code=422, detail="邮箱和手机号至少填写一项")
+    if db.scalar(select(User.id).where(User.username == payload.username)):
+        raise HTTPException(status_code=409, detail="登录用户名已被使用")
+    if payload.sales_id is not None and not db.scalar(select(User.id).where(
+        User.id == payload.sales_id, User.role == "sales", User.is_active.is_(True),
+    )):
+        raise HTTPException(status_code=422, detail="请选择有效的在职销售账号")
+
+    account = User(
+        username=payload.username,
+        password_hash=hash_password(payload.password),
+        role="customer",
+        display_name=payload.name,
+        phone=payload.phone,
+        is_active=True,
+        must_change_password=False,
+    )
+    db.add(account)
+    try:
+        db.flush()
+        customer = Customer(
+            name=payload.name,
+            email=payload.email,
+            phone=payload.phone,
+            sales_id=payload.sales_id,
+            user_id=account.id,
+            status="潜在客户",
+            level="standard",
+            balance=0,
+        )
+        db.add(customer)
+        db.flush()
+        ensure_wallet(db, account.id)
+        write_audit(db, actor, "create_customer_account", "customer", customer.id,
+                    f"后台创建客户账号；登录名={account.username}")
+        db.commit()
+        return {"id": customer.id, "user_id": account.id, "name": customer.name,
+                "username": account.username, "email": customer.email, "phone": customer.phone,
+                "sales_id": customer.sales_id, "created_at": customer.created_at}
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="登录用户名已被使用") from exc
 
 
 @router.get("/{customer_id}")
@@ -360,9 +494,13 @@ def update_admin_customer(
 ):
     customer = _customer_or_404(db, customer_id)
     changes = payload.model_dump(exclude_unset=True)
-    for field in ("name", "email", "status", "level"):
+    for field in ("name", "status", "level"):
         if field in changes and changes[field] is None:
             raise HTTPException(status_code=422, detail=f"{field} 不能为空")
+    new_email = changes.get("email", customer.email)
+    new_phone = changes.get("phone", customer.phone)
+    if not new_email and not new_phone:
+        raise HTTPException(status_code=422, detail="邮箱和手机号至少保留一项")
     if "sales_id" in changes and changes["sales_id"] is not None and changes["sales_id"] != customer.sales_id:
         sales = db.scalar(select(User).where(
             User.id == changes["sales_id"], User.role == "sales", User.is_active.is_(True),
@@ -371,22 +509,38 @@ def update_admin_customer(
             raise HTTPException(status_code=422, detail="请选择有效的在职销售账号")
 
     changed_fields = []
+    account = db.get(User, customer.user_id) if customer.user_id else None
+    if "username" in changes:
+        if changes["username"] is None:
+            raise HTTPException(status_code=422, detail="登录用户名不能为空")
+        if not account:
+            raise HTTPException(status_code=409, detail="该客户尚未绑定登录账号")
+        new_username = changes.pop("username")
+        if new_username != account.username:
+            duplicate = db.scalar(select(User.id).where(User.username == new_username, User.id != account.id))
+            if duplicate:
+                raise HTTPException(status_code=409, detail="登录用户名已被使用")
+            account.username = new_username
+            revoke_user_sessions(db, account, "username_changed")
+            changed_fields.append("username")
     for field, value in changes.items():
         if getattr(customer, field) != value:
             setattr(customer, field, value)
             changed_fields.append(field)
-    if customer.user_id:
-        account = db.get(User, customer.user_id)
-        if account:
-            if "name" in changes and account.display_name != customer.name:
-                account.display_name = customer.name
-                changed_fields.append("account_display_name")
-            if "phone" in changes and account.phone != customer.phone:
-                account.phone = customer.phone
-                changed_fields.append("account_phone")
+    if account:
+        if "name" in changes and account.display_name != customer.name:
+            account.display_name = customer.name
+            changed_fields.append("account_display_name")
+        if "phone" in changes and account.phone != customer.phone:
+            account.phone = customer.phone
+            changed_fields.append("account_phone")
     if changed_fields:
         write_audit(db, actor, "update_customer", "customer", customer.id,
                     "修改字段=" + ",".join(sorted(set(changed_fields))))
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="客户资料与已有账号冲突") from exc
         db.refresh(customer)
     return get_admin_customer(customer.id, db, actor)

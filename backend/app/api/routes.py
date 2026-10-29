@@ -10,16 +10,17 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_user, require_roles
 from app.core.security import create_access_token, hash_password, verify_password
+from app.core.client_ip import get_client_ip
 from app.db import get_db
 from app.models import (
-    AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, Product, Region,
-    SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
+    AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, Product, Region, RetailPriceRule,
+    SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
 )
 from app.schemas.common import (
     AssignCustomerIn, CompleteRenewalIn, CreateSalesUserIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
     DeliverOrderIn, LineIn, LineOut, LoginIn, NotificationOut, OrderIn, RegisterIn,
     OrderOut, OrderPreviewIn, OrderPreviewOut, PasswordRecoveryIn, ProductOut, PublicProductOut,
-    RegionOut, RenewalIn, TokenOut, UserOut,
+    RegionOut, RenewalIn, TokenOut, UpdateSalesUserIn, UserOut,
     SecurityQuestionsUpdateIn,
 )
 from app.services.audit_service import write_audit
@@ -73,8 +74,7 @@ class AdminResourceOrderIn(BaseModel):
     idempotency_key: str = Field(min_length=36, max_length=64)
     resource_category: str
     quantity: int = Field(ge=1, le=300)
-    unit_price: float = Field(gt=0, allow_inf_nan=False)
-    billing_days: int | None = Field(default=None, gt=0)
+    billing_days: int = Field(ge=30, le=360)
     remark: str | None = Field(default=None, max_length=1000)
 
 
@@ -133,6 +133,19 @@ def visible_node_ids(db: Session, user: User):
     else:
         customer_ids = select(Customer.id).where(Customer.id == get_customer_profile(db, user).id)
     return select(CustomerLine.node_id).where(CustomerLine.customer_id.in_(customer_ids))
+
+
+def _record_sales_login(db: Session, user: User | None, request: Request, outcome: str, failure_reason: str | None = None) -> None:
+    if not user or user.role != "sales":
+        return
+    user_agent = request.headers.get("user-agent", "")
+    db.add(SalesLoginEvent(
+        user_id=user.id,
+        outcome=outcome,
+        source_ip=get_client_ip(request),
+        user_agent="".join(char for char in user_agent if char.isprintable())[:512] or None,
+        failure_reason=failure_reason,
+    ))
 
 
 def visible_incidents_query(db: Session, user: User):
@@ -222,6 +235,8 @@ def login(
     password_valid = verify_password(payload.password, user.password_hash if user else DUMMY_PASSWORD_HASH)
     is_locked = bool(user and user.locked_until and user.locked_until > now)
     if not user or not user.is_active or is_locked or not password_valid:
+        failure_reason = "account_disabled" if user and not user.is_active else "account_locked" if is_locked else "invalid_credentials"
+        _record_sales_login(db, user, request, "failed", failure_reason)
         if user and user.is_active and not is_locked:
             if user.locked_until and user.locked_until <= now:
                 user.failed_login_count = 0
@@ -229,12 +244,14 @@ def login(
             user.failed_login_count += 1
             if user.failed_login_count >= 5:
                 user.locked_until = now + timedelta(minutes=15)
+        if user:
             db.commit()
         raise HTTPException(status_code=401, detail=LOGIN_ERROR_DETAIL)
     user.failed_login_count = 0
     user.locked_until = None
     user.must_change_password = False
     session, raw = create_session(db, user)
+    _record_sales_login(db, user, request, "success")
     db.commit()
     _cookie(response, raw, session.expires_at)
     return _token_out(user, session)
@@ -836,6 +853,19 @@ def admin_order_center_options(
     ).order_by(SupplierRegion.country_name).limit(1000)).all()
     supplier_product_ids = {item.id for item in supplier_products}
     supplier_regions = [item for item in supplier_regions if item.supplier_product_id in supplier_product_ids]
+    retail_price_rows = db.scalars(select(RetailPriceRule).order_by(
+        RetailPriceRule.resource_category, RetailPriceRule.country_code, RetailPriceRule.billing_days,
+    )).all()
+    retail_prices: dict[tuple[str, str], dict] = {}
+    for item in retail_price_rows:
+        key = (item.resource_category, item.country_code)
+        entry = retail_prices.setdefault(key, {
+            "resource_category": item.resource_category,
+            "country_code": item.country_code,
+            "currency": item.currency,
+            "prices": {},
+        })
+        entry["prices"][str(item.billing_days)] = float(item.unit_price)
     segments = db.scalars(select(SupplierIpSegmentSnapshot).where(
         SupplierIpSegmentSnapshot.checked_at >= datetime.utcnow() - timedelta(minutes=settings.supplier_inventory_ttl_minutes),
         SupplierIpSegmentSnapshot.is_request_sufficient.is_(True),
@@ -862,6 +892,7 @@ def admin_order_center_options(
                               "country_code": item.country_code, "country_name": item.country_name,
                               "last_synced_at": item.last_synced_at}
                              for item in supplier_regions],
+        "retail_prices": list(retail_prices.values()),
         "segments": [{"id": item.id, "supplier_product_id": item.supplier_product_id,
                       "country_code": item.country_code, "cidr": item.cidr,
                       "requested_quantity": item.requested_quantity, "checked_at": item.checked_at}
@@ -962,7 +993,14 @@ def admin_create_resource_order(
             or quote.quoted_at < quote_floor or not quote.is_available
             or quote.duration_days not in (None, billing_days)):
         raise HTTPException(status_code=409, detail="报价快照已过期或与当前国家、周期不匹配，请重新同步报价")
-    unit_price = Decimal(str(payload.unit_price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    retail_rule = db.scalar(select(RetailPriceRule).where(
+        RetailPriceRule.resource_category == payload.resource_category,
+        RetailPriceRule.country_code == supplier_region.country_code,
+        RetailPriceRule.billing_days == billing_days,
+    ))
+    if not retail_rule:
+        raise HTTPException(status_code=409, detail="该产品分类、国家和周期暂无销售价，请勿手动估价")
+    unit_price = Decimal(retail_rule.unit_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     total = (unit_price * payload.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     cost_total = (Decimal(str(quote.unit_cost)) * payload.quantity).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     order = Order(
@@ -983,7 +1021,7 @@ def admin_create_resource_order(
         db.flush()
         notify_order_parties(db, customer, order, "资源池订单已创建", f"订单 {order.order_no} 已创建，当前待付款和人工采购审核；系统不会自动下单或开通线路。", "order")
         write_audit(db, user, "create", "order", order.id,
-                    f"来源=resource_pool; 分类={payload.resource_category}; 国家={supplier_region.country_code}; 数量={payload.quantity}; 售价={total}; 成本快照={cost_total}")
+                    f"来源=resource_pool; 分类={payload.resource_category}; 国家={supplier_region.country_code}; 周期={billing_days}; 数量={payload.quantity}; 售价来源={retail_rule.source_version}; 售价={total}; 成本快照={cost_total}")
         db.commit()
         db.refresh(order)
         return {**{column.name: getattr(order, column.name) for column in Order.__table__.columns},
@@ -1228,6 +1266,99 @@ def admin_create_sales_user(payload: CreateSalesUserIn, db: Session = Depends(ge
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="用户名已存在") from exc
+
+
+@router.get("/admin/sales-users")
+def admin_list_sales_users(
+    keyword: str | None = Query(default=None, max_length=120),
+    status: str | None = Query(default=None, pattern="^(active|disabled)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("super_admin")),
+):
+    query = select(User).where(User.role == "sales")
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        query = query.where((User.username.ilike(pattern)) | (User.display_name.ilike(pattern)) | (User.phone.ilike(pattern)))
+    if status == "active":
+        query = query.where(User.is_active.is_(True))
+    elif status == "disabled":
+        query = query.where(User.is_active.is_(False))
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    users = db.scalars(query.order_by(User.created_at.desc(), User.id.desc())
+                       .offset((page - 1) * page_size).limit(page_size)).all()
+    user_ids = [item.id for item in users]
+    customer_counts = dict(db.execute(
+        select(Customer.sales_id, func.count(Customer.id))
+        .where(Customer.sales_id.in_(user_ids), Customer.is_deleted.is_(False))
+        .group_by(Customer.sales_id)
+    ).all()) if user_ids else {}
+    last_logins = dict(db.execute(
+        select(SalesLoginEvent.user_id, func.max(SalesLoginEvent.created_at))
+        .where(SalesLoginEvent.user_id.in_(user_ids), SalesLoginEvent.outcome == "success")
+        .group_by(SalesLoginEvent.user_id)
+    ).all()) if user_ids else {}
+    return {
+        "items": [{
+            "id": item.id, "username": item.username, "display_name": item.display_name,
+            "phone": item.phone, "is_active": item.is_active, "created_at": item.created_at,
+            "customer_count": customer_counts.get(item.id, 0), "last_login_at": last_logins.get(item.id),
+            "locked_until": item.locked_until,
+        } for item in users],
+        "total": total, "page": page, "page_size": page_size,
+    }
+
+
+@router.patch("/admin/sales-users/{sales_id}")
+def admin_update_sales_user(sales_id: int, payload: UpdateSalesUserIn,
+                            db: Session = Depends(get_db), actor: User = Depends(require_roles("super_admin"))):
+    target = db.scalar(select(User).where(User.id == sales_id, User.role == "sales"))
+    if not target:
+        raise HTTPException(status_code=404, detail="销售账号不存在")
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="请至少修改一项资料")
+    if "display_name" in changes and changes["display_name"] is None:
+        raise HTTPException(status_code=422, detail="销售姓名不能为空")
+    for field, value in changes.items():
+        setattr(target, field, value)
+    write_audit(db, actor, "update_sales_profile", "user", target.id,
+                f"修改字段={','.join(changes.keys())}")
+    db.commit()
+    return {"id": target.id, "username": target.username, "display_name": target.display_name,
+            "phone": target.phone, "is_active": target.is_active}
+
+
+@router.get("/admin/sales-users/{sales_id}/login-logs")
+def admin_sales_login_logs(sales_id: int, limit: int = Query(default=50, ge=1, le=100),
+                           db: Session = Depends(get_db), _: User = Depends(require_roles("super_admin"))):
+    if not db.scalar(select(User.id).where(User.id == sales_id, User.role == "sales")):
+        raise HTTPException(status_code=404, detail="销售账号不存在")
+    events = db.scalars(select(SalesLoginEvent).where(SalesLoginEvent.user_id == sales_id)
+                        .order_by(SalesLoginEvent.created_at.desc(), SalesLoginEvent.id.desc()).limit(limit)).all()
+    return [{"id": item.id, "created_at": item.created_at, "outcome": item.outcome,
+             "source_ip": item.source_ip, "user_agent": item.user_agent,
+             "failure_reason": item.failure_reason} for item in events]
+
+
+@router.get("/admin/sales-users/{sales_id}/customers")
+def admin_sales_customers(sales_id: int, page: int = Query(default=1, ge=1),
+                          page_size: int = Query(default=25, ge=1, le=100),
+                          db: Session = Depends(get_db), _: User = Depends(require_roles("super_admin"))):
+    if not db.scalar(select(User.id).where(User.id == sales_id, User.role == "sales")):
+        raise HTTPException(status_code=404, detail="销售账号不存在")
+    filters = (Customer.sales_id == sales_id, Customer.is_deleted.is_(False))
+    total = db.scalar(select(func.count(Customer.id)).where(*filters)) or 0
+    rows = db.execute(select(Customer, User.username)
+                      .outerjoin(User, User.id == Customer.user_id)
+                      .where(*filters)
+                      .order_by(Customer.created_at.desc(), Customer.id.desc())
+                      .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [{"id": item.id, "name": item.name, "phone": item.phone,
+                        "email": item.email, "username": username, "status": item.status,
+                        "level": item.level, "created_at": item.created_at} for item, username in rows],
+            "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/admin/users/{user_id}/sessions")

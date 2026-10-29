@@ -7,6 +7,7 @@ from app.api.routes import router
 from app.api.inbox_routes import router as inbox_router
 from app.api.finance_routes import router as finance_router
 from app.api.customer_admin_routes import router as customer_admin_router
+from app.api.catalog_admin_routes import router as catalog_admin_router
 from app.api.supplier_routes import router as supplier_router
 from app.core.config import get_settings
 from app.core.security_headers import SecurityHeadersMiddleware
@@ -28,6 +29,7 @@ app.include_router(router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")
 app.include_router(finance_router, prefix="/api")
 app.include_router(customer_admin_router, prefix="/api")
+app.include_router(catalog_admin_router, prefix="/api")
 app.include_router(supplier_router, prefix="/api")
 
 

@@ -36,6 +36,16 @@ class AuthSession(TimestampMixin, Base):
     revoke_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
+class SalesLoginEvent(TimestampMixin, Base):
+    __tablename__ = "sales_login_events"
+    __table_args__ = (Index("ix_sales_login_events_user_created", "user_id", "created_at"),)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_ip: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 class AuthRefreshToken(TimestampMixin, Base):
     __tablename__ = "auth_refresh_tokens"
     session_id: Mapped[int] = mapped_column(ForeignKey("auth_sessions.id"), index=True)
@@ -47,7 +57,7 @@ class AuthRefreshToken(TimestampMixin, Base):
 class Customer(TimestampMixin, Base):
     __tablename__ = "customers"
     name: Mapped[str] = mapped_column(String(120), index=True)
-    email: Mapped[str] = mapped_column(String(160), index=True)
+    email: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="潜在客户", index=True)
     level: Mapped[str] = mapped_column(String(20), default="standard")
@@ -343,6 +353,21 @@ class SupplierIpSegmentSnapshot(TimestampMixin, Base):
     is_segment_sufficient: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_request_sufficient: Mapped[bool] = mapped_column(Boolean, nullable=False)
     checked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class RetailPriceRule(TimestampMixin, Base):
+    __tablename__ = "retail_price_rules"
+    __table_args__ = (
+        UniqueConstraint("resource_category", "country_code", "billing_days", name="uq_retail_price_category_country_days"),
+        CheckConstraint("billing_days >= 30", name="ck_retail_price_minimum_30_days"),
+        CheckConstraint("unit_price > 0", name="ck_retail_price_positive"),
+    )
+    resource_category: Mapped[str] = mapped_column(String(50), index=True)
+    country_code: Mapped[str] = mapped_column(String(10), index=True)
+    billing_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="CNY", nullable=False)
+    source_version: Mapped[str] = mapped_column(String(100), nullable=False)
 
 
 class WalletAccount(TimestampMixin, Base):

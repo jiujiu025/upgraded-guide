@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({
   getAdminCatalogProducts: vi.fn(), getAdminCatalogRegions: vi.fn(), getSupplierInventory: vi.fn(),
-  getSupplierOverview: vi.fn(), getSupplierProducts: vi.fn(), getSupplierQuotes: vi.fn(),
+  getSupplierOverview: vi.fn(), getSupplierProducts: vi.fn(), getSupplierQuotes: vi.fn(), getSupplierIpSegments: vi.fn(),
   getSupplierRegions: vi.fn(), getSupplierRules: vi.fn(), getSupplierSyncRuns: vi.fn(),
   getCatalogPublications: vi.fn(), publishCatalogSnapshot: vi.fn(), withdrawCatalogPublication: vi.fn(),
   mapSupplierProduct: vi.fn(), mapSupplierRegion: vi.fn(), saveSupplierRule: vi.fn(),
@@ -38,6 +38,7 @@ function setLoadData(overrides = {}) {
   api.getSupplierProducts.mockImplementation(() => response(overrides.products || []))
   api.getSupplierRegions.mockImplementation(() => response(overrides.regions || []))
   api.getSupplierInventory.mockImplementation(() => response(overrides.inventory || []))
+  api.getSupplierIpSegments.mockImplementation(() => response(overrides.ipSegments || []))
   api.getSupplierQuotes.mockImplementation(() => response(overrides.quotes || []))
   api.getSupplierRules.mockImplementation(() => response(overrides.rules || []))
   api.getSupplierSyncRuns.mockImplementation(() => response(overrides.runs || []))
@@ -112,7 +113,7 @@ describe('管理员资源池工作台', () => {
     await wrapper.find('.product-mapping-table select').setValue('7')
     await flushPromises()
 
-    expect(api.mapSupplierProduct).toHaveBeenCalledWith(8, 7)
+    expect(api.mapSupplierProduct).toHaveBeenCalledWith(8, 7, undefined)
   })
 
   it('供应商失败时告警并禁用发布，但仍可撤回已发布版本', async () => {

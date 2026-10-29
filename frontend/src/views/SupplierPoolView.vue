@@ -100,12 +100,50 @@ const categoryProducts = computed(() => supplierProducts.value.filter((item) => 
 const selectedInventoryProduct = computed(() => categoryProducts.value.find((item) => String(item.id) === String(selectedInventoryProductId.value)) || categoryProducts.value[0])
 const countryOptions = computed(() => {
   const countries = new Map()
+  const inventoryByCountry = new Map()
+  const segmentsByCountry = new Map()
+  const productId = selectedInventoryProduct.value?.id
   for (const region of supplierRegions.value) {
-    if (region.country_code && region.supplier_product_id === selectedInventoryProduct.value?.id && !region.city_name) {
+    if (region.country_code && region.supplier_product_id === productId && !region.city_name) {
       countries.set(region.country_code, region.country_name || region.country_code)
     }
   }
-  return [...countries].map(([code, name]) => ({ code, name })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+  for (const item of inventory.value) {
+    if (item.supplier_product_id !== productId || !item.country_code) continue
+    const current = inventoryByCountry.get(item.country_code) || { count: 0, latest: null }
+    current.count += 1
+    if (!current.latest || new Date(item.checked_at || 0) > new Date(current.latest.checked_at || 0)) current.latest = item
+    inventoryByCountry.set(item.country_code, current)
+  }
+  for (const item of ipSegments.value) {
+    if (item.supplier_product_id !== productId || !item.country_code) continue
+    segmentsByCountry.set(item.country_code, (segmentsByCountry.get(item.country_code) || 0) + 1)
+  }
+  return [...countries].map(([code, name]) => {
+    const countryInventory = inventoryByCountry.get(code)
+    const latestInventory = countryInventory?.latest
+    return {
+      code,
+      name,
+      segmentCount: segmentsByCountry.get(code) || 0,
+      inventoryCount: countryInventory?.count || 0,
+      inventoryState: latestInventory?.data_state || 'not_synced',
+      inventoryLabel: !latestInventory
+        ? '库存未查询'
+        : latestInventory.data_state === 'stale'
+          ? '库存数据已过期'
+          : latestInventory.data_state === 'query_failed'
+            ? '最近查询失败'
+            : latestInventory.data_state === 'syncing'
+              ? '正在同步'
+              : latestInventory.data_state === 'out_of_stock'
+                ? '无库存'
+                : latestInventory.availability === 'available'
+                  ? '有可用库存'
+                  : inventoryMeta[latestInventory.availability] || '已查询',
+      checkedAt: latestInventory?.checked_at,
+    }
+  }).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
 })
 const visibleIpSegments = computed(() => ipSegments.value.filter((item) =>
   item.resource_category === selectedResourceCategory.value
@@ -600,7 +638,15 @@ onMounted(load)
                 <button class="secondary-action" type="button" :disabled="!selectedInventoryProduct || !overview.supplier.api_key_configured || !!busy" @click="syncSelectedProductRegions"><RefreshCw :size="14" :class="{ spinning: busy === 'category-countries' }" />同步所选商品国家</button>
                 <span v-if="!categoryProducts.length" class="category-empty">该分类尚未映射供应商商品</span>
               </div>
-              <div v-if="countryOptions.length" class="country-grid"><button v-for="country in countryOptions" :key="country.code" type="button" :class="{ active: inventoryCountry === country.code }" @click="inventoryCountry = country.code"><b>{{ country.name }}</b><small>{{ country.code }}</small></button></div>
+              <div v-if="countryOptions.length" class="country-grid" role="group" aria-label="选择国家">
+                <button v-for="country in countryOptions" :key="country.code" type="button" :aria-pressed="inventoryCountry === country.code" :class="{ active: inventoryCountry === country.code }" @click="inventoryCountry = country.code">
+                  <span class="country-card-top"><span class="country-code">{{ country.code }}</span><Check v-if="inventoryCountry === country.code" :size="15" aria-hidden="true" /></span>
+                  <strong>{{ country.name }}</strong>
+                  <span class="country-card-status" :data-tone="currentState(country.inventoryState).tone"><i></i>{{ country.inventoryLabel }}</span>
+                  <span class="country-card-meta"><span>IP 段 <b>{{ country.segmentCount }}</b></span><span>库存记录 <b>{{ country.inventoryCount }}</b></span></span>
+                  <small v-if="country.checkedAt" class="country-card-time">更新于 {{ dateTime(country.checkedAt) }}</small>
+                </button>
+              </div>
               <div v-else class="supplier-empty">尚无此商品的国家快照。同步目录后，此处展示供应商实际返回的国家。</div>
             </section>
 
@@ -710,19 +756,28 @@ onMounted(load)
 .category-browser-controls label{display:grid;gap:5px;color:#657973;font-size:10px}
 .category-browser-controls select{width:100%;height:36px;padding:0 9px;border:1px solid #c8d6d2;border-radius:5px;background:#fff;color:#263b37;font-size:11px}
 .category-empty{grid-column:1/-1;padding:10px 12px;border-radius:5px;background:#f2f5f3;color:#71847c;font-size:10px}
-.country-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:7px}
-.country-grid button{min-height:50px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border:1px solid #dfe7e3;border-radius:5px;background:#fff;color:#334c40;text-align:left;transition:background .18s ease,border-color .18s ease,transform .18s ease}
-.country-grid button:hover{border-color:#78aa96;background:#f4faf6;transform:translateY(-1px)}
-.country-grid button.active{border-color:#358f71;background:#e8f5ee;color:#17644e}
-.country-grid b{font-size:11px}.country-grid small{color:#74877f;font-size:9px}
+.country-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;padding-top:5px}
+.country-grid button{min-width:0;min-height:154px;display:flex;flex-direction:column;align-items:stretch;gap:9px;padding:13px;border:1px solid #dce6e1;border-radius:7px;background:#fff;color:#263d35;text-align:left;box-shadow:0 1px 2px #213b2d0a;transition:background .18s ease,border-color .18s ease,box-shadow .18s ease,transform .18s ease}
+.country-grid button:hover{border-color:#79ad9b;background:#f8fcfa;box-shadow:0 5px 14px #21463712;transform:translateY(-2px)}
+.country-grid button:focus-visible{outline:2px solid #277f6a;outline-offset:2px}
+.country-grid button.active{border-color:#358f71;background:#edf7f1;box-shadow:inset 0 0 0 1px #358f7126,0 4px 12px #26755912;color:#155d49}
+.country-card-top{display:flex;align-items:center;justify-content:space-between;min-height:24px;color:#26806b}
+.country-code{display:grid;place-items:center;min-width:34px;height:24px;padding:0 7px;border:1px solid #d8e8e0;border-radius:4px;background:#f1f7f4;color:#526d62;font-size:10px;font-weight:800;letter-spacing:0;font-variant-numeric:tabular-nums}
+.country-grid strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:1.25}
+.country-card-status{display:flex;align-items:center;gap:6px;color:#75877f;font-size:10px}
+.country-card-status i{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:#9aa9a2}
+.country-card-status[data-tone="healthy"] i{background:#328d68}.country-card-status[data-tone="warning"] i{background:#d39a35}.country-card-status[data-tone="critical"] i{background:#ca6559}.country-card-status[data-tone="info"] i{background:#4c92a2}
+.country-card-meta{display:flex;justify-content:space-between;gap:8px;margin-top:auto;padding-top:8px;border-top:1px solid #e7eeea;color:#788981;font-size:9px}
+.country-card-meta b{margin-left:3px;color:#405b50;font-size:10px;font-variant-numeric:tabular-nums}
+.country-card-time{color:#89978f;font-size:9px;white-space:nowrap}
 .segment-snapshot-list{display:grid;border-top:1px solid #dfe7e3}
 .segment-snapshot-list>div{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:10px 2px;border-bottom:1px solid #e4ebe7}
 .segment-snapshot-list>div>span{display:grid;gap:3px;min-width:0}.segment-snapshot-list b{font-size:11px;font-variant-numeric:tabular-nums}.segment-snapshot-list small{color:#74867e;font-size:9px}
 .segment-snapshot-list .secondary-action{min-height:30px;padding:5px 8px;font-size:10px}
 .product-mapping-table .data-head,.product-mapping-table .data-row{grid-template-columns:1.2fr .55fr 1.1fr 1.25fr .8fr}
 @media(max-width:768px){.category-browser-controls{grid-template-columns:1fr}.category-browser-controls .secondary-action{width:100%}.segment-snapshot-list>div{grid-template-columns:minmax(0,1fr) auto}.segment-snapshot-list>div>.secondary-action{grid-column:1/-1}.supplier-shell .workspace-sidebar{position:fixed}.supplier-header{height:76px}.supplier-content{padding:18px}}
-@media(max-width:480px){.country-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.category-browser-controls select{width:100%}.supplier-content{padding:14px}}
-@media(prefers-reduced-motion:reduce){.spinning,.supplier-loading span{animation:none}}
+@media(max-width:480px){.country-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.country-grid button{min-height:148px;padding:11px}.country-grid strong{font-size:13px}.category-browser-controls select{width:100%}.supplier-content{padding:14px}}
+@media(prefers-reduced-motion:reduce){.spinning,.supplier-loading span{animation:none}.country-grid button{transition:none}.country-grid button:hover{transform:none}}
 .credential-form{display:grid;gap:7px;margin:12px 0 0 28px}.credential-form>label{font-size:11px;font-weight:700;color:#405a53}.credential-input-row{display:flex;align-items:center;gap:8px}.credential-input-row input{flex:1;min-width:0;height:38px;padding:0 10px;border:1px solid #b9cbc4;border-radius:5px;background:#fff;color:#243b34;font-size:13px}.credential-input-row input:focus{outline:2px solid #4a9c8e;outline-offset:1px}.credential-input-row input:disabled{background:#eef2f0}.credential-form>small,.credential-readonly{font-size:10px;color:#6d817a}.credential-readonly{margin:10px 0 0 28px}.credential-clear{justify-self:start;padding:4px 0;color:#536b64;font-size:10px;text-decoration:underline;text-underline-offset:2px}.credential-clear-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:9px 10px;border:1px solid #e4c99e;border-radius:5px;background:#fff8eb;color:#765820;font-size:10px}.credential-clear-confirm span{flex:1 1 240px}.credential-clear-danger{padding:6px 9px;border-radius:4px;background:#9c3f36;color:#fff;font-size:10px}.credential-config-error{margin:10px 0 0 28px;padding:9px 10px;border:1px solid #e6b8b2;border-radius:5px;background:#fff2f0;color:#923c34;font-size:11px}.rebuild-command{display:block;margin-top:9px;padding:9px 10px;border:1px solid #d7e1dd;border-radius:5px;background:#fff;font-size:10px;overflow-wrap:anywhere}.rebuild-copy{margin-top:7px}
 @media(max-width:768px){.credential-form,.credential-readonly,.credential-config-error{margin-left:0}.credential-input-row{align-items:stretch;flex-direction:column}.credential-input-row .primary-action{width:100%}}
 </style>

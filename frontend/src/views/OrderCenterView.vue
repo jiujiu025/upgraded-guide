@@ -16,7 +16,7 @@ const mobileNav = ref(false)
 const error = ref('')
 const feedback = ref('')
 const activeTab = ref('subscriptions')
-const options = ref({ customers: [], products: [], categories: [], supplier_products: [], supplier_regions: [], segments: [], quotes: [] })
+const options = ref({ customers: [], products: [], categories: [], supplier_products: [], supplier_regions: [], segments: [], quotes: [], retail_prices: [] })
 const orders = ref([])
 const subscriptions = ref([])
 const createAttempt = ref(null)
@@ -24,7 +24,7 @@ const filters = reactive({ customer_id: '', product_id: '', expires_from: '', ex
 const form = reactive({
   customer_id: '', resource_category: '', product_id: '', supplier_product_id: '', supplier_region_id: '',
   country_code: '', supplier_segment_snapshot_id: '', supplier_quote_id: '', quantity: 1,
-  unit_price: '', billing_days: '', remark: '',
+  billing_days: '', remark: '',
 })
 const user = computed(() => session.user || {})
 const nav = computed(() => getAdminNavigation(user.value.role))
@@ -34,7 +34,11 @@ const mappedSupplierProducts = computed(() => options.value.supplier_products.fi
 const selectedSupplierProduct = computed(() => options.value.supplier_products.find((item) => item.id === Number(form.supplier_product_id)))
 const countryOptions = computed(() => {
   const regions = options.value.supplier_regions.filter((item) => item.supplier_product_id === Number(form.supplier_product_id))
-  const unique = new Map(regions.map((item) => [item.country_code, item.country_name]))
+  const pricedCountries = new Set(options.value.retail_prices
+    .filter((item) => item.resource_category === form.resource_category)
+    .map((item) => item.country_code))
+  const unique = new Map(regions.filter((item) => pricedCountries.has(item.country_code))
+    .map((item) => [item.country_code, item.country_name]))
   return [...unique].map(([code, name]) => ({ code, name })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
 })
 const countryRegion = computed(() => options.value.supplier_regions.find((item) =>
@@ -48,7 +52,12 @@ const quoteOptions = computed(() => options.value.quotes.filter((item) =>
   && (!item.country_code || item.country_code === form.country_code)
   && (!item.duration_days || item.duration_days === Number(form.billing_days || selectedProduct.value?.billing_days))))
 const selectedQuote = computed(() => options.value.quotes.find((item) => item.id === Number(form.supplier_quote_id)))
-const retailTotal = computed(() => Number(form.unit_price || 0) * Number(form.quantity || 0))
+const selectedRetailPrice = computed(() => options.value.retail_prices.find((item) =>
+  item.resource_category === form.resource_category && item.country_code === form.country_code))
+const billingDayOptions = computed(() => Object.keys(selectedRetailPrice.value?.prices || {})
+  .map(Number).filter((days) => days >= 30).sort((a, b) => a - b))
+const saleUnitPrice = computed(() => selectedRetailPrice.value?.prices?.[String(form.billing_days)] ?? null)
+const retailTotal = computed(() => Number(saleUnitPrice.value || 0) * Number(form.quantity || 0))
 const costTotal = computed(() => Number(selectedQuote.value?.unit_cost || 0) * Number(form.quantity || 0))
 const pendingCount = computed(() => orders.value.filter((item) => ['pending_payment', 'pending_confirm'].includes(item.status)).length)
 
@@ -114,10 +123,13 @@ function resetDependentFields() {
   form.country_code = ''
   form.supplier_segment_snapshot_id = ''
   form.supplier_quote_id = ''
-  if (selectedProduct.value) {
-    form.billing_days = selectedProduct.value.billing_days
-    form.unit_price = selectedProduct.value.price
-  }
+  form.billing_days = ''
+}
+function selectDefaultBillingDays() {
+  const productDays = Number(selectedProduct.value?.billing_days)
+  form.billing_days = billingDayOptions.value.includes(productDays)
+    ? String(productDays)
+    : String(billingDayOptions.value[0] || '')
 }
 watch(() => [form.resource_category, form.product_id], resetDependentFields)
 watch(() => form.supplier_product_id, () => {
@@ -130,7 +142,9 @@ watch(() => form.country_code, () => {
   form.supplier_region_id = String(countryRegion.value?.id || '')
   form.supplier_segment_snapshot_id = ''
   form.supplier_quote_id = ''
+  selectDefaultBillingDays()
 })
+watch(billingDayOptions, selectDefaultBillingDays)
 watch(() => form.quantity, () => { form.supplier_segment_snapshot_id = '' })
 watch(() => quoteOptions.value, (items) => {
   if (!items.some((item) => item.id === Number(form.supplier_quote_id))) form.supplier_quote_id = ''
@@ -141,12 +155,12 @@ async function applyFilters() {
 }
 async function createOrder() {
   error.value = ''
-  if (!form.customer_id || !form.product_id || !form.supplier_product_id || !form.supplier_region_id || !form.supplier_segment_snapshot_id || !form.supplier_quote_id) {
-    error.value = '请先选好客户、产品、来源、国家、可用网段和有效报价'
+  if (!form.customer_id || !form.product_id || !form.supplier_product_id || !form.supplier_region_id || !form.supplier_segment_snapshot_id || !form.supplier_quote_id || !saleUnitPrice.value) {
+    error.value = '请先选好客户、产品、国家、有效周期、销售价、可用网段和成本报价'
     return
   }
-  if (!Number.isInteger(Number(form.quantity)) || Number(form.quantity) < 1 || Number(form.quantity) > 300 || Number(form.unit_price) <= 0) {
-    error.value = '数量需为 1 至 300 的整数，售价必须大于 0'
+  if (!Number.isInteger(Number(form.quantity)) || Number(form.quantity) < 1 || Number(form.quantity) > 300 || !billingDayOptions.value.includes(Number(form.billing_days))) {
+    error.value = '数量需为 1 至 300 的整数，周期必须选择已配置的 30 天以上价格档'
     return
   }
   saving.value = true
@@ -155,7 +169,7 @@ async function createOrder() {
       customer_id: Number(form.customer_id), product_id: Number(form.product_id),
       supplier_product_id: Number(form.supplier_product_id), supplier_region_id: Number(form.supplier_region_id),
       supplier_segment_snapshot_id: Number(form.supplier_segment_snapshot_id), supplier_quote_id: Number(form.supplier_quote_id),
-      resource_category: form.resource_category, quantity: Number(form.quantity), unit_price: Number(form.unit_price),
+      resource_category: form.resource_category, quantity: Number(form.quantity),
       billing_days: Number(form.billing_days || selectedProduct.value?.billing_days), remark: form.remark || null,
     }
     const fingerprint = JSON.stringify(payload)
@@ -240,11 +254,11 @@ onMounted(load)
                   <label><span>开通数量</span><input v-model.number="form.quantity" type="number" min="1" max="300" step="1" required /></label>
                   <label class="field-wide"><span>可选 IP 段</span><select v-model="form.supplier_segment_snapshot_id" required :disabled="!form.country_code"><option value="">选择新鲜且数量充足的快照</option><option v-for="item in segmentOptions" :key="item.id" :value="item.id">{{ item.cidr }} · 检测 {{ item.requested_quantity }} 条 · {{ formatDateTime(item.checked_at) }}</option></select><small class="field-hint">检测结果不是库存预留；正式采购前仍需人工复核供应商实时库存。</small></label>
                   <label class="field-wide"><span>成本报价快照</span><select v-model="form.supplier_quote_id" required :disabled="!form.country_code"><option value="">选择最新适用报价</option><option v-for="item in quoteOptions" :key="item.id" :value="item.id">{{ money(item.unit_cost, 4) }} / 条 · {{ item.duration_days || form.billing_days || selectedProduct?.billing_days }} 天 · {{ formatDateTime(item.quoted_at) }}</option></select></label>
-                  <label><span>周期（天）</span><input v-model.number="form.billing_days" type="number" min="1" required /></label>
-                  <label><span>客户售价 / 条</span><div class="money-input"><i>¥</i><input v-model.number="form.unit_price" type="number" min="0.01" step="0.01" required /></div></label>
+                  <label><span>周期</span><select v-model="form.billing_days" required :disabled="!billingDayOptions.length"><option value="">选择 30 天以上周期</option><option v-for="days in billingDayOptions" :key="days" :value="String(days)">{{ days }} 天</option></select></label>
+                  <label><span>客户售价 / 条</span><div class="money-input"><i>¥</i><input :value="saleUnitPrice ?? ''" type="text" readonly :placeholder="selectedRetailPrice ? '该周期暂无售价' : '选择国家后自动定价'" /></div></label>
                   <label class="field-wide"><span>订单备注</span><textarea v-model="form.remark" maxlength="1000" rows="3" placeholder="添加交付或客户要求，最多 1000 字"></textarea></label>
-                  <div class="price-summary field-wide"><div><span>成本快照合计</span><b>{{ selectedQuote ? money(costTotal, 4) : '待选择报价' }}</b></div><div><span>客户应付合计</span><b>{{ form.unit_price ? money(retailTotal) : '待填写售价' }}</b></div><small>以上金额仅作为订单快照，不会扣款，也不会调用供应商购买接口。</small></div>
-                  <button class="submit-order field-wide" type="submit" :disabled="saving || !options.customers.length || !segmentOptions.length || !quoteOptions.length"><Check v-if="!saving" :size="17" /><RefreshCw v-else :size="16" class="spin" />{{ saving ? '创建中…' : '创建待付款订单' }}</button>
+                  <div class="price-summary field-wide"><div><span>成本快照合计</span><b>{{ selectedQuote ? money(costTotal, 4) : '待选择报价' }}</b></div><div><span>客户应付合计</span><b>{{ saleUnitPrice ? money(retailTotal) : '待选择有效售价' }}</b></div><small>客户售价按后台价目自动匹配；成本来自供应商报价快照。创建订单不会扣款或调用供应商购买接口。</small></div>
+                  <button class="submit-order field-wide" type="submit" :disabled="saving || !options.customers.length || !segmentOptions.length || !quoteOptions.length || !billingDayOptions.length || !saleUnitPrice"><Check v-if="!saving" :size="17" /><RefreshCw v-else :size="16" class="spin" />{{ saving ? '创建中…' : '创建待付款订单' }}</button>
                 </form>
               </div>
               <aside class="order-side-panel">

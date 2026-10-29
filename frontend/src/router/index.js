@@ -8,6 +8,8 @@ import OrderCenterView from '../views/OrderCenterView.vue'
 import FinanceView from '../views/FinanceView.vue'
 import WalletView from '../views/WalletView.vue'
 import CustomerManagerView from '../views/CustomerManagerView.vue'
+import SalesManagementView from '../views/SalesManagementView.vue'
+import CatalogManagementView from '../views/CatalogManagementView.vue'
 import AdminLayout from '../layouts/AdminLayout.vue'
 import ChangePasswordView from '../views/ChangePasswordView.vue'
 import PasswordRecoveryView from '../views/PasswordRecoveryView.vue'
@@ -47,7 +49,8 @@ const routes = [
     meta: { auth: true, workspace: 'admin' },
     children: [
       { path: '', component: WorkspaceView, meta: { page: 'admin' } },
-      { path: 'sales-users', component: WorkspaceView, meta: { page: 'admin-sales-users' } },
+      { path: 'sales-management', component: SalesManagementView, meta: { page: 'admin-sales-management' } },
+      { path: 'sales-users', redirect: '/admin/sales-management' },
       { path: 'security', component: WorkspaceView, meta: { page: 'security-center' } },
       { path: 'health', component: HealthView, meta: { page: 'admin-health' } },
       { path: 'inbox', component: InboxView, meta: { page: 'admin-inbox' } },
@@ -56,6 +59,7 @@ const routes = [
       { path: 'finance', component: FinanceView, meta: { page: 'admin-finance' } },
       { path: 'customers', component: CustomerManagerView, meta: { page: 'admin-customers' } },
       { path: 'customers/:id', component: CustomerManagerView, meta: { page: 'admin-customers' } },
+      { path: 'catalog', component: CatalogManagementView, meta: { page: 'admin-catalog-management' } },
     ],
   },
   { path: '/:pathMatch(.*)*', component: AppView, meta: { section: '404' } },
@@ -82,7 +86,7 @@ router.beforeEach(async (to) => {
   if (to.path === '/change-password') return roleWorkspace(user.role) ? `/${roleWorkspace(user.role)}` : '/login'
   const allowedWorkspace = roleWorkspace(user.role)
   if (to.meta.workspace !== allowedWorkspace) return allowedWorkspace ? `/${allowedWorkspace}` : '/login'
-  if (to.path === '/admin/sales-users' && user.role !== 'super_admin') return '/admin'
+  if (to.path.startsWith('/admin/sales-management') && user.role !== 'super_admin') return '/admin'
   return true
 })
 

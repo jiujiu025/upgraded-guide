@@ -10,6 +10,8 @@ __pycache__
 *.sqlite
 *.sqlite3
 data/
+!app/data/
+!app/data/retail_price_seed.py
 tests/
 coverage.xml
 .coverage

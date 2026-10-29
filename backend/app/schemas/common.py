@@ -110,6 +110,28 @@ class CreateSalesUserIn(BaseModel):
         return value
 
 
+class UpdateSalesUserIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    phone: str | None = Field(default=None, max_length=40)
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("销售姓名不能为空")
+        return normalized
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
 SECURITY_QUESTION_IDS = {
     "childhood_friend", "birth_city", "first_school", "favorite_teacher",
     "childhood_nickname", "first_job", "favorite_book", "favorite_movie",
@@ -213,6 +235,7 @@ class CustomerIn(BaseModel):
 class CustomerOut(CustomerIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    email: str | None = None
     balance: float
 
 

@@ -4,10 +4,10 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Activity, ArrowLeft, ArrowDownToLine, BadgeCheck, ChevronLeft, ChevronRight,
-  CircleDollarSign, ClipboardList, CreditCard, FileClock, LogOut, Menu,
+  Check, CircleDollarSign, ClipboardList, Copy, CreditCard, FileClock, KeyRound, LogOut, Menu,
   MessageSquare, Package, Pencil, RefreshCw, Search, ShieldCheck, UserPlus, UserRound, Users, X,
 } from 'lucide-vue-next'
-import { getAdminCustomer, getAdminCustomerRecords, getAdminCustomers, getAdminSalesOptions, createOfflineRecharge, updateAdminCustomer, logout as endSession } from '../api'
+import { getAdminCustomer, getAdminCustomerRecords, getAdminCustomers, getAdminSalesOptions, createAdminCustomer, createOfflineRecharge, resetAdminUserPassword, updateAdminCustomer, logout as endSession } from '../api'
 import { session } from '../api/session'
 import { getAdminNavigation } from '../navigation/adminNavigation'
 
@@ -22,6 +22,11 @@ let listRequestId = 0
 let detailRequestId = 0
 const error = ref('')
 const notice = ref('')
+const creating = ref(false)
+const createForm = reactive({ name: '', username: '', password: '', email: '', phone: '', sales_id: '' })
+const passwordForm = reactive({ new_password: '', confirm_password: '' })
+const credentialReceipt = ref(null)
+const credentialCopied = ref(false)
 const customers = ref([])
 const total = ref(0)
 const salesOptions = ref([])
@@ -32,7 +37,7 @@ const editing = ref(false)
 const page = ref(1)
 const pageSize = 25
 const filters = reactive({ keyword: '', sales_id: '', status: '' })
-const editForm = reactive({ name: '', email: '', phone: '', status: '', level: '', sales_id: '' })
+const editForm = reactive({ name: '', username: '', email: '', phone: '', status: '', level: '', sales_id: '' })
 const lineFilters = reactive({ keyword: '', expiry: 'all' })
 const rechargeTarget = ref(null)
 const rechargeError = ref('')
@@ -60,9 +65,126 @@ const transactionType = (value) => ({
   commission: '佣金', adjustment: '余额调整',
 })[value] || value || '资金记录'
 const channelLabel = (value) => ({ wallet: '钱包', balance: '余额', online: '在线支付', offline: '线下', alipay: '支付宝', wxpay: '微信支付' })[value] || value || '—'
-const actionLabel = (value) => ({ update_customer: '编辑客户资料', assign_sales: '调整业务归属', offline_recharge: '线下充值', create: '创建记录', deliver: '交付线路', cancel: '取消订单', refund: '登记退款', reset_password: '重置密码', unlock_login: '解除登录锁定' })[value] || value || '管理操作'
+const actionLabel = (value) => ({ update_customer: '编辑客户资料', create_customer_account: '创建客户账号', assign_sales: '调整业务归属', offline_recharge: '线下充值', create: '创建记录', deliver: '交付线路', cancel: '取消订单', refund: '登记退款', reset_password: '重置密码', unlock_login: '解除登录锁定' })[value] || value || '管理操作'
 const paymentStatus = (value) => ({ paid: '已完成', completed: '已完成', pending: '待支付', failed: '失败', refunded: '已退款', manual_review: '待核查' })[value] || value || '—'
 const makeKey = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+
+function secureRandomIndex(max) {
+  if (!globalThis.crypto?.getRandomValues) throw new Error('当前浏览器不支持安全凭据生成')
+  const limit = Math.floor(256 / max) * max
+  const bytes = new Uint8Array(1)
+  do { globalThis.crypto.getRandomValues(bytes) } while (bytes[0] >= limit)
+  return bytes[0] % max
+}
+
+function randomCustomerUsername() {
+  const bytes = new Uint8Array(8)
+  if (!globalThis.crypto?.getRandomValues) throw new Error('当前浏览器不支持安全凭据生成')
+  globalThis.crypto.getRandomValues(bytes)
+  return `user${[...bytes].map((value) => value.toString(16).padStart(2, '0')).join('')}`
+}
+
+function randomCustomerPassword() {
+  const groups = ['ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghijkmnopqrstuvwxyz', '23456789', '!@#$%*_-']
+  const chars = groups.map((group) => group[secureRandomIndex(group.length)])
+  const all = groups.join('')
+  while (chars.length < 18) chars.push(all[secureRandomIndex(all.length)])
+  for (let index = chars.length - 1; index > 0; index -= 1) {
+    const swap = secureRandomIndex(index + 1)
+    ;[chars[index], chars[swap]] = [chars[swap], chars[index]]
+  }
+  return chars.join('')
+}
+
+function prepareCreate() {
+  creating.value = !creating.value
+  if (!creating.value) return
+  try {
+    Object.assign(createForm, { name: '', username: randomCustomerUsername(), password: randomCustomerPassword(), email: '', phone: '', sales_id: '' })
+  } catch (generationError) {
+    creating.value = false
+    error.value = generationError.message
+  }
+}
+
+function regenerateUsername() {
+  try { createForm.username = randomCustomerUsername() }
+  catch (generationError) { error.value = generationError.message }
+}
+
+function regeneratePassword() {
+  try { createForm.password = randomCustomerPassword() }
+  catch (generationError) { error.value = generationError.message }
+}
+
+async function copyCredentials() {
+  if (!credentialReceipt.value) return
+  const text = `用户名：${credentialReceipt.value.username}\n初始密码：${credentialReceipt.value.password}`
+  try {
+    await navigator.clipboard.writeText(text)
+    credentialCopied.value = true
+    showNotice('登录凭据已复制，请通过安全渠道交付')
+  } catch {
+    error.value = '浏览器未允许访问剪贴板，请手动复制凭据'
+  }
+}
+
+async function createCustomer() {
+  if (saving.value) return
+  if (!createForm.email.trim() && !createForm.phone.trim()) {
+    error.value = '邮箱和手机号至少填写一项'
+    return
+  }
+  saving.value = true
+  error.value = ''
+  try {
+    const { data } = await createAdminCustomer({
+      name: createForm.name.trim(), username: createForm.username.trim(), password: createForm.password,
+      email: createForm.email.trim() || null, phone: createForm.phone.trim() || null,
+      sales_id: createForm.sales_id ? Number(createForm.sales_id) : null,
+    })
+    credentialReceipt.value = { customerId: data.id, name: data.name, username: data.username, password: createForm.password }
+    credentialCopied.value = false
+    creating.value = false
+    await loadList()
+    showNotice('客户账号已创建。请复制并通过安全渠道交付初始密码。')
+  } catch (requestError) {
+    error.value = requestError.userMessage || '创建客户失败，请检查填写内容'
+  } finally {
+    saving.value = false
+  }
+}
+
+async function resetCustomerPassword() {
+  const customer = detail.value?.customer
+  if (!customer?.user_id || saving.value) return
+  if (passwordForm.new_password !== passwordForm.confirm_password) {
+    error.value = '两次输入的新密码不一致'
+    return
+  }
+  saving.value = true
+  error.value = ''
+  try {
+    await resetAdminUserPassword(customer.user_id, { new_password: passwordForm.new_password, confirm: true })
+    credentialReceipt.value = { customerId: customer.id, name: customer.name, username: customer.username, password: passwordForm.new_password }
+    credentialCopied.value = false
+    Object.assign(passwordForm, { new_password: '', confirm_password: '' })
+    showNotice('客户密码已重置，原有会话已撤销。请安全交付新密码。')
+  } catch (requestError) {
+    error.value = requestError.userMessage || '密码重置失败'
+  } finally {
+    saving.value = false
+  }
+}
+
+function preparePasswordReset() {
+  try {
+    passwordForm.new_password = randomCustomerPassword()
+    passwordForm.confirm_password = passwordForm.new_password
+  } catch (generationError) {
+    error.value = generationError.message
+  }
+}
 
 function showNotice(message) {
   notice.value = message
@@ -122,7 +244,7 @@ async function loadDetail() {
     }
     const customer = detail.value.customer
     Object.assign(editForm, {
-      name: customer.name || '', email: customer.email || '', phone: customer.phone || '',
+      name: customer.name || '', username: customer.username || '', email: customer.email || '', phone: customer.phone || '',
       status: customer.status || '潜在客户', level: customer.level || 'standard',
       sales_id: customer.sales_id == null ? '' : String(customer.sales_id),
     })
@@ -216,7 +338,7 @@ async function saveCustomer() {
   let persisted = false
   try {
     const payload = {
-      name: editForm.name.trim(), email: editForm.email.trim(),
+      name: editForm.name.trim(), username: editForm.username.trim() || undefined, email: editForm.email.trim() || null,
       phone: editForm.phone.trim() || null, status: editForm.status.trim(),
       level: editForm.level.trim(), sales_id: editForm.sales_id ? Number(editForm.sales_id) : null,
     }
@@ -312,11 +434,28 @@ onMounted(async () => {
       <main class="customer-admin-content">
         <div v-if="notice" class="customer-notice" role="status"><BadgeCheck :size="16" />{{ notice }}</div>
         <div v-if="error" class="customer-error" role="alert"><span>{{ error }}</span><button aria-label="关闭提示" @click="error = ''"><X :size="16" /></button></div>
+        <section v-if="credentialReceipt" class="credential-receipt" aria-live="polite">
+          <div><KeyRound :size="18" /><span><b>{{ credentialReceipt.name }} 的登录凭据</b><small>请安全交付；关闭后页面不再保留密码。</small></span></div>
+          <dl><div><dt>用户名</dt><dd>{{ credentialReceipt.username }}</dd></div><div><dt>初始密码</dt><dd>{{ credentialReceipt.password }}</dd></div></dl>
+          <div class="receipt-actions"><button class="secondary-control" type="button" @click="copyCredentials"><Copy :size="14" />{{ credentialCopied ? '已复制' : '复制凭据' }}</button><button v-if="route.path === '/admin/customers'" class="text-control" type="button" @click="router.push(`/admin/customers/${credentialReceipt.customerId}`); credentialReceipt = null">打开客户资料</button><button class="icon-close" type="button" aria-label="关闭凭据" @click="credentialReceipt = null"><X :size="16" /></button></div>
+        </section>
 
         <template v-if="!detailId">
           <section class="customer-toolbar">
             <div><div class="customer-heading-row"><Users :size="19" /><h2>客户档案</h2><span class="count-label">{{ total }} 位客户</span></div><p>搜索客户、检查负责人和账户状态；余额变动会记录到财务账本。</p></div>
-            <button class="refresh-text" :disabled="loading" @click="load"><RefreshCw :size="15" />刷新列表</button>
+            <div class="toolbar-actions"><button class="primary-control" type="button" @click="prepareCreate"><UserPlus :size="15" />{{ creating ? '收起新建' : '新建客户' }}</button><button class="refresh-text" :disabled="loading" @click="load"><RefreshCw :size="15" />刷新列表</button></div>
+          </section>
+          <section v-if="creating" class="create-customer-panel">
+            <div class="detail-section-head"><div><h3>新建客户账号</h3><p>至少填写手机号或邮箱；自动生成的登录凭据只展示一次。</p></div><button class="text-control" type="button" @click="creating = false"><X :size="15" />关闭</button></div>
+            <form class="create-customer-form" @submit.prevent="createCustomer">
+              <label><span>客户姓名</span><input v-model="createForm.name" maxlength="120" autocomplete="name" required /></label>
+              <label><span>手机号</span><input v-model="createForm.phone" type="tel" maxlength="40" autocomplete="tel" :required="!createForm.email" /></label>
+              <label><span>邮箱</span><input v-model="createForm.email" type="email" maxlength="160" autocomplete="email" :required="!createForm.phone" /></label>
+              <label><span>业务归属</span><select v-model="createForm.sales_id"><option value="">暂不分配</option><option v-for="item in salesOptions.filter(option => option.is_active)" :key="item.id" :value="String(item.id)">{{ item.display_name }} · {{ item.username }}</option></select></label>
+              <label><span>登录用户名</span><div class="generated-field"><input v-model="createForm.username" minlength="3" maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" autocomplete="off" required /><button type="button" title="重新生成用户名" aria-label="重新生成用户名" @click="regenerateUsername"><RefreshCw :size="14" /></button></div></label>
+              <label><span>初始密码</span><div class="generated-field"><input v-model="createForm.password" type="text" minlength="10" maxlength="128" autocomplete="new-password" required /><button type="button" title="重新生成密码" aria-label="重新生成密码" @click="regeneratePassword"><RefreshCw :size="14" /></button></div><small>随机强密码；保存后请通过安全渠道交付</small></label>
+              <div class="form-actions"><button class="secondary-control" type="button" :disabled="saving" @click="creating = false">取消</button><button class="primary-control" type="submit" :disabled="saving"><UserPlus :size="15" />{{ saving ? '创建中…' : '创建客户账号' }}</button></div>
+            </form>
           </section>
           <form class="customer-filters" @submit.prevent="applyFilters">
             <label class="keyword-filter"><span>关键词</span><div><Search :size="16" /><input v-model="filters.keyword" maxlength="120" placeholder="姓名、手机号、邮箱或登录名" /><button type="submit">查询</button></div></label>
@@ -339,7 +478,7 @@ onMounted(async () => {
                 </tr></tbody>
               </table>
             </div>
-            <div v-else class="customer-empty"><Users :size="24" /><b>{{ filters.keyword || filters.sales_id || filters.status ? '没有匹配的客户' : '暂无客户档案' }}</b><span>{{ filters.keyword || filters.sales_id || filters.status ? '调整筛选条件后再试。' : '客户注册或由销售创建后会显示在这里。' }}</span></div>
+            <div v-else class="customer-empty"><Users :size="24" /><b>{{ filters.keyword || filters.sales_id || filters.status ? '没有匹配的客户' : '暂无客户档案' }}</b><span>{{ filters.keyword || filters.sales_id || filters.status ? '调整筛选条件后再试。' : '客户注册、销售创建或后台新建后会显示在这里。' }}</span></div>
             <footer v-if="!loading && total" class="table-footer"><span>第 {{ page }} / {{ totalPages }} 页 · 共 {{ total }} 条</span><div><button aria-label="上一页" :disabled="page <= 1" @click="changePage(page - 1)"><ChevronLeft :size="17" /></button><button aria-label="下一页" :disabled="page >= totalPages" @click="changePage(page + 1)"><ChevronRight :size="17" /></button></div></footer>
           </section>
         </template>
@@ -367,15 +506,20 @@ onMounted(async () => {
               <div class="detail-section-head"><div><h3>客户资料</h3><p>联系资料与销售归属</p></div><button class="text-control" @click="startEdit"><Pencil :size="14" />编辑</button></div>
               <form v-if="editing" class="edit-customer-form" @submit.prevent="saveCustomer">
                 <label><span>客户名称</span><input v-model="editForm.name" required maxlength="120" /></label>
-                <label><span>邮箱</span><input v-model="editForm.email" type="email" required maxlength="160" /></label>
-                <label><span>手机号</span><input v-model="editForm.phone" type="tel" maxlength="40" /></label>
+                <label v-if="detail.customer.user_id"><span>登录用户名</span><input v-model="editForm.username" minlength="3" maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" autocomplete="off" required /></label>
+                <label><span>邮箱</span><input v-model="editForm.email" type="email" maxlength="160" :required="!editForm.phone" /></label>
+                <label><span>手机号</span><input v-model="editForm.phone" type="tel" maxlength="40" :required="!editForm.email" /></label>
                 <label><span>客户状态</span><input v-model="editForm.status" list="customer-statuses" required maxlength="30" /><datalist id="customer-statuses"><option v-for="item in statuses" :key="item" :value="item" /></datalist></label>
                 <label><span>客户等级</span><select v-model="editForm.level"><option value="standard">标准客户</option><option value="vip">重点客户</option></select></label>
                 <label><span>业务归属</span><select v-model="editForm.sales_id"><option value="">未分配</option><option v-for="item in salesOptions.filter(option => option.is_active || option.id === detail.customer.sales_id)" :key="item.id" :value="String(item.id)">{{ item.display_name }} · {{ item.username }}</option></select></label>
-                <p class="form-note"><ShieldCheck :size="15" />姓名和手机号也会同步到客户登录账号；不会在此处修改密码或账号权限。</p>
+                <p class="form-note"><ShieldCheck :size="15" />邮箱和手机号至少保留一项。更改登录用户名会注销该客户的现有会话；密码请在下方重置。</p>
                 <div class="form-actions"><button class="secondary-control" type="button" :disabled="saving" @click="cancelEdit">取消</button><button class="primary-control" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存资料' }}</button></div>
               </form>
               <dl v-else class="customer-data-grid"><div><dt>客户名称</dt><dd>{{ detail.customer.name }}</dd></div><div><dt>登录账号</dt><dd>{{ detail.customer.username || '未绑定' }}</dd></div><div><dt>手机号</dt><dd>{{ detail.customer.phone || '—' }}</dd></div><div><dt>邮箱</dt><dd>{{ detail.customer.email || '—' }}</dd></div><div><dt>客户等级</dt><dd>{{ detail.customer.level === 'vip' ? '重点客户' : '标准客户' }}</dd></div><div><dt>业务归属</dt><dd>{{ detail.customer.sales_name || '未分配' }}</dd></div><div><dt>创建时间</dt><dd>{{ dateLabel(detail.customer.created_at) }}</dd></div><div><dt>最近更新</dt><dd>{{ dateLabel(detail.customer.updated_at) }}</dd></div></dl>
+              <div v-if="!editing && detail.customer.user_id" class="customer-password-reset">
+                <div class="password-reset-head"><span><KeyRound :size="16" /><b>重置登录密码</b></span><button class="text-control" type="button" @click="preparePasswordReset"><RefreshCw :size="14" />随机生成</button></div>
+                <form class="password-reset-form" @submit.prevent="resetCustomerPassword"><label><span>新密码</span><input v-model="passwordForm.new_password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required /></label><label><span>确认新密码</span><input v-model="passwordForm.confirm_password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required /></label><button class="secondary-control" type="submit" :disabled="saving">{{ saving ? '重置中…' : '重置密码' }}</button></form><small class="password-reset-note">密码只保存哈希；重置会撤销所有现有登录会话，系统不会保存明文供以后查看。</small>
+              </div>
             </section>
             <section v-else-if="activeTab === 'lines'" class="detail-panel">
               <div class="detail-section-head"><div><h3>订阅与线路</h3><p>只展示已经交付的客户线路</p></div><span>共 {{ recordTotal('lines') }} 条</span></div>
@@ -441,5 +585,9 @@ onMounted(async () => {
 @media(max-width:760px){.customer-admin-shell{grid-template-columns:minmax(0,1fr)}.customer-admin-sidebar{position:fixed;left:0;top:0;width:250px;transform:translateX(-102%);transition:transform .2s ease;box-shadow:8px 0 26px #10251c1c}.customer-admin-sidebar.open{transform:translateX(0)}.customer-admin-brand>button,.customer-admin-menu{display:grid;place-items:center}.customer-admin-menu{width:36px;height:36px;border:1px solid #dce5e0;border-radius:5px;color:#4b685a}.customer-admin-scrim{position:fixed;inset:0;z-index:19;display:block;background:#10231d66}.customer-admin-header{height:74px;padding:0 15px;gap:10px}.customer-admin-header h1{font-size:18px}.customer-admin-header p{font-size:10px}.customer-admin-content{padding:18px 14px 34px}.customer-toolbar{align-items:flex-start}.customer-toolbar p{max-width:44ch;line-height:1.6}.refresh-text{font-size:0}.refresh-text svg{width:18px;height:18px}.customer-filters{grid-template-columns:1fr 1fr;gap:10px;padding:13px}.keyword-filter{grid-column:1/-1}.filter-reset{grid-column:2;justify-self:end}.customer-table-wrap{overflow:visible}.customer-table-wrap table,.customer-table-wrap tbody,.customer-table-wrap tr,.customer-table-wrap td{display:block;width:100%}.customer-table-wrap thead{display:none}.customer-table-wrap tbody{display:grid;gap:0}.customer-table-wrap tr{position:relative;padding:13px 12px 12px;border-bottom:1px solid #e8eeea}.customer-table-wrap td{min-width:0!important;padding:4px 0;border:0}.customer-table-wrap td:first-child{padding-right:100px}.customer-table-wrap td:nth-child(2),.customer-table-wrap td:nth-child(3),.customer-table-wrap td:nth-child(4),.customer-table-wrap td:nth-child(5),.customer-table-wrap td:nth-child(6){display:inline-block;width:auto;margin:6px 12px 0 0;color:#63776d;font-size:10px}.customer-table-wrap td:nth-child(6){display:none}.customer-table-wrap .row-actions{position:absolute;right:9px;top:9px;display:flex;width:auto}.customer-name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.customer-profile-head{padding:14px;gap:10px;flex-wrap:wrap}.profile-avatar{width:41px;height:41px}.profile-identity{max-width:calc(100% - 60px)}.profile-identity h2{font-size:16px}.profile-identity p{font-size:9px;flex-wrap:wrap}.customer-profile-head>.customer-status{margin-left:auto}.profile-actions{width:100%;margin-left:0}.profile-actions button{flex:1}.customer-facts{grid-template-columns:1fr 1fr}.customer-facts>div{min-height:82px;padding:12px;border-bottom:1px solid #e6ece8}.customer-facts>div:nth-child(2){border-right:0}.customer-facts>div:nth-child(3),.customer-facts>div:nth-child(4){border-bottom:0}.customer-facts>div:nth-child(4){border-left:1px solid #e6ece8}.customer-tabs{margin-top:14px}.customer-tabs button{padding:0 10px;font-size:10px}.detail-section-head{padding:12px 14px}.customer-data-grid{grid-template-columns:1fr 1fr;padding:5px 14px;gap:0 14px}.customer-data-grid>div{min-height:61px}.edit-customer-form{grid-template-columns:1fr 1fr;padding:15px 14px;gap:12px}.form-note{align-items:flex-start;line-height:1.5}.detail-table-wrap table{min-width:760px}.detail-table-wrap{max-height:70vh}.audit-list{padding-right:14px;padding-left:14px}.customer-error{top:82px;left:12px;right:12px}.recharge-dialog{padding:21px 18px}.customer-admin-user{padding-top:14px}}
 @media(max-width:760px){.line-filter-bar{align-items:stretch;flex-wrap:wrap;padding:12px}.line-filter-bar label:first-child{flex:1}.line-filter-bar label:first-child select{min-width:0;width:100%}.line-filter-bar .line-search{flex-basis:100%;margin-left:0}.line-filter-bar input{min-width:0;width:100%}.line-filter-bar button{flex:none}}
 @media(max-width:420px){.customer-filters{grid-template-columns:1fr}.keyword-filter,.filter-reset{grid-column:auto}.filter-reset{justify-self:end}.customer-heading-row h2{font-size:16px}.count-label{font-size:9px}.customer-toolbar{gap:8px}.customer-toolbar p{font-size:10px}.customer-data-grid{grid-template-columns:1fr 1fr;column-gap:10px}.customer-data-grid dd{font-size:11px}.customer-facts strong{font-size:12px}.large-balance{font-size:17px!important}.edit-customer-form{grid-template-columns:1fr}.form-note,.form-actions{grid-column:auto}.profile-identity p{gap:4px}.customer-tabs button{gap:5px;padding:0 8px}.customer-tabs button svg{width:14px}}
+.toolbar-actions{display:flex;align-items:center;gap:12px;flex:none}.toolbar-actions .primary-control{min-height:36px}.create-customer-panel{margin:0 0 15px;background:#fff;border:1px solid #dfe7e2;border-radius:7px;overflow:hidden}.create-customer-form{padding:16px 19px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:end;gap:13px}.create-customer-form label,.password-reset-form label{display:grid;gap:6px;min-width:0}.create-customer-form label>span,.password-reset-form label>span{color:#52685f;font-size:10px;font-weight:650}.create-customer-form input,.create-customer-form select,.generated-field input,.password-reset-form input{width:100%;min-width:0;height:37px;padding:0 10px;border:1px solid #d5e0da;border-radius:5px;background:#fff;color:#263c32;font:inherit;font-size:11px}.create-customer-form input:focus,.create-customer-form select:focus,.generated-field input:focus,.password-reset-form input:focus{outline:2px solid #74ad94;outline-offset:1px}.create-customer-form small{color:#7d8e85;font-size:9px}.generated-field{display:flex;gap:5px}.generated-field button{width:36px;flex:none;display:grid;place-items:center;border:1px solid #d5e0da;border-radius:5px;color:#517363}.generated-field button:hover{background:#eef5f1}.create-customer-form .form-actions{grid-column:1/-1}.credential-receipt{margin:0 0 15px;padding:14px 16px;background:#eef7f0;border:1px solid #c9e0ce;border-radius:7px;color:#285d43}.credential-receipt>div:first-child{display:flex;align-items:center;gap:9px}.credential-receipt>div:first-child>svg{flex:none}.credential-receipt>div:first-child>span{display:grid;gap:3px}.credential-receipt>div:first-child b{font-size:12px}.credential-receipt>div:first-child small{color:#557664;font-size:10px}.credential-receipt dl{display:grid;grid-template-columns:1fr 1.4fr;gap:12px;margin:13px 0}.credential-receipt dl>div{min-width:0;padding:9px 10px;border:1px solid #d5e8d9;border-radius:5px;background:#fff}.credential-receipt dt{margin-bottom:5px;color:#708579;font-size:9px}.credential-receipt dd{margin:0;overflow-wrap:anywhere;color:#274a37;font-size:12px;font-weight:700;user-select:all}.receipt-actions{display:flex;align-items:center;flex-wrap:wrap;gap:9px}.receipt-actions .icon-close{width:30px;height:30px;display:grid;place-items:center;margin-left:auto;border-radius:4px;color:#557260}.receipt-actions .icon-close:hover{background:#deeee1}.customer-password-reset{margin-top:14px;padding:0 19px 17px;border-top:1px solid #e7ece9}.password-reset-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 0 11px}.password-reset-head>span{display:flex;align-items:center;gap:7px;color:#496b5a}.password-reset-head b{font-size:11px}.password-reset-form{display:grid;grid-template-columns:1fr 1fr auto;align-items:end;gap:10px}.password-reset-form .secondary-control{white-space:nowrap}.password-reset-note{display:block;margin-top:9px;color:#7b8d83;font-size:9px;line-height:1.5}
+@media(max-width:900px){.create-customer-form{grid-template-columns:1fr 1fr}.password-reset-form{grid-template-columns:1fr 1fr}.password-reset-form button{grid-column:1/-1;justify-self:start}}
+@media(max-width:760px){.toolbar-actions{gap:8px}.create-customer-form{padding:14px}.customer-password-reset{padding-right:14px;padding-left:14px}}
+@media(max-width:520px){.customer-toolbar{align-items:flex-start;flex-direction:column}.toolbar-actions{width:100%;justify-content:space-between}.create-customer-form{grid-template-columns:1fr}.create-customer-form .form-actions{grid-column:auto}.password-reset-form{grid-template-columns:1fr}.password-reset-form button{grid-column:auto}.credential-receipt dl{grid-template-columns:1fr}.receipt-actions .icon-close{margin-left:0}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
