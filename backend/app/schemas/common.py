@@ -76,6 +76,7 @@ class CreateSalesUserIn(BaseModel):
 
     username: str = Field(min_length=3, max_length=80)
     display_name: str = Field(min_length=1, max_length=120)
+    phone: str | None = Field(default=None, max_length=40)
     password: str = Field(min_length=10, max_length=128)
 
     @field_validator("username")
@@ -93,6 +94,12 @@ class CreateSalesUserIn(BaseModel):
         if not normalized:
             raise ValueError("姓名不能为空")
         return normalized
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value: str | None) -> str | None:
+        normalized = value.strip() if value else None
+        return normalized or None
 
     @field_validator("password")
     @classmethod
@@ -311,6 +318,8 @@ class OrderOut(BaseModel):
     order_no: str
     customer_id: int
     product_id: int
+    source_type: str = "owned"
+    resource_category: str | None = None
     amount: float
     quantity: int
     billing_days: int

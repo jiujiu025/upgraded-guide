@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_user, require_roles
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db import get_db
-from app.models import AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, Product, Region, User
+from app.models import (
+    AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, Product, Region,
+    SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
+)
 from app.schemas.common import (
     AssignCustomerIn, CompleteRenewalIn, CreateSalesUserIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
     DeliverOrderIn, LineIn, LineOut, LoginIn, NotificationOut, OrderIn, RegisterIn,
@@ -26,6 +29,7 @@ from app.services.order_service import (
     TERMINAL_ORDER_STATUSES, add_notification, calculate_order_price, claim_delivery_slot,
     ensure_sales_user, initial_order_status, notify_order_parties,
 )
+from app.services.supplier_service import RESOURCE_CATEGORY_CODES
 from app.services.registration_service import (enforce_login_rate_limit, enforce_password_recovery_rate_limit,
     enforce_registration_rate_limit)
 from app.services.session_service import (SessionError, create_session, csrf_token, find_refresh,
@@ -56,6 +60,22 @@ class UserAccessIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: str | None = None
     is_active: bool | None = None
+
+
+class AdminResourceOrderIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    customer_id: int = Field(gt=0)
+    product_id: int = Field(gt=0)
+    supplier_product_id: int = Field(gt=0)
+    supplier_region_id: int = Field(gt=0)
+    supplier_segment_snapshot_id: int = Field(gt=0)
+    supplier_quote_id: int = Field(gt=0)
+    idempotency_key: str = Field(min_length=36, max_length=64)
+    resource_category: str
+    quantity: int = Field(ge=1, le=300)
+    unit_price: float = Field(gt=0, allow_inf_nan=False)
+    billing_days: int | None = Field(default=None, gt=0)
+    remark: str | None = Field(default=None, max_length=1000)
 
 
 def _strong_password(value: str) -> bool:
@@ -794,11 +814,200 @@ def admin_orders(db: Session = Depends(get_db), user: User = Depends(require_rol
     return list(db.scalars(select(Order).order_by(Order.created_at.desc())).all())
 
 
+@router.get("/admin/order-center/options")
+def admin_order_center_options(
+    resource_category: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    customers = db.scalars(select(Customer).where(
+        Customer.is_deleted.is_(False), Customer.user_id.is_not(None),
+    ).order_by(Customer.name).limit(1000)).all()
+    products = db.scalars(select(Product).where(Product.is_active.is_(True)).order_by(Product.name)).all()
+    supplier_product_query = select(SupplierProduct).where(SupplierProduct.is_available.is_(True))
+    if resource_category:
+        supplier_product_query = supplier_product_query.where(SupplierProduct.resource_category == resource_category)
+    supplier_products = db.scalars(supplier_product_query.order_by(SupplierProduct.name_snapshot).limit(500)).all()
+    supplier_regions = db.scalars(select(SupplierRegion).where(
+        SupplierRegion.is_available.is_(True), SupplierRegion.city_name.is_(None),
+    ).order_by(SupplierRegion.country_name).limit(1000)).all()
+    supplier_product_ids = {item.id for item in supplier_products}
+    supplier_regions = [item for item in supplier_regions if item.supplier_product_id in supplier_product_ids]
+    segments = db.scalars(select(SupplierIpSegmentSnapshot).where(
+        SupplierIpSegmentSnapshot.checked_at >= datetime.utcnow() - timedelta(minutes=settings.supplier_inventory_ttl_minutes),
+        SupplierIpSegmentSnapshot.is_request_sufficient.is_(True),
+        SupplierIpSegmentSnapshot.is_segment_sufficient.is_(True),
+    ).order_by(SupplierIpSegmentSnapshot.checked_at.desc()).limit(500)).all()
+    segments = [item for item in segments if item.supplier_product_id in supplier_product_ids]
+    quotes = db.scalars(select(SupplierQuote).where(
+        SupplierQuote.is_available.is_(True),
+        SupplierQuote.quoted_at >= datetime.utcnow() - timedelta(minutes=settings.supplier_quote_ttl_minutes),
+    ).order_by(SupplierQuote.quoted_at.desc()).limit(1000)).all()
+    quotes = [item for item in quotes if item.supplier_product_id in supplier_product_ids]
+    return {
+        "customers": [{"id": item.id, "name": item.name, "email": item.email} for item in customers],
+        "products": [{"id": item.id, "name": item.name, "product_type": item.product_type,
+                      "price": item.price, "billing_days": item.billing_days, "region_id": item.region_id}
+                     for item in products],
+        "categories": [{"code": code, "label": label} for code, label in RESOURCE_CATEGORY_CODES.items()],
+        "supplier_products": [{"id": item.id, "external_product_ref": item.external_product_ref,
+                               "name": item.name_snapshot, "resource_category": item.resource_category,
+                               "local_product_id": item.local_product_id, "currency": item.currency,
+                               "last_synced_at": item.last_synced_at}
+                              for item in supplier_products],
+        "supplier_regions": [{"id": item.id, "supplier_product_id": item.supplier_product_id,
+                              "country_code": item.country_code, "country_name": item.country_name,
+                              "last_synced_at": item.last_synced_at}
+                             for item in supplier_regions],
+        "segments": [{"id": item.id, "supplier_product_id": item.supplier_product_id,
+                      "country_code": item.country_code, "cidr": item.cidr,
+                      "requested_quantity": item.requested_quantity, "checked_at": item.checked_at}
+                     for item in segments],
+        "quotes": [{"id": item.id, "supplier_product_id": item.supplier_product_id,
+                    "external_product_ref": item.external_product_ref, "country_code": item.country_code,
+                    "duration_days": item.duration_days, "unit_cost": float(item.unit_cost),
+                    "currency": item.currency, "quoted_at": item.quoted_at}
+                   for item in quotes],
+    }
+
+
+@router.get("/admin/order-center/subscriptions")
+def admin_subscriptions(
+    customer_id: int | None = None,
+    product_id: int | None = None,
+    expires_from: datetime | None = None,
+    expires_to: datetime | None = None,
+    source_type: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    query = select(CustomerLine, Customer.name, Product.name, Order.source_type).join(
+        Customer, Customer.id == CustomerLine.customer_id,
+    ).join(Product, Product.id == CustomerLine.product_id).outerjoin(Order, Order.id == CustomerLine.order_id)
+    if customer_id is not None:
+        query = query.where(CustomerLine.customer_id == customer_id)
+    if product_id is not None:
+        query = query.where(CustomerLine.product_id == product_id)
+    if expires_from is not None:
+        query = query.where(CustomerLine.expires_at >= expires_from)
+    if expires_to is not None:
+        query = query.where(CustomerLine.expires_at <= expires_to)
+    if source_type:
+        if source_type == "owned":
+            query = query.where((Order.source_type == "owned") | Order.id.is_(None))
+        else:
+            query = query.where(Order.source_type == source_type)
+    rows = db.execute(query.order_by(CustomerLine.expires_at.asc()).limit(2000)).all()
+    return [{
+        "id": line.id, "customer_id": line.customer_id, "customer_name": customer_name,
+        "product_id": line.product_id, "product_name": product_name, "order_id": line.order_id,
+        "source_type": order_source or "owned", "static_ip": line.static_ip, "status": line.status,
+        "started_at": line.started_at, "expires_at": line.expires_at, "created_at": line.created_at,
+    } for line, customer_name, product_name, order_source in rows]
+
+
+@router.get("/admin/order-center/orders")
+def admin_order_center_orders(db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
+    rows = db.execute(select(Order, Customer.name).join(Customer, Customer.id == Order.customer_id)
+                      .order_by(Order.created_at.desc()).limit(1000)).all()
+    return [{**{column.name: getattr(order, column.name) for column in Order.__table__.columns},
+             "customer_name": customer_name} for order, customer_name in rows]
+
+
+@router.post("/admin/order-center/orders", status_code=201)
+def admin_create_resource_order(
+    payload: AdminResourceOrderIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    from decimal import Decimal, ROUND_HALF_UP
+    from app.core.config import get_settings
+    from app.services.order_service import notify_order_parties
+
+    settings = get_settings()
+    existing_order = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+    if existing_order:
+        existing_customer = db.get(Customer, existing_order.customer_id)
+        return {**{column.name: getattr(existing_order, column.name) for column in Order.__table__.columns},
+                "customer_name": existing_customer.name if existing_customer else "未知客户"}
+    customer = db.scalar(select(Customer).where(
+        Customer.id == payload.customer_id, Customer.is_deleted.is_(False), Customer.user_id.is_not(None),
+    ))
+    product = db.scalar(select(Product).where(Product.id == payload.product_id, Product.is_active.is_(True)))
+    supplier_product = db.get(SupplierProduct, payload.supplier_product_id)
+    supplier_region = db.get(SupplierRegion, payload.supplier_region_id)
+    segment = db.get(SupplierIpSegmentSnapshot, payload.supplier_segment_snapshot_id)
+    quote = db.get(SupplierQuote, payload.supplier_quote_id)
+    if not customer:
+        raise HTTPException(status_code=422, detail="请选择已注册且可用的客户")
+    if not product or not supplier_product or not supplier_region or not segment or not quote:
+        raise HTTPException(status_code=422, detail="商品、国家、网段或报价快照不存在")
+    if payload.resource_category not in RESOURCE_CATEGORY_CODES or supplier_product.resource_category != payload.resource_category:
+        raise HTTPException(status_code=422, detail="供应商商品尚未人工映射到所选资源分类")
+    if supplier_product.local_product_id != product.id or not supplier_product.is_available:
+        raise HTTPException(status_code=409, detail="供应商商品与平台产品未匹配或已停用")
+    if supplier_region.supplier_product_id != supplier_product.id or not supplier_region.is_available or supplier_region.city_name is not None:
+        raise HTTPException(status_code=409, detail="所选国家不属于当前供应商商品或已不可用")
+    freshness_floor = datetime.utcnow() - timedelta(minutes=settings.supplier_inventory_ttl_minutes)
+    quote_floor = datetime.utcnow() - timedelta(minutes=settings.supplier_quote_ttl_minutes)
+    if (segment.supplier_product_id != supplier_product.id or segment.country_code != supplier_region.country_code
+            or segment.checked_at < freshness_floor or not segment.is_request_sufficient
+            or not segment.is_segment_sufficient or segment.requested_quantity < payload.quantity):
+        raise HTTPException(status_code=409, detail="网段快照已过期或数量不满足，请重新检测库存")
+    billing_days = payload.billing_days or product.billing_days
+    if (quote.supplier_product_id != supplier_product.id or quote.country_code not in (None, supplier_region.country_code)
+            or quote.quoted_at < quote_floor or not quote.is_available
+            or quote.duration_days not in (None, billing_days)):
+        raise HTTPException(status_code=409, detail="报价快照已过期或与当前国家、周期不匹配，请重新同步报价")
+    unit_price = Decimal(str(payload.unit_price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    total = (unit_price * payload.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    cost_total = (Decimal(str(quote.unit_cost)) * payload.quantity).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    order = Order(
+        order_no=f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}",
+        customer_id=customer.id, product_id=product.id, source_type="resource_pool",
+        idempotency_key=payload.idempotency_key,
+        resource_category=payload.resource_category, supplier_product_id=supplier_product.id,
+        supplier_region_id=supplier_region.id, supplier_segment_snapshot_id=segment.id,
+        supplier_quote_id=quote.id, supplier_cost=cost_total, amount=float(total),
+        quantity=payload.quantity, billing_days=billing_days, unit_price=float(unit_price),
+        total_amount=float(total), region_id=product.region_id, region_name=supplier_region.country_name,
+        product_name=product.name, payment_method="contact_manager", payment_status="unpaid",
+        status="pending_payment", assigned_sales_id=customer.sales_id,
+        order_type="purchase", remark=payload.remark,
+    )
+    try:
+        db.add(order)
+        db.flush()
+        notify_order_parties(db, customer, order, "资源池订单已创建", f"订单 {order.order_no} 已创建，当前待付款和人工采购审核；系统不会自动下单或开通线路。", "order")
+        write_audit(db, user, "create", "order", order.id,
+                    f"来源=resource_pool; 分类={payload.resource_category}; 国家={supplier_region.country_code}; 数量={payload.quantity}; 售价={total}; 成本快照={cost_total}")
+        db.commit()
+        db.refresh(order)
+        return {**{column.name: getattr(order, column.name) for column in Order.__table__.columns},
+                "customer_name": customer.name}
+    except IntegrityError:
+        db.rollback()
+        existing_order = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+        if existing_order:
+            existing_customer = db.get(Customer, existing_order.customer_id)
+            return {**{column.name: getattr(existing_order, column.name) for column in Order.__table__.columns},
+                    "customer_name": existing_customer.name if existing_customer else "未知客户"}
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
 @router.post("/admin/orders/{order_id}/confirm", response_model=OrderOut)
 def admin_confirm_order(order_id: int, db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
     order = db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
+    if order.source_type == "resource_pool":
+        raise HTTPException(status_code=409, detail="资源池自动采购尚未启用，不能确认采购或开通线路")
     if order.order_type != "purchase":
         raise HTTPException(status_code=409, detail="仅普通购买订单可以确认交付")
     if order.status not in {"pending_confirm", "pending_payment", "paid", "processing"}:
@@ -830,6 +1039,8 @@ def admin_deliver_order(order_id: int, payload: DeliverOrderIn, db: Session = De
     order = db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
+    if order.source_type == "resource_pool":
+        raise HTTPException(status_code=409, detail="资源池订单不能通过手动线路交付接口开通")
     if order.order_type == "renewal":
         raise HTTPException(status_code=409, detail="续费订单不能创建新线路")
     if order.status not in {"pending_delivery", "partially_delivered"}:
@@ -1003,6 +1214,7 @@ def admin_create_sales_user(payload: CreateSalesUserIn, db: Session = Depends(ge
         password_hash=hash_password(payload.password),
         role="sales",
         display_name=payload.display_name,
+        phone=payload.phone,
         must_change_password=False,
     )
     db.add(sales_user)

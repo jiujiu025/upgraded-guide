@@ -1,11 +1,12 @@
 <script setup>
 import BrandLogo from '../components/BrandLogo.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Activity, AlertTriangle, BellRing, Box, ChevronRight, CircleAlert, Clock3, Database, Gauge, LogOut, Mail, Menu, MessageSquare, RefreshCw, Search, Server, ShieldCheck, SlidersHorizontal, UserRound, X } from 'lucide-vue-next'
+import { Activity, AlertTriangle, BellRing, Box, ChevronRight, CircleAlert, CircleDollarSign, Clock3, Database, Gauge, LogOut, Mail, Menu, MessageSquare, PackageSearch, RefreshCw, Search, Server, ShieldCheck, SlidersHorizontal, UserRound, X } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { loadHealthFixture } from '../mocks/health'
 import { session } from '../api/session'
 import { logout as endSession } from '../api'
+import { getAdminNavigation } from '../navigation/adminNavigation'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,7 +21,7 @@ const storedUser = computed(() => session.user || {})
 const isSales = computed(() => route.meta.workspace === 'sales')
 const nav = computed(() => isSales.value
   ? [['销售概览', '/sales', Gauge], ['我的客户影响', '/sales/health', Activity], ['客户会话', '/sales/inbox', MessageSquare], ['安全中心', '/sales/security', ShieldCheck]]
-  : [['订单处理', '/admin', Box], ['线路健康', '/admin/health', Activity], ['全量会话', '/admin/inbox', MessageSquare], ['资源池', '/admin/resource-pool', Database], ...(storedUser.value.role === 'super_admin' ? [['销售账号', '/admin/sales-users', UserRound]] : []), ['安全中心', '/admin/security', ShieldCheck]])
+  : getAdminNavigation(storedUser.value.role))
 const statusMeta = {
   offline: { label: '离线', tone: 'critical' },
   abnormal: { label: '异常', tone: 'danger' },
@@ -77,7 +78,7 @@ onMounted(load)
     <aside class="workspace-sidebar" :class="{ open: mobileNav }">
       <div class="workspace-brand"><BrandLogo eager /><button aria-label="关闭导航" @click="mobileNav = false"><X :size="20" /></button></div>
       <p class="workspace-role">{{ isSales ? '销售工作台' : '管理后台' }}</p>
-      <nav><button v-for="[label, path, icon] in nav" :key="path" :class="{ active: route.path === path }" @click="router.push(path); mobileNav = false"><component :is="icon" :size="17" />{{ label }}</button></nav>
+      <nav><button v-for="[label, path, icon] in nav" :key="path" :class="{ active: route.path === path || (path !== '/admin' && route.path.startsWith(`${path}/`)) }" @click="router.push(path); mobileNav = false"><component :is="icon" :size="17" />{{ label }}</button></nav>
       <div class="workspace-user"><span>{{ storedUser.display_name || storedUser.username }}</span><small>{{ storedUser.role }}</small><button @click="logout"><LogOut :size="15" />退出登录</button></div>
     </aside>
     <div class="workspace-main">

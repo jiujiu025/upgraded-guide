@@ -4,6 +4,11 @@ import WorkspaceView from '../views/WorkspaceView.vue'
 import HealthView from '../views/HealthView.vue'
 import InboxView from '../views/InboxView.vue'
 import SupplierPoolView from '../views/SupplierPoolView.vue'
+import OrderCenterView from '../views/OrderCenterView.vue'
+import FinanceView from '../views/FinanceView.vue'
+import WalletView from '../views/WalletView.vue'
+import CustomerManagerView from '../views/CustomerManagerView.vue'
+import AdminLayout from '../layouts/AdminLayout.vue'
 import ChangePasswordView from '../views/ChangePasswordView.vue'
 import PasswordRecoveryView from '../views/PasswordRecoveryView.vue'
 import { ensureSession, currentSessionUser } from '../api'
@@ -20,6 +25,7 @@ const routes = [
   { path: '/change-password', component: ChangePasswordView, meta: { auth: true } },
   { path: '/recover-password', component: PasswordRecoveryView },
   workspaceRoute('/client', 'client', 'dashboard'),
+  { path: '/client/wallet', component: WalletView, meta: { auth: true, workspace: 'client', page: 'client-wallet' } },
   workspaceRoute('/client/dashboard', 'client', 'dashboard'),
   workspaceRoute('/client/orders', 'client', 'orders'),
   workspaceRoute('/client/orders/:id', 'client', 'order'),
@@ -31,15 +37,27 @@ const routes = [
   workspaceRoute('/client/profile', 'client', 'profile'),
   workspaceRoute('/client/security', 'client', 'security-center'),
   workspaceRoute('/sales', 'sales', 'sales'),
+  { path: '/sales/wallet', component: WalletView, meta: { auth: true, workspace: 'sales', page: 'sales-wallet' } },
   { path: '/sales/health', component: HealthView, meta: { auth: true, workspace: 'sales', page: 'sales-health' } },
   { path: '/sales/inbox', component: InboxView, meta: { auth: true, workspace: 'sales', page: 'sales-inbox' } },
   workspaceRoute('/sales/security', 'sales', 'security-center'),
-  workspaceRoute('/admin', 'admin', 'admin'),
-  workspaceRoute('/admin/sales-users', 'admin', 'admin-sales-users'),
-  workspaceRoute('/admin/security', 'admin', 'security-center'),
-  { path: '/admin/health', component: HealthView, meta: { auth: true, workspace: 'admin', page: 'admin-health' } },
-  { path: '/admin/inbox', component: InboxView, meta: { auth: true, workspace: 'admin', page: 'admin-inbox' } },
-  { path: '/admin/resource-pool', component: SupplierPoolView, meta: { auth: true, workspace: 'admin', page: 'admin-resource-pool' } },
+  {
+    path: '/admin',
+    component: AdminLayout,
+    meta: { auth: true, workspace: 'admin' },
+    children: [
+      { path: '', component: WorkspaceView, meta: { page: 'admin' } },
+      { path: 'sales-users', component: WorkspaceView, meta: { page: 'admin-sales-users' } },
+      { path: 'security', component: WorkspaceView, meta: { page: 'security-center' } },
+      { path: 'health', component: HealthView, meta: { page: 'admin-health' } },
+      { path: 'inbox', component: InboxView, meta: { page: 'admin-inbox' } },
+      { path: 'resource-pool', component: SupplierPoolView, meta: { page: 'admin-resource-pool' } },
+      { path: 'orders', component: OrderCenterView, meta: { page: 'admin-orders' } },
+      { path: 'finance', component: FinanceView, meta: { page: 'admin-finance' } },
+      { path: 'customers', component: CustomerManagerView, meta: { page: 'admin-customers' } },
+      { path: 'customers/:id', component: CustomerManagerView, meta: { page: 'admin-customers' } },
+    ],
+  },
   { path: '/:pathMatch(.*)*', component: AppView, meta: { section: '404' } },
 ]
 

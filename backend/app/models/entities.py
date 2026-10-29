@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -13,6 +13,7 @@ class User(TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(30), index=True)
     display_name: Mapped[str] = mapped_column(String(120))
+    phone: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -111,6 +112,14 @@ class Order(TimestampMixin, Base):
     order_no: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    source_type: Mapped[str] = mapped_column(String(30), default="owned", server_default="owned", nullable=False, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    resource_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    supplier_product_id: Mapped[int | None] = mapped_column(ForeignKey("supplier_products.id", name="fk_orders_supplier_product_id"), nullable=True, index=True)
+    supplier_region_id: Mapped[int | None] = mapped_column(ForeignKey("supplier_regions.id", name="fk_orders_supplier_region_id"), nullable=True, index=True)
+    supplier_segment_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("supplier_ip_segment_snapshots.id", name="fk_orders_supplier_segment_snapshot_id"), nullable=True, index=True)
+    supplier_quote_id: Mapped[int | None] = mapped_column(ForeignKey("supplier_quotes.id", name="fk_orders_supplier_quote_id"), nullable=True, index=True)
+    supplier_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     amount: Mapped[float] = mapped_column(Float)
     payment_method: Mapped[str] = mapped_column(String(30), default="contact_manager")
     status: Mapped[str] = mapped_column(String(30), default="pending_confirm", index=True)
@@ -232,6 +241,7 @@ class SupplierProduct(TimestampMixin, Base):
     external_product_ref: Mapped[str] = mapped_column(String(80))
     name_snapshot: Mapped[str] = mapped_column(String(200))
     suffix: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    resource_category: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     local_product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True, index=True)
     currency: Mapped[str] = mapped_column(String(3), default="CNY")
     is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
@@ -314,6 +324,116 @@ class SupplierSyncRun(TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(String(255), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SupplierIpSegmentSnapshot(TimestampMixin, Base):
+    __tablename__ = "supplier_ip_segment_snapshots"
+    __table_args__ = (
+        UniqueConstraint("sync_run_id", "cidr", name="uq_supplier_segment_run_cidr"),
+    )
+    supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"), index=True)
+    supplier_product_id: Mapped[int] = mapped_column(ForeignKey("supplier_products.id"), index=True)
+    supplier_region_id: Mapped[int | None] = mapped_column(ForeignKey("supplier_regions.id"), nullable=True, index=True)
+    sync_run_id: Mapped[int] = mapped_column(ForeignKey("supplier_sync_runs.id"), index=True)
+    country_code: Mapped[str] = mapped_column(String(10), index=True)
+    city_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    cidr: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_segment_sufficient: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_request_sufficient: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class WalletAccount(TimestampMixin, Base):
+    __tablename__ = "wallet_accounts"
+    __table_args__ = (
+        CheckConstraint("balance_cents >= 0", name="ck_wallet_balance_nonnegative"),
+        UniqueConstraint("user_id"),
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    balance_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="CNY", nullable=False)
+
+
+class PaymentChannelConfig(TimestampMixin, Base):
+    __tablename__ = "payment_channel_configs"
+    merchant_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    encrypted_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_types: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    min_amount_cents: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    max_amount_cents: Mapped[int] = mapped_column(Integer, default=10000000, nullable=False)
+    online_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PaymentOrder(TimestampMixin, Base):
+    __tablename__ = "payment_orders"
+    __table_args__ = (
+        CheckConstraint("amount_cents > 0", name="ck_payment_order_amount_positive"),
+        UniqueConstraint("out_trade_no", name="uq_payment_order_out_trade_no"),
+        UniqueConstraint("idempotency_key", name="uq_payment_order_idempotency_key"),
+    )
+    out_trade_no: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    purpose: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True, index=True)
+    sales_id_snapshot: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    provider_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False, index=True)
+    platform_trade_no: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    payment_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class WalletTransaction(TimestampMixin, Base):
+    __tablename__ = "wallet_transactions"
+    __table_args__ = (
+        CheckConstraint("amount_cents != 0", name="ck_wallet_transaction_amount_nonzero"),
+        CheckConstraint("balance_before_cents >= 0 AND balance_after_cents >= 0", name="ck_wallet_transaction_balances_nonnegative"),
+        UniqueConstraint("idempotency_key", name="uq_wallet_transaction_idempotency_key"),
+    )
+    wallet_account_id: Mapped[int] = mapped_column(ForeignKey("wallet_accounts.id"), index=True)
+    transaction_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    balance_before_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    balance_after_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    payment_order_id: Mapped[int | None] = mapped_column(ForeignKey("payment_orders.id"), nullable=True, index=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True, index=True)
+    remark: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class PaymentRefund(TimestampMixin, Base):
+    __tablename__ = "payment_refunds"
+    __table_args__ = (UniqueConstraint("payment_order_id"),)
+    payment_order_id: Mapped[int] = mapped_column(ForeignKey("payment_orders.id"), index=True)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    external_reference: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    actor_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="completed", nullable=False)
+
+
+class SalesCommissionEntry(TimestampMixin, Base):
+    __tablename__ = "sales_commission_entries"
+    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_sales_commission_idempotency_key"),)
+    sales_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
+    payment_order_id: Mapped[int] = mapped_column(ForeignKey("payment_orders.id"), index=True)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    basis_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    rate_basis_points: Mapped[int] = mapped_column(Integer, default=1500, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
 
 
 class CatalogPublication(TimestampMixin, Base):

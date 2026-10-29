@@ -7,10 +7,11 @@ import {
 } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { session } from '../api/session'
+import { getAdminNavigation } from '../navigation/adminNavigation'
 import { logout as endSession } from '../api'
 import {
   getAdminCatalogProducts, getAdminCatalogRegions, getCatalogPublications, getSupplierInventory, getSupplierOverview,
-  getSupplierProducts, getSupplierQuotes, getSupplierRegions, getSupplierRules, getSupplierSyncRuns,
+  getSupplierIpSegments, getSupplierProducts, getSupplierQuotes, getSupplierRegions, getSupplierRules, getSupplierSyncRuns,
   checkSupplierInventory, deleteSupplierCredential, mapSupplierProduct, mapSupplierRegion, publishCatalogSnapshot, saveSupplierCredential, saveSupplierRule, syncSupplierCities,
   syncSupplierCountries, syncSupplierInventory, syncSupplierProducts, syncSupplierQuotes,
   withdrawCatalogPublication,
@@ -29,6 +30,7 @@ const overview = ref(null)
 const supplierProducts = ref([])
 const supplierRegions = ref([])
 const inventory = ref([])
+const ipSegments = ref([])
 const quotes = ref([])
 const rules = ref([])
 const syncRuns = ref([])
@@ -36,6 +38,8 @@ const localProducts = ref([])
 const localRegions = ref([])
 const publications = ref([])
 const inventoryCountry = ref('US')
+const selectedResourceCategory = ref('static_residential')
+const selectedInventoryProductId = ref('')
 const inventoryCheckQuantity = ref(1)
 const inventoryCheckResult = ref(null)
 const inventoryCheckError = ref('')
@@ -50,12 +54,7 @@ const ruleDraft = reactive({ product_id: '', region_id: '', supplier_product_id:
 const publishDraft = reactive({ product_id: '', region_id: '', inventory_snapshot_id: '', quote_snapshot_id: '', price: '' })
 const apiRebuildCommand = 'docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps api'
 
-const nav = [
-  ['订单处理', '/admin', Box],
-  ['线路健康', '/admin/health', Activity],
-  ['全量会话', '/admin/inbox', MessageSquare],
-  ['资源池', '/admin/resource-pool', Database],
-]
+const nav = computed(() => getAdminNavigation(storedUser.value.role))
 const tabs = [
   ['overview', '状态概览'],
   ['mappings', '商品与地区映射'],
@@ -75,6 +74,12 @@ const stateMeta = {
   partial_failed: { label: '部分失败', tone: 'warning' },
   failed: { label: '失败', tone: 'critical' },
 }
+const resourceCategories = [
+  { code: 'static_residential', label: '独享静态住宅（普通）' },
+  { code: 'static_residential_native', label: '独享静态住宅（本土原生）' },
+  { code: 'static_residential_isp', label: '独享静态住宅（运营商原生）' },
+  { code: 'static_datacenter', label: '独享静态数据中心' },
+]
 const inventoryMeta = {
   available: '可用',
   tight: '库存紧缺',
@@ -91,13 +96,21 @@ const storedUser = computed(() => {
 const canManageCredential = computed(() => storedUser.value.role === 'super_admin')
 const mappedProducts = computed(() => supplierProducts.value.filter((item) => item.local_product_id).length)
 const mappedRegions = computed(() => supplierRegions.value.filter((item) => item.local_region_id).length)
+const categoryProducts = computed(() => supplierProducts.value.filter((item) => item.resource_category === selectedResourceCategory.value))
+const selectedInventoryProduct = computed(() => categoryProducts.value.find((item) => String(item.id) === String(selectedInventoryProductId.value)) || categoryProducts.value[0])
 const countryOptions = computed(() => {
   const countries = new Map()
   for (const region of supplierRegions.value) {
-    if (region.country_code) countries.set(region.country_code, region.country_name || region.country_code)
+    if (region.country_code && region.supplier_product_id === selectedInventoryProduct.value?.id && !region.city_name) {
+      countries.set(region.country_code, region.country_name || region.country_code)
+    }
   }
   return [...countries].map(([code, name]) => ({ code, name })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
 })
+const visibleIpSegments = computed(() => ipSegments.value.filter((item) =>
+  item.resource_category === selectedResourceCategory.value
+  && item.supplier_product_id === selectedInventoryProduct.value?.id
+  && item.country_code === inventoryCountry.value))
 const quoteProductOptions = computed(() => [...new Set(quotes.value.map((item) => item.external_product_ref))].sort((a, b) => Number(a) - Number(b)))
 const quoteCountryOptions = computed(() => [...new Set(quotes.value.map((item) => item.country_code).filter(Boolean))].sort())
 const visibleQuotes = computed(() => quotes.value.filter((item) =>
@@ -138,14 +151,17 @@ async function load() {
   error.value = ''
   try {
     const responses = await Promise.all([
-      getSupplierOverview(), getSupplierProducts(), getSupplierRegions(), getSupplierInventory(),
+      getSupplierOverview(), getSupplierProducts(), getSupplierRegions(), getSupplierInventory(), getSupplierIpSegments(),
       getSupplierQuotes(), getSupplierRules(), getSupplierSyncRuns(), getAdminCatalogProducts(),
       getAdminCatalogRegions(), getCatalogPublications(),
     ])
     ;[
-      overview.value, supplierProducts.value, supplierRegions.value, inventory.value, quotes.value,
+      overview.value, supplierProducts.value, supplierRegions.value, inventory.value, ipSegments.value, quotes.value,
       rules.value, syncRuns.value, localProducts.value, localRegions.value, publications.value,
     ] = responses.map((response) => response.data)
+    if (!categoryProducts.value.some((item) => String(item.id) === String(selectedInventoryProductId.value))) {
+      selectedInventoryProductId.value = categoryProducts.value[0] ? String(categoryProducts.value[0].id) : ''
+    }
     if (countryOptions.value.length && !countryOptions.value.some((item) => item.code === inventoryCountry.value)) {
       inventoryCountry.value = countryOptions.value[0].code
     }
@@ -162,6 +178,29 @@ watch([inventoryCountry, inventoryCheckQuantity], () => {
   selectedSegment.value = ''
   inventoryCheckAt.value = null
 })
+watch(inventoryCountry, loadIpSegments)
+
+watch([selectedResourceCategory, selectedInventoryProductId], () => {
+  inventoryCheckResult.value = null
+  selectedSegment.value = ''
+  loadIpSegments()
+  if (countryOptions.value.length && !countryOptions.value.some((item) => item.code === inventoryCountry.value)) {
+    inventoryCountry.value = countryOptions.value[0].code
+  }
+})
+
+async function loadIpSegments() {
+  try {
+    const { data } = await getSupplierIpSegments({
+      resource_category: selectedResourceCategory.value,
+      supplier_product_id: selectedInventoryProduct.value?.id,
+      country_code: inventoryCountry.value,
+    })
+    ipSegments.value = data
+  } catch (requestError) {
+    error.value = errorText(requestError, 'IP 段快照加载失败')
+  }
+}
 
 async function runDirectorySync() {
   busy.value = 'directory'
@@ -188,7 +227,9 @@ async function runInventorySync() {
   busy.value = 'inventory'
   error.value = ''
   try {
-    await syncSupplierInventory(country)
+    const productTypeId = Number(selectedInventoryProduct.value?.external_product_ref)
+    if (!Number.isInteger(productTypeId) || productTypeId < 1) throw new Error('供应商商品编号不是有效的查询类型')
+    await syncSupplierInventory(country, productTypeId)
     notify(`${country} 库存同步完成`)
   } catch (requestError) {
     error.value = errorText(requestError, '库存同步失败，请重试')
@@ -214,8 +255,13 @@ async function runInventoryCheck() {
   selectedSegment.value = ''
   inventoryCheckAt.value = null
   try {
+    const productTypeId = Number(selectedInventoryProduct.value?.external_product_ref)
+    if (!Number.isInteger(productTypeId) || productTypeId < 1) {
+      inventoryCheckError.value = '供应商商品编号不是有效的查询类型'
+      return
+    }
     const { data } = await checkSupplierInventory({
-      product_type_id: 2,
+      product_type_id: productTypeId,
       quantity: inventoryCheckQuantity.value,
       country_code: country,
     })
@@ -292,7 +338,7 @@ async function retryRun(run) {
     countries: syncSupplierCountries,
     cities: syncSupplierCities,
     quotes: syncSupplierQuotes,
-    inventory: () => syncSupplierInventory(inventoryCountry.value.trim().toUpperCase()),
+    inventory: () => syncSupplierInventory(inventoryCountry.value.trim().toUpperCase(), Number(selectedInventoryProduct.value?.external_product_ref)),
   }
   const action = actions[run.sync_type]
   if (!action) {
@@ -316,10 +362,44 @@ async function updateProductMapping(item, value) {
   busy.value = `product-${item.id}`
   error.value = ''
   try {
-    await mapSupplierProduct(item.id, value ? Number(value) : null)
+    await mapSupplierProduct(item.id, value ? Number(value) : null, item.resource_category)
     notify('商品映射已保存并写入审计')
   } catch (requestError) {
     error.value = errorText(requestError, '商品映射保存失败')
+  } finally {
+    busy.value = ''
+    await load()
+  }
+}
+
+async function updateProductCategory(item, value) {
+  busy.value = `product-${item.id}`
+  error.value = ''
+  try {
+    await mapSupplierProduct(item.id, item.local_product_id, value || null)
+    notify('资源类型映射已保存并写入审计')
+  } catch (requestError) {
+    error.value = errorText(requestError, '资源类型保存失败')
+  } finally {
+    busy.value = ''
+    await load()
+  }
+}
+
+async function syncSelectedProductRegions() {
+  const productTypeId = Number(selectedInventoryProduct.value?.external_product_ref)
+  if (!Number.isInteger(productTypeId) || productTypeId < 1) {
+    error.value = '供应商商品编号不是有效的查询类型，无法同步国家目录'
+    return
+  }
+  busy.value = 'category-countries'
+  error.value = ''
+  try {
+    await syncSupplierCountries(productTypeId)
+    await syncSupplierCities(productTypeId)
+    notify('所选供应商商品的国家与城市目录已同步')
+  } catch (requestError) {
+    error.value = errorText(requestError, '国家目录同步失败')
   } finally {
     busy.value = ''
     await load()
@@ -400,7 +480,7 @@ onMounted(load)
     <aside class="workspace-sidebar" :class="{ open: mobileNav }">
       <div class="workspace-brand"><BrandLogo eager /><button aria-label="关闭导航" @click="mobileNav = false"><X :size="20" /></button></div>
       <p class="workspace-role">管理后台</p>
-      <nav><button v-for="[label, path, icon] in nav" :key="path" :class="{ active: route.path === path }" @click="router.push(path); mobileNav = false"><component :is="icon" :size="17" />{{ label }}</button></nav>
+      <nav><button v-for="[label, path, icon] in nav" :key="path" :class="{ active: route.path === path || (path !== '/admin' && route.path.startsWith(`${path}/`)) }" @click="router.push(path); mobileNav = false"><component :is="icon" :size="17" />{{ label }}</button></nav>
       <div class="workspace-user"><span>{{ storedUser.display_name || storedUser.username }}</span><small>{{ storedUser.role }}</small><button @click="logout"><LogOut :size="15" />退出登录</button></div>
     </aside>
 
@@ -481,8 +561,8 @@ onMounted(load)
               <div class="section-heading"><div><h2>商品映射</h2><p>供应商商品只作为内部来源，不会创建或改价官网商品。</p></div><span>{{ mappedProducts }} 项已映射</span></div>
               <div v-if="!supplierProducts.length" class="supplier-empty">尚未同步供应商商品</div>
               <div v-else class="data-table product-mapping-table">
-                <div class="data-head"><span>供应商商品</span><span>状态</span><span>玖玖IP商品</span><span>同步时间</span></div>
-                <div v-for="item in supplierProducts" :key="item.id" class="data-row"><span><b>{{ item.name_snapshot }}</b><small>产品 {{ item.external_product_ref }} · {{ item.currency }}</small></span><span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em></span><span><select :value="item.local_product_id || ''" :disabled="busy === `product-${item.id}`" @change="updateProductMapping(item, $event.target.value)"><option value="">未映射</option><option v-for="product in localProducts" :key="product.id" :value="product.id">{{ product.name }} · 地区 #{{ product.region_id }}</option></select></span><span>{{ dateTime(item.last_synced_at) }}</span></div>
+                <div class="data-head"><span>供应商商品</span><span>状态</span><span>玖玖IP商品</span><span>资源类型</span><span>同步时间</span></div>
+                <div v-for="item in supplierProducts" :key="item.id" class="data-row"><span><b>{{ item.name_snapshot }}</b><small>产品 {{ item.external_product_ref }} · {{ item.currency }}</small></span><span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em></span><span><select :value="item.local_product_id || ''" :disabled="busy === `product-${item.id}`" @change="updateProductMapping(item, $event.target.value)"><option value="">未映射</option><option v-for="product in localProducts" :key="product.id" :value="product.id">{{ product.name }} · 地区 #{{ product.region_id }}</option></select></span><span><select :value="item.resource_category || ''" :disabled="busy === `product-${item.id}`" @change="updateProductCategory(item, $event.target.value)"><option value="">未分类</option><option v-for="category in resourceCategories" :key="category.code" :value="category.code">{{ category.label }}</option></select></span><span>{{ dateTime(item.last_synced_at) }}</span></div>
               </div>
             </section>
 
@@ -510,12 +590,26 @@ onMounted(load)
           </template>
 
           <template v-else-if="activeTab === 'snapshots'">
+            <section class="supplier-section category-browser">
+              <div class="section-heading"><div><h2>资源池 1 · 按类型浏览</h2><p>分类由管理员根据供应商资料人工指定；国家只显示该商品同步到的目录。</p></div><span>{{ categoryProducts.length }} 个已归类商品</span></div>
+              <div class="category-switch" role="group" aria-label="资源类型">
+                <button v-for="category in resourceCategories" :key="category.code" type="button" :aria-pressed="selectedResourceCategory === category.code" :class="{ active: selectedResourceCategory === category.code }" @click="selectedResourceCategory = category.code">{{ category.label }}</button>
+              </div>
+              <div class="category-browser-controls">
+                <label>供应商商品<select v-model="selectedInventoryProductId"><option v-for="item in categoryProducts" :key="item.id" :value="String(item.id)">{{ item.name_snapshot }} · #{{ item.external_product_ref }}</option></select></label>
+                <button class="secondary-action" type="button" :disabled="!selectedInventoryProduct || !overview.supplier.api_key_configured || !!busy" @click="syncSelectedProductRegions"><RefreshCw :size="14" :class="{ spinning: busy === 'category-countries' }" />同步所选商品国家</button>
+                <span v-if="!categoryProducts.length" class="category-empty">该分类尚未映射供应商商品</span>
+              </div>
+              <div v-if="countryOptions.length" class="country-grid"><button v-for="country in countryOptions" :key="country.code" type="button" :class="{ active: inventoryCountry === country.code }" @click="inventoryCountry = country.code"><b>{{ country.name }}</b><small>{{ country.code }}</small></button></div>
+              <div v-else class="supplier-empty">尚无此商品的国家快照。同步目录后，此处展示供应商实际返回的国家。</div>
+            </section>
+
             <section class="supplier-section segment-check-section">
-              <div class="section-heading"><div><h2>实时 IP 段检测</h2><p>官方产品 2 按国家和数量返回候选 CIDR。检测不锁库存，也不会创建订单或触发采购。</p></div><small v-if="inventoryCheckAt">查询于 {{ dateTime(inventoryCheckAt) }}</small></div>
+              <div class="section-heading"><div><h2>实时 IP 段检测</h2><p>按当前供应商商品、国家和数量查询候选 CIDR。检测不锁库存，也不会创建订单或触发采购。</p></div><small v-if="inventoryCheckAt">查询于 {{ dateTime(inventoryCheckAt) }}</small></div>
               <div class="segment-query-controls">
-                <label>国家<select v-if="countryOptions.length" v-model="inventoryCountry" :disabled="!!busy"><option v-for="item in countryOptions" :key="item.code" :value="item.code">{{ item.name }} · {{ item.code }}</option></select><input v-else v-model="inventoryCountry" maxlength="2" placeholder="先同步国家列表" :disabled="!!busy" /></label>
+                <label>国家<select v-if="countryOptions.length" v-model="inventoryCountry" :disabled="!!busy"><option v-for="item in countryOptions" :key="item.code" :value="item.code">{{ item.name }} · {{ item.code }}</option></select><input v-else v-model="inventoryCountry" maxlength="2" placeholder="先同步国家目录" :disabled="!!busy" /></label>
                 <label>所需数量<input v-model.number="inventoryCheckQuantity" type="number" min="1" max="300" step="1" inputmode="numeric" :disabled="!!busy" /></label>
-                <button class="primary-action" :disabled="busy || !overview.supplier.api_key_configured" @click="runInventoryCheck"><PackageSearch :size="15" :class="{ spinning: busy === 'inventory-check' }" />{{ busy === 'inventory-check' ? '查询中' : '查询候选 IP 段' }}</button>
+                <button class="primary-action" :disabled="busy || !selectedInventoryProduct || !overview.supplier.api_key_configured" @click="runInventoryCheck"><PackageSearch :size="15" :class="{ spinning: busy === 'inventory-check' }" />{{ busy === 'inventory-check' ? '查询中' : '查询候选 IP 段' }}</button>
               </div>
               <p v-if="inventoryCheckError" class="segment-error" role="alert">{{ inventoryCheckError }}</p>
               <div v-if="inventoryCheckResult" class="segment-results" aria-live="polite">
@@ -530,6 +624,12 @@ onMounted(load)
                 <p v-else class="supplier-empty">官方未返回候选网段，不会生成演示 CIDR。</p>
                 <p v-if="selectedSegmentRecord" class="segment-selection">已选择 {{ selectedSegmentRecord.cidr }}。选择仅供本次人工核对，刷新页面后清除，不会进入客户商品或订单。</p>
               </div>
+            </section>
+
+            <section class="supplier-section">
+              <div class="section-heading"><div><h2>{{ inventoryCountry }} · 已保存 IP 段</h2><p>只展示供应商检测返回的历史快照；过期快照不可用于创建订单。</p></div><span>{{ visibleIpSegments.length }} 条</span></div>
+              <div v-if="!visibleIpSegments.length" class="supplier-empty">当前国家暂无已保存网段。运行库存检测后，返回的真实 CIDR 会保存为快照。</div>
+              <div v-else class="segment-snapshot-list"><div v-for="item in visibleIpSegments" :key="item.id"><span><b>{{ item.cidr }}</b><small>检测数量 {{ item.requested_quantity }} · {{ dateTime(item.checked_at) }}</small></span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em><button type="button" class="secondary-action" :disabled="item.data_state !== 'fresh' || !item.is_segment_sufficient" @click="selectedSegment = item.cidr">{{ item.data_state === 'fresh' ? '选中此段' : '快照过期' }}</button></div></div>
             </section>
 
             <section class="supplier-section">
@@ -594,6 +694,34 @@ onMounted(load)
 @media(max-width:480px){.segment-query-controls{grid-template-columns:1fr}.segment-query-controls .primary-action{grid-column:auto}.segment-option{align-items:flex-start}.segment-option em{margin-left:auto}}
 .quote-table .data-head,.quote-table .data-row{grid-template-columns:.7fr .95fr .8fr .8fr .8fr .65fr 1fr}
 @media(max-width:1200px){.quote-table .data-head,.quote-table .data-row{grid-template-columns:.7fr 1fr .8fr .85fr .65fr 1fr}.quote-table .data-head span:nth-child(4),.quote-table .data-row span:nth-child(4){display:none}}
+.supplier-shell .workspace-sidebar{background:#fff;color:#20342d;border-right:1px solid #dce5e1;box-shadow:2px 0 12px #182d2508}
+.supplier-shell .workspace-role{color:#7c9189}
+.supplier-shell .workspace-sidebar nav button{color:#526860}
+.supplier-shell .workspace-sidebar nav button:hover,.supplier-shell .workspace-sidebar nav button.active{background:#e7f4ef;color:#176b58}
+.supplier-shell .workspace-sidebar nav button.active svg{color:#17856b}
+.supplier-shell .workspace-user{border-color:#e1e9e5}
+.supplier-shell .workspace-user small,.supplier-shell .workspace-user button{color:#71857d}
+.supplier-header{background:#fff}
+.category-switch{display:flex;gap:7px;overflow-x:auto;padding:14px 0 11px;scrollbar-width:thin}
+.category-switch button{min-height:34px;padding:7px 10px;border:1px solid #d6e1dc;border-radius:5px;background:#fff;color:#50665d;font-size:10px;white-space:nowrap;transition:background .18s ease,border-color .18s ease,color .18s ease}
+.category-switch button:hover{border-color:#81ad9b;background:#f2f8f4}
+.category-switch button.active{border-color:#2c9174;background:#e5f3ec;color:#176c55;font-weight:750}
+.category-browser-controls{display:grid;grid-template-columns:minmax(220px,1fr) auto;align-items:end;gap:10px;margin-bottom:11px}
+.category-browser-controls label{display:grid;gap:5px;color:#657973;font-size:10px}
+.category-browser-controls select{width:100%;height:36px;padding:0 9px;border:1px solid #c8d6d2;border-radius:5px;background:#fff;color:#263b37;font-size:11px}
+.category-empty{grid-column:1/-1;padding:10px 12px;border-radius:5px;background:#f2f5f3;color:#71847c;font-size:10px}
+.country-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:7px}
+.country-grid button{min-height:50px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border:1px solid #dfe7e3;border-radius:5px;background:#fff;color:#334c40;text-align:left;transition:background .18s ease,border-color .18s ease,transform .18s ease}
+.country-grid button:hover{border-color:#78aa96;background:#f4faf6;transform:translateY(-1px)}
+.country-grid button.active{border-color:#358f71;background:#e8f5ee;color:#17644e}
+.country-grid b{font-size:11px}.country-grid small{color:#74877f;font-size:9px}
+.segment-snapshot-list{display:grid;border-top:1px solid #dfe7e3}
+.segment-snapshot-list>div{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:10px 2px;border-bottom:1px solid #e4ebe7}
+.segment-snapshot-list>div>span{display:grid;gap:3px;min-width:0}.segment-snapshot-list b{font-size:11px;font-variant-numeric:tabular-nums}.segment-snapshot-list small{color:#74867e;font-size:9px}
+.segment-snapshot-list .secondary-action{min-height:30px;padding:5px 8px;font-size:10px}
+.product-mapping-table .data-head,.product-mapping-table .data-row{grid-template-columns:1.2fr .55fr 1.1fr 1.25fr .8fr}
+@media(max-width:768px){.category-browser-controls{grid-template-columns:1fr}.category-browser-controls .secondary-action{width:100%}.segment-snapshot-list>div{grid-template-columns:minmax(0,1fr) auto}.segment-snapshot-list>div>.secondary-action{grid-column:1/-1}.supplier-shell .workspace-sidebar{position:fixed}.supplier-header{height:76px}.supplier-content{padding:18px}}
+@media(max-width:480px){.country-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.category-browser-controls select{width:100%}.supplier-content{padding:14px}}
 @media(prefers-reduced-motion:reduce){.spinning,.supplier-loading span{animation:none}}
 .credential-form{display:grid;gap:7px;margin:12px 0 0 28px}.credential-form>label{font-size:11px;font-weight:700;color:#405a53}.credential-input-row{display:flex;align-items:center;gap:8px}.credential-input-row input{flex:1;min-width:0;height:38px;padding:0 10px;border:1px solid #b9cbc4;border-radius:5px;background:#fff;color:#243b34;font-size:13px}.credential-input-row input:focus{outline:2px solid #4a9c8e;outline-offset:1px}.credential-input-row input:disabled{background:#eef2f0}.credential-form>small,.credential-readonly{font-size:10px;color:#6d817a}.credential-readonly{margin:10px 0 0 28px}.credential-clear{justify-self:start;padding:4px 0;color:#536b64;font-size:10px;text-decoration:underline;text-underline-offset:2px}.credential-clear-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:9px 10px;border:1px solid #e4c99e;border-radius:5px;background:#fff8eb;color:#765820;font-size:10px}.credential-clear-confirm span{flex:1 1 240px}.credential-clear-danger{padding:6px 9px;border-radius:4px;background:#9c3f36;color:#fff;font-size:10px}.credential-config-error{margin:10px 0 0 28px;padding:9px 10px;border:1px solid #e6b8b2;border-radius:5px;background:#fff2f0;color:#923c34;font-size:11px}.rebuild-command{display:block;margin-top:9px;padding:9px 10px;border:1px solid #d7e1dd;border-radius:5px;background:#fff;font-size:10px;overflow-wrap:anywhere}.rebuild-copy{margin-top:7px}
 @media(max-width:768px){.credential-form,.credential-readonly,.credential-config-error{margin-left:0}.credential-input-row{align-items:stretch;flex-direction:column}.credential-input-row .primary-action{width:100%}}

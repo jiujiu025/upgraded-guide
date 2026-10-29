@@ -35,6 +35,7 @@ def production_settings(**overrides) -> dict:
         "jwt_secret_key": VALID_SECRET,
         "session_token_hash_key": "Distinct_Refresh_Hash_Secret_2026_AbCdEfGh!",
         "supplier_secret_encryption_key": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "payment_secret_encryption_key": "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
         "database_url": VALID_DATABASE_URL,
         "frontend_origin": VALID_FRONTEND_ORIGIN,
         "rate_limit_backend": "redis",

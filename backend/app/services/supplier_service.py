@@ -1,15 +1,16 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from ipaddress import ip_network
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
     Product, ProductSupplyRule, Region, ResourcePool, ResourcePoolSupplier, Supplier,
-    SupplierInventorySnapshot, SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
+    SupplierInventorySnapshot, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
 )
 from app.services.audit_service import write_audit
-from app.suppliers.base import InventoryItem, QuoteItem, SupplierProductItem, SupplierRegionItem
+from app.suppliers.base import InventoryItem, QuoteItem, SupplierInvalidResponseError, SupplierProductItem, SupplierRegionItem
 
 SUPPLIER_CODE = "quanqiudaili"
 POOL_CODE = "global_proxy_pool"
@@ -19,6 +20,12 @@ CITIES_ENDPOINT = "/externalapi/inventory/cityList"
 INVENTORY_ENDPOINT = "/externalapi/inventory/getBuyProductSku"
 INVENTORY_CHECK_ENDPOINT = "/externalapi/product_order/checkInventory"
 QUOTES_ENDPOINT = "/externalapi/product_price/getProductUnitPrice"
+RESOURCE_CATEGORY_CODES = {
+    "static_residential": "独享静态住宅（普通）",
+    "static_residential_native": "独享静态住宅（本土原生）",
+    "static_residential_isp": "独享静态住宅（运营商原生）",
+    "static_datacenter": "独享静态数据中心",
+}
 
 
 def utcnow() -> datetime:
@@ -232,15 +239,67 @@ def save_quotes(db: Session, items: list[QuoteItem]) -> list[SupplierQuote]:
     return records
 
 
-def map_supplier_product(db: Session, supplier_product_id: int, local_product_id: int | None) -> SupplierProduct:
+def map_supplier_product(
+    db: Session,
+    supplier_product_id: int,
+    local_product_id: int | None,
+    resource_category: str | None = None,
+) -> SupplierProduct:
     record = db.get(SupplierProduct, supplier_product_id)
     if not record:
         raise ValueError("供应商商品不存在")
     if local_product_id is not None and not db.get(Product, local_product_id):
         raise ValueError("玖玖云商品不存在")
+    if resource_category is not None and resource_category not in RESOURCE_CATEGORY_CODES:
+        raise ValueError("资源分类无效")
     record.local_product_id = local_product_id
+    record.resource_category = resource_category
     db.flush()
     return record
+
+
+def save_ip_segment_snapshots(
+    db: Session,
+    product_type_id: int,
+    country_code: str,
+    quantity: int,
+    duration_code: int | None,
+    segments: tuple[tuple[str, bool], ...],
+    request_sufficient: bool,
+    sync_run_id: int,
+) -> list[SupplierIpSegmentSnapshot]:
+    supplier, _ = ensure_pool_one(db)
+    product = get_supplier_product(db, product_type_id)
+    region = db.scalar(select(SupplierRegion).where(
+        SupplierRegion.supplier_product_id == product.id,
+        SupplierRegion.country_code == country_code.upper(),
+        SupplierRegion.city_name.is_(None),
+    ))
+    checked_at = utcnow()
+    canonical_segments: dict[str, bool] = {}
+    for cidr, is_sufficient in segments:
+        try:
+            canonical = str(ip_network(cidr, strict=False))
+        except ValueError as exc:
+            raise SupplierInvalidResponseError("供应商网段格式无效") from exc
+        canonical_segments[canonical] = is_sufficient
+    records = [SupplierIpSegmentSnapshot(
+        supplier_id=supplier.id,
+        supplier_product_id=product.id,
+        supplier_region_id=region.id if region else None,
+        sync_run_id=sync_run_id,
+        country_code=country_code.upper(),
+        city_name=None,
+        cidr=canonical,
+        requested_quantity=quantity,
+        duration_code=duration_code,
+        is_segment_sufficient=is_sufficient,
+        is_request_sufficient=request_sufficient,
+        checked_at=checked_at,
+    ) for cidr, is_sufficient in canonical_segments.items()]
+    db.add_all(records)
+    db.flush()
+    return records
 
 
 def map_supplier_region(db: Session, supplier_region_id: int, local_region_id: int | None) -> SupplierRegion:

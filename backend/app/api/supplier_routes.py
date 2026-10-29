@@ -11,8 +11,8 @@ from app.api.deps import require_roles
 from app.core.config import get_settings
 from app.db import get_db
 from app.models import (
-    CatalogPublication, ProductSupplyRule, ResourcePool, Supplier, SupplierInventorySnapshot, SupplierProduct, SupplierQuote,
-    SupplierRegion, SupplierSyncRun, User,
+    CatalogPublication, ProductSupplyRule, ResourcePool, Supplier, SupplierInventorySnapshot, SupplierIpSegmentSnapshot,
+    SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
 )
 from app.services.audit_service import write_audit
 from app.services.catalog_publication_service import PublicationError, publish_catalog, withdraw_catalog
@@ -23,7 +23,7 @@ from app.services.supplier_credentials import (
 from app.services.supplier_service import (
     CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, INVENTORY_ENDPOINT, begin_sync_run,
     configure_manual_supply_rule, ensure_pool_one, finish_sync_run, map_supplier_product,
-    map_supplier_region, save_inventory, save_quotes, sync_products, sync_regions,
+    map_supplier_region, RESOURCE_CATEGORY_CODES, save_inventory, save_ip_segment_snapshots, save_quotes, sync_products, sync_regions,
 )
 from app.suppliers.base import (
     InventoryItem, ProcurementDisabledError, SupplierBusinessError, SupplierCapabilityUnsupportedError,
@@ -38,6 +38,7 @@ router = APIRouter(prefix="/admin/suppliers", tags=["供应商只读接入"])
 class ProductMapIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     local_product_id: int | None = None
+    resource_category: str | None = None
 
 
 class RegionMapIn(BaseModel):
@@ -442,6 +443,42 @@ def list_inventory(db: Session = Depends(get_db), _: User = Depends(require_role
     return result
 
 
+@router.get("/ip-segments")
+def list_supplier_ip_segments(
+    country_code: str | None = Query(default=None, min_length=2, max_length=2),
+    resource_category: str | None = None,
+    supplier_product_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=300, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("super_admin", "admin")),
+):
+    settings = get_settings()
+    query = select(SupplierIpSegmentSnapshot).join(
+        SupplierProduct, SupplierProduct.id == SupplierIpSegmentSnapshot.supplier_product_id,
+    ).order_by(SupplierIpSegmentSnapshot.checked_at.desc())
+    if country_code:
+        query = query.where(SupplierIpSegmentSnapshot.country_code == country_code.upper())
+    if supplier_product_id:
+        query = query.where(SupplierIpSegmentSnapshot.supplier_product_id == supplier_product_id)
+    if resource_category:
+        query = query.where(SupplierProduct.resource_category == resource_category)
+    query = query.limit(limit)
+    records = db.scalars(query).all()
+    products = {item.id: item for item in db.scalars(select(SupplierProduct).where(
+        SupplierProduct.id.in_({item.supplier_product_id for item in records})
+    )).all()} if records else {}
+    return [{
+        **serialize_model(item),
+        "resource_category": products.get(item.supplier_product_id).resource_category if products.get(item.supplier_product_id) else None,
+        "data_state": snapshot_state(db, item.checked_at, {"inventory_check"}, settings.supplier_inventory_ttl_minutes),
+    } for item in records]
+
+
+@router.get("/resource-categories")
+def list_resource_categories(_: User = Depends(require_roles("super_admin", "admin"))):
+    return [{"code": code, "label": label} for code, label in RESOURCE_CATEGORY_CODES.items()]
+
+
 @router.post("/check-inventory")
 def check_supplier_inventory(
     payload: InventoryCheckIn,
@@ -467,6 +504,16 @@ def check_supplier_inventory(
             )],
             source_endpoint=INVENTORY_CHECK_ENDPOINT,
         )
+        segment_records = save_ip_segment_snapshots(
+            db,
+            payload.product_type_id,
+            payload.country_code,
+            payload.quantity,
+            payload.duration_code,
+            result.segments,
+            result.is_sufficient,
+            run.id,
+        )
         write_audit(
             db,
             user,
@@ -478,7 +525,7 @@ def check_supplier_inventory(
         completed = finish_sync_run(db, user, run.id, "success", 1, len(records))
         return {
             "is_sufficient": result.is_sufficient,
-            "segments": [{"cidr": cidr, "is_sufficient": sufficient} for cidr, sufficient in result.segments],
+            "segments": [{"id": item.id, "cidr": item.cidr, "is_sufficient": item.is_segment_sufficient} for item in segment_records],
             "run_id": completed.id,
             "status": completed.status,
             "source_endpoint": INVENTORY_CHECK_ENDPOINT,
@@ -532,8 +579,8 @@ def update_product_mapping(
     user: User = Depends(require_roles("super_admin", "admin")),
 ):
     try:
-        record = map_supplier_product(db, supplier_product_id, payload.local_product_id)
-        write_audit(db, user, "update", "supplier_product_mapping", record.id, f"玖玖云商品={payload.local_product_id}")
+        record = map_supplier_product(db, supplier_product_id, payload.local_product_id, payload.resource_category)
+        write_audit(db, user, "update", "supplier_product_mapping", record.id, f"玖玖云商品={payload.local_product_id}; 资源分类={payload.resource_category}")
         db.commit()
         return serialize_model(record)
     except ValueError as exc:

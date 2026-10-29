@@ -22,7 +22,7 @@ ss -ltn '( sport = :18081 )'
 
 ## 本地环境文件
 
-把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`SUPPLIER_SECRET_ENCRYPTION_KEY` 必须用 `openssl rand -hex 32` 生成并妥善备份；它只用于加密后台录入的供应商 Key，丢失后数据库中的密文无法恢复，直接更换会使已有密文无法解密。首次部署迁移到 `0016_supplier_credential` 后，超级管理员可在 `/admin/resource-pool` 直接录入全球代理 Key；页面只显示配置状态，不回显 Key。后台密文优先于环境变量。`GLOBAL_PROXY_API_KEY` 仍可作为服务器环境配置回退，仅由 Compose 注入 API 容器；不要配置在前端、数据库明文、迁移容器或 Git 中。未配置任一凭据时资源池页面会禁用同步按钮。
+把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`SUPPLIER_SECRET_ENCRYPTION_KEY` 与 `PAYMENT_SECRET_ENCRYPTION_KEY` 必须分别用 `openssl rand -hex 32` 生成并妥善备份，二者不可复用；丢失对应主密钥后数据库中的密文无法恢复，直接更换会使已有密文无法解密。支付密钥主密钥仅用于支付通道 V1 MD5 密钥的 AES-GCM 密文。线上支付保持关闭，支付管理里的域名连通性检查不验证商户凭据，也不构成沙箱验收。首次部署完成迁移（当前 head 为 `0018_finance_ledger`）后，超级管理员可在 `/admin/resource-pool` 直接录入全球代理 Key；页面只显示配置状态，不回显 Key。后台密文优先于环境变量。`GLOBAL_PROXY_API_KEY` 仍可作为服务器环境配置回退，仅由 Compose 注入 API 容器；不要配置在前端、数据库明文、迁移容器或 Git 中。未配置任一凭据时资源池页面会禁用同步按钮。
 
 若使用环境变量方式配置或轮换供应商 Key，只在服务器编辑 `.env.production`，保持文件权限 `0600`，然后仅重建 API 容器以加载环境变量：
 
@@ -34,6 +34,8 @@ docker compose --env-file .env.production -f docker-compose.prod.yml ps api
 之后以管理员登录 `/admin/resource-pool`，先同步商品、国家/城市、库存和报价并核对状态。报价或地区同步失败时保留失败状态，不发布相关快照。该只读适配器不含购买、续费、取消或退款能力，自动采购仍固定关闭。
 
 文件权限要求：目录仅部署账号及必要管理员可访问，`.env.production` 所有者为部署账号，权限 `0600`；备份目录同样限制为 `0700`。不要提交该文件，不要把它放入镜像构建上下文，不要在聊天、工单、CI 日志、命令行参数或 Nginx 配置中写密钥。Docker 管理员仍能通过容器检查读取环境变量，所以 Docker socket 和部署账号必须只授予可信运维人员。
+
+财务功能当前迁移 head 为 `0018_finance_ledger`，包含钱包账本、支付订单、退款和销售佣金表。线上支付由后端固定关闭；不能通过改数据库或前端配置绕过。完成隔离 PostgreSQL 与服务商沙箱/受控小额支付验收前，不得开放在线充值。超级管理员后台的连通性检查只探测官方 API 域名，不发送商户密钥，也不验证凭据有效性。
 
 ```sh
 chmod 600 .env.production

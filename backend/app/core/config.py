@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     rate_limit_window_seconds: int = 60
     global_proxy_api_key: SecretStr | None = None
     supplier_secret_encryption_key: SecretStr | None = None
+    payment_secret_encryption_key: SecretStr | None = None
     global_proxy_base_url: str = "https://admin.quanqiudaili.com"
     supplier_http_timeout_seconds: float = 10.0
     supplier_read_retry_attempts: int = 3
@@ -76,6 +77,15 @@ class Settings(BaseSettings):
             raise ValueError("生产环境必须配置 64 位十六进制 SUPPLIER_SECRET_ENCRYPTION_KEY") from exc
         if len(encryption_key_bytes) != 32 or len(set(encryption_key_bytes)) < 12:
             raise ValueError("生产环境必须配置 64 位十六进制 SUPPLIER_SECRET_ENCRYPTION_KEY")
+        payment_encryption_key = self.payment_secret_encryption_key.get_secret_value() if self.payment_secret_encryption_key else ""
+        try:
+            payment_encryption_key_bytes = bytes.fromhex(payment_encryption_key)
+        except ValueError as exc:
+            raise ValueError("生产环境必须配置 64 位十六进制 PAYMENT_SECRET_ENCRYPTION_KEY") from exc
+        if len(payment_encryption_key_bytes) != 32 or len(set(payment_encryption_key_bytes)) < 12:
+            raise ValueError("生产环境必须配置独立的 64 位十六进制 PAYMENT_SECRET_ENCRYPTION_KEY")
+        if payment_encryption_key_bytes == encryption_key_bytes:
+            raise ValueError("PAYMENT_SECRET_ENCRYPTION_KEY 不得与供应商凭据加密密钥相同")
 
         database_url = urlsplit(self.database_url.replace("postgresql+psycopg://", "postgresql://", 1))
         if database_url.scheme != "postgresql" or not database_url.hostname:

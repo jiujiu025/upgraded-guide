@@ -18,9 +18,11 @@ import {
   RotateCw,
   Server,
   ShieldCheck,
+  ShieldOff,
   Settings,
   ShoppingCart,
   UserPlus,
+  Users,
   X,
 } from "lucide-vue-next";
 import { useRoute, useRouter } from "vue-router";
@@ -52,6 +54,7 @@ import {
   updateCustomerLineNote,
 } from "../api";
 import { session } from "../api/session";
+import { getAdminNavigation } from "../navigation/adminNavigation";
 import { logout as endSession } from "../api";
 import { loadHealthFixture } from "../mocks/health";
 
@@ -73,7 +76,7 @@ const salesCustomers = ref([]);
 const salesOrders = ref([]);
 const expiringLines = ref([]);
 const healthImpacts = ref([]);
-const salesUserForm = reactive({ username: "", display_name: "", password: "", confirmPassword: "" });
+const salesUserForm = reactive({ username: "", display_name: "", phone: "", password: "", confirmPassword: "" });
 const securityQuestions = ref({ configured: false, question_1: null, question_2: null });
 const securityQuestionForm = reactive({ current_password: "", question_1: "", answer_1: "", question_2: "", answer_2: "" });
 const securityQuestionOptions = [
@@ -119,6 +122,7 @@ const storedUser = computed(() => {
 });
 const clientNav = [
   ["首页", "/client", Gauge],
+  ["账户余额", "/client/wallet", CircleDollarSign],
   ["购买线路", "/buy", ShoppingCart],
   ["我的订单", "/client/orders", PackageSearch],
   ["我的线路", "/client/lines", Server],
@@ -134,21 +138,20 @@ const nav = computed(() =>
     : workspace.value === "sales"
       ? [
           ["销售概览", "/sales", Gauge],
+          ["我的钱包", "/sales/wallet", CircleDollarSign],
           ["我的客户影响", "/sales/health", Activity],
           ["客户会话", "/sales/inbox", MessageSquare],
           ["安全中心", "/sales/security", ShieldCheck],
         ]
       : [
-          ["订单处理", "/admin", Box],
-          ["线路健康", "/admin/health", Activity],
-          ["全量会话", "/admin/inbox", MessageSquare],
-          ["资源池", "/admin/resource-pool", Database],
-          ["安全中心", "/admin/security", ShieldCheck],
-          ...(storedUser.value.role === "super_admin" ? [["销售账号", "/admin/sales-users", UserPlus]] : []),
+          ...getAdminNavigation(storedUser.value.role),
         ],
 );
 const titles = {
   dashboard: "客户首页",
+  "client-wallet": "账户余额",
+  "sales-wallet": "我的钱包",
+  "admin-finance": "财务中心",
   orders: "我的订单",
   order: "订单详情",
   lines: "我的线路",
@@ -343,11 +346,13 @@ async function submitSalesUser() {
     const { data } = await createSalesUser({
       username: salesUserForm.username.trim(),
       display_name: salesUserForm.display_name.trim(),
+      phone: salesUserForm.phone.trim() || null,
       password: salesUserForm.password,
     });
     success.value = `销售账号 ${data.username} 已创建，可以使用初始密码登录`;
     salesUserForm.username = "";
     salesUserForm.display_name = "";
+    salesUserForm.phone = "";
     salesUserForm.password = "";
     salesUserForm.confirmPassword = "";
   } catch (requestError) {
@@ -1437,6 +1442,7 @@ onMounted(load);
                   statusText[order.status] || order.status
                 }}</em>
               </div>
+              <div v-if="order.source_type === 'resource_pool'" class="resource-order-note"><ShieldOff :size="14" />资源池 1 订单 · 当前待付款和人工采购审核，系统不会自动采购或开通</div>
               <dl class="admin-order-meta">
                 <div>
                   <dt>数量 / 周期</dt>
@@ -1475,7 +1481,7 @@ onMounted(load);
                       'pending_payment',
                       'paid',
                       'processing',
-                    ].includes(order.status) && order.order_type !== 'renewal'
+                    ].includes(order.status) && order.order_type !== 'renewal' && order.source_type !== 'resource_pool'
                   "
                   class="button button-small"
                   :disabled="busy"
@@ -1486,7 +1492,7 @@ onMounted(load);
                   v-if="
                     ['pending_delivery', 'partially_delivered'].includes(
                       order.status,
-                    ) && order.order_type !== 'renewal'
+                    ) && order.order_type !== 'renewal' && order.source_type !== 'resource_pool'
                   "
                   class="outline-action"
                   @click="openDelivery(order)"
@@ -1583,6 +1589,7 @@ onMounted(load);
               <form class="sales-user-form" @submit.prevent="submitSalesUser">
                 <label><span>登录用户名</span><input v-model="salesUserForm.username" autocomplete="off" minlength="3" maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required /></label>
                 <label><span>销售姓名</span><input v-model="salesUserForm.display_name" autocomplete="name" maxlength="120" required /></label>
+                <label><span>联系电话</span><input v-model="salesUserForm.phone" type="tel" autocomplete="tel" maxlength="40" /></label>
                 <label><span>初始密码</span><input v-model="salesUserForm.password" type="password" autocomplete="new-password" minlength="10" maxlength="128" required /><small>至少 10 位，包含大小写字母、数字和特殊字符</small></label>
                 <label><span>确认初始密码</span><input v-model="salesUserForm.confirmPassword" type="password" autocomplete="new-password" minlength="10" maxlength="128" required /></label>
                 <p class="sales-user-note">账号仅具有销售权限；初始密码由创建者通过安全渠道单独告知。</p>
@@ -2156,4 +2163,5 @@ onMounted(load);
     margin-left: 14px;
   }
 }
+.resource-order-note{display:flex;align-items:center;gap:7px;margin:0 18px 14px;padding:9px 11px;border:1px solid #e8d3ab;border-radius:5px;background:#fff8eb;color:#755316;font-size:10px}
 </style>
