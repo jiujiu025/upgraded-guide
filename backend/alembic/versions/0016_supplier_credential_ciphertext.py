@@ -4,7 +4,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0016_supplier_credential_ciphertext"
+revision = "0016_supplier_credential"
 down_revision = "0015_user_security_questions"
 branch_labels = None
 depends_on = None

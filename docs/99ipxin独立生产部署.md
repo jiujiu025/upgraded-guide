@@ -22,7 +22,7 @@ ss -ltn '( sport = :18081 )'
 
 ## 本地环境文件
 
-把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`SUPPLIER_SECRET_ENCRYPTION_KEY` 必须用 `openssl rand -hex 32` 生成并妥善备份；它只用于加密后台录入的供应商 Key，丢失后数据库中的密文无法恢复，直接更换会使已有密文无法解密。首次部署迁移到 `0016_supplier_credential_ciphertext` 后，超级管理员可在 `/admin/resource-pool` 直接录入全球代理 Key；页面只显示配置状态，不回显 Key。后台密文优先于环境变量。`GLOBAL_PROXY_API_KEY` 仍可作为服务器环境配置回退，仅由 Compose 注入 API 容器；不要配置在前端、数据库明文、迁移容器或 Git 中。未配置任一凭据时资源池页面会禁用同步按钮。
+把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`SUPPLIER_SECRET_ENCRYPTION_KEY` 必须用 `openssl rand -hex 32` 生成并妥善备份；它只用于加密后台录入的供应商 Key，丢失后数据库中的密文无法恢复，直接更换会使已有密文无法解密。首次部署迁移到 `0016_supplier_credential` 后，超级管理员可在 `/admin/resource-pool` 直接录入全球代理 Key；页面只显示配置状态，不回显 Key。后台密文优先于环境变量。`GLOBAL_PROXY_API_KEY` 仍可作为服务器环境配置回退，仅由 Compose 注入 API 容器；不要配置在前端、数据库明文、迁移容器或 Git 中。未配置任一凭据时资源池页面会禁用同步按钮。
 
 若使用环境变量方式配置或轮换供应商 Key，只在服务器编辑 `.env.production`，保持文件权限 `0600`，然后仅重建 API 容器以加载环境变量：
 

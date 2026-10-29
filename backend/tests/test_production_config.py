@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import create_engine
@@ -9,6 +12,21 @@ from app import seed as seed_module
 VALID_SECRET = "R4nd0m_Production_Secret_2026!AbCdEfGh"
 VALID_DATABASE_URL = "postgresql+psycopg://app:password@db.example.com/ops_platform"
 VALID_FRONTEND_ORIGIN = "https://console.example.com"
+
+
+def test_alembic_revision_ids_fit_version_column():
+    versions_dir = Path(__file__).parents[1] / "alembic" / "versions"
+    for migration_path in versions_dir.glob("*.py"):
+        module = ast.parse(migration_path.read_text(encoding="utf-8"))
+        revision = next(
+            node.value.value
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "revision" for target in node.targets)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+        assert len(revision) <= 32, f"{migration_path.name}: revision ID exceeds PostgreSQL alembic_version width"
 
 
 def production_settings(**overrides) -> dict:
