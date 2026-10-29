@@ -1,11 +1,12 @@
 <script setup>
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Phone, UserRound } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { clearSession, session } from '../api/session'
-import { getAuthMe, getCustomerMe, login, register } from '../api'
+import { getAuthMe, getCustomerMe, login, logout as endSession, register } from '../api'
 import BrandLogo from './BrandLogo.vue'
 
+const props = defineProps({ portal: { type: String, default: 'customer' } })
 const route = useRoute()
 const router = useRouter()
 const isRegister = ref(route.meta.section === 'register')
@@ -15,8 +16,14 @@ const registerForm = reactive({ username: '', password: '', confirmPassword: '',
 const show = ref(false)
 const busy = ref(false)
 const error = ref('')
+const portalCopy = computed(() => ({
+  customer: { eyebrow: 'CUSTOMER PORTAL', headline: '把每一次连接，', highlight: '留在自己的业务里。', description: '登录玖玖IP客户中心，查看订单、线路交付和订阅信息。', title: '欢迎回来', hint: '使用客户账号登录客户中心。' },
+  admin: { eyebrow: 'ADMIN CONSOLE', headline: '运营管理，', highlight: '从专属入口开始。', description: '管理员账号请通过此入口进入运营工作台。', title: '管理员登录', hint: '仅管理员和超级管理员账号可进入。' },
+  sales: { eyebrow: 'SALES WORKSPACE', headline: '客户服务，', highlight: '从专属入口开始。', description: '销售账号请通过此入口进入销售工作台。', title: '销售登录', hint: '仅销售账号可进入销售工作台。' },
+})[props.portal] || {})
 const roleHome = (role) => role === 'customer' ? '/client' : role === 'sales' ? '/sales' : ['admin', 'super_admin'].includes(role) ? '/admin' : '/'
 const canOpen = (role, path) => (role === 'customer' && path.startsWith('/client')) || (role === 'sales' && path.startsWith('/sales')) || (['admin', 'super_admin'].includes(role) && path.startsWith('/admin')) || path === '/checkout'
+const roleMatchesPortal = (role) => props.portal === 'customer' ? role === 'customer' : props.portal === 'sales' ? role === 'sales' : ['admin', 'super_admin'].includes(role)
 
 async function submit() {
   if (isRegister.value) return submitRegister()
@@ -25,7 +32,11 @@ async function submit() {
   busy.value = true
   try {
     const { data } = await login({ username: account.value.trim(), password: password.value })
-    if (data.user.must_change_password) { await router.replace('/change-password'); return }
+    if (!roleMatchesPortal(data.user.role)) {
+      try { await endSession() } catch { clearSession() }
+      error.value = '用户名或密码错误'
+      return
+    }
     const { data: verifiedUser } = await getAuthMe()
     if (verifiedUser.role === 'customer') await getCustomerMe()
     session.user = verifiedUser
@@ -79,15 +90,15 @@ async function submitRegister() {
 </script>
 
 <template>
-  <section class="auth-page">
+  <section class="auth-page" :class="{ 'staff-auth-page': portal !== 'customer' }">
     <div class="auth-aside">
-      <p class="eyebrow">CUSTOMER PORTAL</p>
-      <h1>把每一次连接，<br /><span>留在自己的业务里。</span></h1>
-      <p>登录玖玖IP客户中心，查看订单、线路交付和订阅信息。</p>
+      <p class="eyebrow">{{ portalCopy.eyebrow }}</p>
+      <h1>{{ portalCopy.headline }}<br /><span>{{ portalCopy.highlight }}</span></h1>
+      <p>{{ portalCopy.description }}</p>
     </div>
     <form class="auth-card" :class="{ 'register-card': isRegister }" @submit.prevent="submit">
       <BrandLogo class="auth-brand-logo" full eager />
-      <div class="auth-tabs">
+      <div v-if="portal === 'customer'" class="auth-tabs">
         <button type="button" :class="{ active: !isRegister }" @click="isRegister = false; error = ''">登录</button>
         <button type="button" :class="{ active: isRegister }" @click="isRegister = true; error = ''">注册</button>
       </div>
@@ -107,12 +118,13 @@ async function submitRegister() {
         <button class="button full-button" :disabled="busy" type="submit">{{ busy ? '正在创建账号…' : '注册并进入客户中心' }} <ArrowRight :size="16" /></button>
       </template>
       <template v-else>
-        <h2>欢迎回来</h2>
-        <p class="auth-muted">使用已绑定客户、销售或管理员账号登录。</p>
+        <h2>{{ portalCopy.title }}</h2>
+        <p class="auth-muted">{{ portalCopy.hint }}</p>
         <label class="field"><span>用户名</span><div class="input-wrap"><UserRound :size="17" /><input v-model="account" autocomplete="username" placeholder="请输入用户名" @keyup.enter="submit" /></div></label>
         <label class="field"><span>密码</span><div class="input-wrap"><LockKeyhole :size="17" /><input v-model="password" :type="show ? 'text' : 'password'" autocomplete="current-password" placeholder="至少 8 位" @keyup.enter="submit" /><button type="button" class="input-action" :aria-label="show ? '隐藏密码' : '显示密码'" @click="show = !show"><EyeOff v-if="show" :size="16" /><Eye v-else :size="16" /></button></div></label>
         <p v-if="error" class="form-error" role="alert">{{ error }}</p>
         <button class="button full-button" :disabled="busy" type="submit">{{ busy ? '正在验证…' : '登录并继续' }} <ArrowRight :size="16" /></button>
+        <button class="recovery-link" type="button" @click="router.push({ path: '/recover-password', query: { portal } })">忘记密码？通过密保问题找回</button>
       </template>
     </form>
   </section>
@@ -122,4 +134,5 @@ async function submitRegister() {
 .register-card { width: 100%; }
 .register-grid .field, .input-wrap { min-width: 0; }
 .input-wrap input { min-height: 0; padding: 0; }
+.recovery-link { justify-self: end; color: #397e73; font-size: 12px; }
 </style>

@@ -97,7 +97,7 @@ def test_logout_expiry_and_admin_revoke(api):
     assert api.post("/api/auth/refresh", headers={"Origin": ORIGIN, "X-CSRF-Token": customer["csrf_token"]}).status_code == 401
 
 
-def test_reset_forced_change_and_role_isolation(api):
+def test_reset_password_and_role_isolation(api):
     chief = login(api, "chief")
     staff = login(api, "staff")
     sales = login(api, "sales")
@@ -112,7 +112,7 @@ def test_reset_forced_change_and_role_isolation(api):
     assert reset.status_code == 204
     assert api.get("/api/auth/me", headers=bearer(staff)).status_code == 401
     new_login = api.post("/api/auth/login", json={"username": "staff", "password": "NewAdmin_123!"}, headers={"Origin": ORIGIN}).json()
-    assert new_login["user"]["must_change_password"] is True
+    assert new_login["user"]["must_change_password"] is False
     assert api.get("/api/admin/users/1/sessions", headers=bearer(new_login)).status_code == 403
     assert api.post("/api/auth/change-password", json={"current_password": "NewAdmin_123!", "new_password": "NextAdmin_123!"}, headers=bearer(new_login)).status_code == 204
     assert api.get("/api/auth/me", headers=bearer(new_login)).status_code == 401

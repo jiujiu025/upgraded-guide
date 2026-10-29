@@ -35,10 +35,10 @@ def initialize_admin(username: str, password: str) -> int:
             if db.scalar(select(func.count()).select_from(User)):
                 raise ValueError("用户表非空，拒绝重复初始化")
             actor = User(username=username, password_hash=hash_password(password), role="super_admin",
-                         display_name="超级管理员", is_active=True, must_change_password=True)
+                         display_name="超级管理员", is_active=True, must_change_password=False)
             db.add(actor)
             db.flush()
-            write_audit(db, actor, "bootstrap_super_admin", "user", actor.id, "首次登录必须修改密码")
+            write_audit(db, actor, "bootstrap_super_admin", "user", actor.id, "超级管理员初始化")
             return actor.id
 
 
@@ -61,7 +61,7 @@ def main() -> int:
     except SQLAlchemyError:
         print("初始化失败: 数据库操作失败，请检查迁移与连接状态", file=sys.stderr)
         return 1
-    print("超级管理员已初始化；首次登录必须修改密码。")
+    print("超级管理员已初始化。")
     return 0
 
 

@@ -7,8 +7,10 @@ let refreshPromise = null
 onSessionChange((type) => {
   if (type !== 'session-cleared') return
   clearSession(false)
-  if (typeof window !== 'undefined' && /^\/(client|sales|admin)(\/|$)/.test(window.location.pathname)) {
-    window.location.replace('/login')
+  if (typeof window !== 'undefined') {
+    const path = window.location.pathname
+    const loginPath = path.startsWith('/admin') ? '/admin/login' : path.startsWith('/sales') ? '/sales/login' : path.startsWith('/client') ? '/login' : null
+    if (loginPath && path !== loginPath) window.location.replace(loginPath)
   }
 })
 client.interceptors.request.use((config) => {
@@ -69,6 +71,9 @@ export const logout = async () => {
   } finally { clearSession() }
 }
 export const changePassword = (payload) => client.post('/auth/change-password', payload)
+export const getSecurityQuestions = () => client.get('/auth/security-questions')
+export const updateSecurityQuestions = (payload) => client.put('/auth/security-questions', payload)
+export const recoverPassword = (payload) => client.post('/auth/password-recovery', payload)
 export const getAuthMe = () => client.get('/auth/me')
 export const getCustomerMe = () => client.get('/customer/me')
 export const getCustomerOrders = () => client.get('/customer/orders')
@@ -98,6 +103,7 @@ export const getSalesOrders = () => client.get('/sales/orders')
 export const getSalesExpiringLines = () => client.get('/sales/expiring-lines')
 export const getSalesHealthImpacts = () => client.get('/sales/health-impacts')
 export const getAdminOrders = () => client.get('/admin/orders')
+export const createSalesUser = (payload) => client.post('/admin/sales-users', payload)
 export const getManagedLine = (id) => client.get(`/lines/${id}`)
 export const confirmAdminOrder = (id) => client.post(`/admin/orders/${id}/confirm`)
 export const deliverAdminOrder = (id, payload) => client.post(`/admin/orders/${id}/deliver`, payload)

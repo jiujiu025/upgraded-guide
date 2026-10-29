@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import re
+import unicodedata
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -68,6 +69,129 @@ class RegisterIn(BaseModel):
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
             raise ValueError("邮箱格式不正确")
         return value.lower()
+
+
+class CreateSalesUserIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=3, max_length=80)
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=10, max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if len(normalized) < 3 or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", normalized):
+            raise ValueError("用户名只能包含小写字母、数字、点、下划线和短横线")
+        return normalized
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("姓名不能为空")
+        return normalized
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        checks = (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]")
+        if not all(re.search(pattern, value) for pattern in checks):
+            raise ValueError("密码必须包含大小写字母、数字和特殊字符")
+        return value
+
+
+SECURITY_QUESTION_IDS = {
+    "childhood_friend", "birth_city", "first_school", "favorite_teacher",
+    "childhood_nickname", "first_job", "favorite_book", "favorite_movie",
+}
+
+
+class SecurityQuestionsUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=1, max_length=128)
+    question_1: str
+    answer_1: str = Field(min_length=2, max_length=128)
+    question_2: str
+    answer_2: str = Field(min_length=2, max_length=128)
+
+    @field_validator("question_1", "question_2")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        if value not in SECURITY_QUESTION_IDS:
+            raise ValueError("请选择有效的密保问题")
+        return value
+
+    @field_validator("answer_1", "answer_2")
+    @classmethod
+    def normalize_answer(cls, value: str) -> str:
+        normalized = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+        if len(normalized) < 2:
+            raise ValueError("密保答案至少需要 2 个字符")
+        if len(normalized.encode("utf-8")) > 72:
+            raise ValueError("密保答案过长")
+        return normalized
+
+    @field_validator("question_2")
+    @classmethod
+    def questions_must_differ(cls, value: str, info):
+        if value == info.data.get("question_1"):
+            raise ValueError("请选择两个不同的密保问题")
+        return value
+
+
+class PasswordRecoveryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=3, max_length=80)
+    question_1: str
+    answer_1: str = Field(min_length=1, max_length=128)
+    question_2: str
+    answer_2: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=10, max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if len(normalized) < 3 or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", normalized):
+            raise ValueError("用户名格式不正确")
+        return normalized
+
+    @field_validator("question_1", "question_2")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        if value not in SECURITY_QUESTION_IDS:
+            raise ValueError("请选择有效的密保问题")
+        return value
+
+    @field_validator("answer_1", "answer_2")
+    @classmethod
+    def normalize_answer(cls, value: str) -> str:
+        normalized = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+        if len(normalized.encode("utf-8")) > 72:
+            raise ValueError("密保答案过长")
+        return normalized
+
+    @field_validator("question_2")
+    @classmethod
+    def questions_must_differ(cls, value: str, info):
+        if value == info.data.get("question_1"):
+            raise ValueError("请选择两个不同的密保问题")
+        return value
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value: str) -> str:
+        checks = (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]")
+        if not all(re.search(pattern, value) for pattern in checks):
+            raise ValueError("密码必须包含大小写字母、数字和特殊字符")
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("密码 UTF-8 长度不能超过 72 字节")
+        return value
 
 
 class CustomerIn(BaseModel):

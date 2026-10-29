@@ -1,4 +1,5 @@
 from collections import defaultdict, deque
+from hashlib import sha256
 from threading import Lock
 from time import monotonic
 
@@ -113,8 +114,12 @@ def verify_rate_limit_backend() -> None:
 
 
 def _enforce(request: Request, scope: str, limit: int) -> None:
+    _check_rate_limit(scope, get_client_ip(request), limit, settings.rate_limit_window_seconds)
+
+
+def _check_rate_limit(scope: str, client_key: str, limit: int, window_seconds: int) -> None:
     try:
-        rate_limiter.check(scope, get_client_ip(request), limit, settings.rate_limit_window_seconds)
+        rate_limiter.check(scope, client_key, limit, window_seconds)
     except RateLimitExceeded as exc:
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试") from exc
     except RateLimitUnavailable as exc:
@@ -127,3 +132,9 @@ def enforce_registration_rate_limit(request: Request) -> None:
 
 def enforce_login_rate_limit(request: Request) -> None:
     _enforce(request, "login", settings.login_rate_limit)
+
+
+def enforce_password_recovery_rate_limit(request: Request, username: str) -> None:
+    _check_rate_limit("password_recovery_ip", get_client_ip(request), 5, 900)
+    account_key = sha256(username.strip().lower().encode("utf-8")).hexdigest()
+    _check_rate_limit("password_recovery_account", account_key, 10, 3600)

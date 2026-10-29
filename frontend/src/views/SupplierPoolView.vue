@@ -92,7 +92,7 @@ const latestPublicationIds = computed(() => new Set(publications.value.filter((i
 
 async function logout() {
   await endSession()
-  router.replace('/login')
+  router.replace('/admin/login')
 }
 function notify(message) {
   feedback.value = message

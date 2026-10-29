@@ -39,7 +39,7 @@ def test_postgresql_bootstrap_once_and_audited(monkeypatch):
         with factory() as db:
             user = db.scalar(select(User))
             assert user.role == "super_admin"
-            assert user.must_change_password is True
+            assert user.must_change_password is False
             assert db.scalar(select(func.count()).select_from(User)) == 1
             audit = db.scalar(select(AuditLog))
             assert audit.action == "bootstrap_super_admin" and audit.actor_id == user.id

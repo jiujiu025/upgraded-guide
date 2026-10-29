@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import unicodedata
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Header
@@ -12,10 +13,11 @@ from app.core.security import create_access_token, hash_password, verify_passwor
 from app.db import get_db
 from app.models import AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, Product, Region, User
 from app.schemas.common import (
-    AssignCustomerIn, CompleteRenewalIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
+    AssignCustomerIn, CompleteRenewalIn, CreateSalesUserIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
     DeliverOrderIn, LineIn, LineOut, LoginIn, NotificationOut, OrderIn, RegisterIn,
-    OrderOut, OrderPreviewIn, OrderPreviewOut, ProductOut, PublicProductOut,
+    OrderOut, OrderPreviewIn, OrderPreviewOut, PasswordRecoveryIn, ProductOut, PublicProductOut,
     RegionOut, RenewalIn, TokenOut, UserOut,
+    SecurityQuestionsUpdateIn,
 )
 from app.services.audit_service import write_audit
 from app.services.customer_scope import get_customer_profile, scoped_customer_ids
@@ -24,11 +26,13 @@ from app.services.order_service import (
     TERMINAL_ORDER_STATUSES, add_notification, calculate_order_price, claim_delivery_slot,
     ensure_sales_user, initial_order_status, notify_order_parties,
 )
-from app.services.registration_service import enforce_login_rate_limit, enforce_registration_rate_limit
+from app.services.registration_service import (enforce_login_rate_limit, enforce_password_recovery_rate_limit,
+    enforce_registration_rate_limit)
 from app.services.session_service import (SessionError, create_session, csrf_token, find_refresh,
     revoke_session, revoke_user_sessions, rotate_session, validate_session)
 from app.core.config import get_settings
 import hmac
+import hashlib
 
 router = APIRouter()
 LOGIN_ERROR_DETAIL = "用户名或密码错误"
@@ -57,6 +61,16 @@ class UserAccessIn(BaseModel):
 def _strong_password(value: str) -> bool:
     import re
     return all(re.search(pattern, value) for pattern in (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]"))
+
+
+def _normalize_security_answer(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def _security_answer_digest(value: str) -> str:
+    settings = get_settings()
+    pepper = settings.session_token_hash_key.get_secret_value() if settings.session_token_hash_key else settings.jwt_secret_key
+    return hmac.new(pepper.encode("utf-8"), _normalize_security_answer(value).encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _cookie(response: Response, raw: str, expires_at: datetime) -> None:
@@ -199,6 +213,7 @@ def login(
         raise HTTPException(status_code=401, detail=LOGIN_ERROR_DETAIL)
     user.failed_login_count = 0
     user.locked_until = None
+    user.must_change_password = False
     session, raw = create_session(db, user)
     db.commit()
     _cookie(response, raw, session.expires_at)
@@ -264,6 +279,70 @@ def change_password(payload: ChangePasswordIn, response: Response, db: Session =
     write_audit(db, user, "change_password", "user", user.id)
     db.commit()
     _clear_cookie(response)
+
+
+@router.get("/auth/security-questions")
+def get_security_questions(response: Response, user: User = Depends(current_user)):
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "configured": bool(user.security_question_1 and user.security_answer_hash_1
+                           and user.security_question_2 and user.security_answer_hash_2),
+        "question_1": user.security_question_1,
+        "question_2": user.security_question_2,
+    }
+
+
+@router.put("/auth/security-questions", status_code=204)
+def update_security_questions(payload: SecurityQuestionsUpdateIn, response: Response, db: Session = Depends(get_db),
+                              user: User = Depends(current_user)):
+    response.headers["Cache-Control"] = "no-store"
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=401, detail="当前密码错误")
+    user.security_question_1 = payload.question_1
+    user.security_answer_hash_1 = hash_password(_security_answer_digest(payload.answer_1))
+    user.security_question_2 = payload.question_2
+    user.security_answer_hash_2 = hash_password(_security_answer_digest(payload.answer_2))
+    write_audit(db, user, "update_security_questions", "user", user.id, "更新两项密保问题")
+    db.commit()
+
+
+@router.post("/auth/password-recovery", status_code=200)
+def recover_password(payload: PasswordRecoveryIn, request: Request, response: Response, db: Session = Depends(get_db)):
+    if request.headers.get("origin") and request.headers["origin"] != get_settings().frontend_origin:
+        raise HTTPException(status_code=403, detail="请求来源无效")
+    response.headers["Cache-Control"] = "no-store"
+    enforce_password_recovery_rate_limit(request, payload.username)
+    user = db.scalar(select(User).where(User.username == payload.username))
+    answer_1_hash = user.security_answer_hash_1 if user and user.security_answer_hash_1 else DUMMY_PASSWORD_HASH
+    answer_2_hash = user.security_answer_hash_2 if user and user.security_answer_hash_2 else DUMMY_PASSWORD_HASH
+    answer_1_digest = _security_answer_digest(payload.answer_1)
+    answer_2_digest = _security_answer_digest(payload.answer_2)
+    answer_1_matches_first = verify_password(answer_1_digest, answer_1_hash)
+    answer_1_matches_second = verify_password(answer_1_digest, answer_2_hash)
+    answer_2_matches_first = verify_password(answer_2_digest, answer_1_hash)
+    answer_2_matches_second = verify_password(answer_2_digest, answer_2_hash)
+    normal_order_matches = (
+        user is not None
+        and user.security_question_1 == payload.question_1
+        and user.security_question_2 == payload.question_2
+        and answer_1_matches_first
+        and answer_2_matches_second
+    )
+    reverse_order_matches = (
+        user is not None
+        and user.security_question_2 == payload.question_1
+        and user.security_question_1 == payload.question_2
+        and answer_1_matches_second
+        and answer_2_matches_first
+    )
+    answers_match = bool(user and user.is_active and (normal_order_matches or reverse_order_matches))
+    if answers_match and user:
+        user.password_hash = hash_password(payload.new_password)
+        user.must_change_password = False
+        revoke_user_sessions(db, user, "password_recovered")
+        write_audit(db, user, "password_recovered", "user", user.id, "通过密保重置密码并撤销全部会话")
+        db.commit()
+    return {"message": "如账号和密保信息匹配，密码已重置；请使用新密码登录。"}
 
 
 @router.get("/customers", response_model=list[CustomerOut])
@@ -914,6 +993,31 @@ def _manageable_user(db: Session, actor: User, user_id: int) -> User:
     return target
 
 
+@router.post("/admin/sales-users", response_model=UserOut, status_code=201)
+def admin_create_sales_user(payload: CreateSalesUserIn, db: Session = Depends(get_db),
+                            actor: User = Depends(require_roles("super_admin"))):
+    if db.scalar(select(User.id).where(User.username == payload.username)) is not None:
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    sales_user = User(
+        username=payload.username,
+        password_hash=hash_password(payload.password),
+        role="sales",
+        display_name=payload.display_name,
+        must_change_password=False,
+    )
+    db.add(sales_user)
+    try:
+        db.flush()
+        write_audit(db, actor, "create_sales_user", "user", sales_user.id,
+                    f"用户名={sales_user.username}")
+        db.commit()
+        db.refresh(sales_user)
+        return sales_user
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="用户名已存在") from exc
+
+
 @router.get("/admin/users/{user_id}/sessions")
 def admin_user_sessions(user_id: int, db: Session = Depends(get_db),
                         actor: User = Depends(require_roles("super_admin", "admin"))):
@@ -955,9 +1059,9 @@ def admin_reset_password(user_id: int, payload: ResetPasswordIn, db: Session = D
         raise HTTPException(status_code=422, detail="新密码必须包含大小写字母、数字和特殊字符")
     target = _manageable_user(db, actor, user_id)
     target.password_hash = hash_password(payload.new_password)
-    target.must_change_password = True
+    target.must_change_password = False
     revoke_user_sessions(db, target, "password_reset")
-    write_audit(db, actor, "reset_password", "user", target.id, "已撤销全部会话，要求下次登录修改密码")
+    write_audit(db, actor, "reset_password", "user", target.id, "已撤销全部会话")
     db.commit()
 
 

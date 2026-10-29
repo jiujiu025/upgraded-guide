@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt import InvalidTokenError
 from sqlalchemy import select
@@ -12,7 +12,7 @@ from app.services.session_service import SessionError, validate_session
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-def current_user(request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
     try:
         payload = decode_access_token(token)
         user_id = int(payload["sub"])
@@ -31,8 +31,6 @@ def current_user(request: Request, token: str = Depends(oauth2_scheme), db: Sess
         validate_session(session, user)
     except SessionError as exc:
         raise HTTPException(status_code=401, detail="登录已失效") from exc
-    if user.must_change_password and request.url.path != "/api/auth/change-password":
-        raise HTTPException(status_code=403, detail="请先修改密码")
     return user
 
 

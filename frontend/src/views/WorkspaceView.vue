@@ -17,14 +17,17 @@ import {
   RefreshCw,
   RotateCw,
   Server,
+  ShieldCheck,
   Settings,
   ShoppingCart,
+  UserPlus,
   X,
 } from "lucide-vue-next";
 import { useRoute, useRouter } from "vue-router";
 import {
   cancelAdminOrder,
   cancelCustomerOrder,
+  createSalesUser,
   completeAdminRenewal,
   confirmAdminOrder,
   deliverAdminOrder,
@@ -41,9 +44,11 @@ import {
   getSalesDashboard,
   getSalesExpiringLines,
   getSalesOrders,
+  getSecurityQuestions,
   markAllNotificationsRead,
   markNotificationRead,
   renewCustomerLine,
+  updateSecurityQuestions,
   updateCustomerLineNote,
 } from "../api";
 import { session } from "../api/session";
@@ -68,6 +73,19 @@ const salesCustomers = ref([]);
 const salesOrders = ref([]);
 const expiringLines = ref([]);
 const healthImpacts = ref([]);
+const salesUserForm = reactive({ username: "", display_name: "", password: "", confirmPassword: "" });
+const securityQuestions = ref({ configured: false, question_1: null, question_2: null });
+const securityQuestionForm = reactive({ current_password: "", question_1: "", answer_1: "", question_2: "", answer_2: "" });
+const securityQuestionOptions = [
+  ["childhood_friend", "您童年最好的朋友叫什么？"],
+  ["birth_city", "您出生的城市是哪里？"],
+  ["first_school", "您上的第一所学校叫什么？"],
+  ["favorite_teacher", "您最喜欢的老师叫什么？"],
+  ["childhood_nickname", "您小时候的昵称是什么？"],
+  ["first_job", "您的第一份工作是什么？"],
+  ["favorite_book", "您最喜欢的一本书是什么？"],
+  ["favorite_movie", "您最喜欢的一部电影是什么？"],
+];
 const orderStatus = ref("");
 const filters = reactive({ product: "", region: "", status: "", note: "" });
 const editingLineId = ref(null);
@@ -108,6 +126,7 @@ const clientNav = [
   ["服务收件箱", "/client/inbox", MessageSquare],
   ["通知中心", "/client/notifications", Inbox],
   ["账户资料", "/client/profile", Settings],
+  ["安全中心", "/client/security", ShieldCheck],
 ];
 const nav = computed(() =>
   workspace.value === "client"
@@ -117,12 +136,15 @@ const nav = computed(() =>
           ["销售概览", "/sales", Gauge],
           ["我的客户影响", "/sales/health", Activity],
           ["客户会话", "/sales/inbox", MessageSquare],
+          ["安全中心", "/sales/security", ShieldCheck],
         ]
       : [
           ["订单处理", "/admin", Box],
           ["线路健康", "/admin/health", Activity],
           ["全量会话", "/admin/inbox", MessageSquare],
           ["资源池", "/admin/resource-pool", Database],
+          ["安全中心", "/admin/security", ShieldCheck],
+          ...(storedUser.value.role === "super_admin" ? [["销售账号", "/admin/sales-users", UserPlus]] : []),
         ],
 );
 const titles = {
@@ -136,8 +158,11 @@ const titles = {
   profile: "账户资料",
   sales: "销售工作台",
   admin: "管理员订单",
+  "admin-sales-users": "创建销售账号",
+  "security-center": "安全中心",
 };
 const pageTitle = computed(() => titles[page.value] || "工作台");
+const securityQuestionLabel = (id) => securityQuestionOptions.find(([key]) => key === id)?.[1] || "—";
 const unreadCount = computed(
   () => notifications.value.filter((item) => !item.is_read).length,
 );
@@ -228,7 +253,7 @@ async function logout() {
   try {
     await endSession();
   } finally {
-    router.replace("/login");
+    router.replace(workspace.value === "admin" ? "/admin/login" : workspace.value === "sales" ? "/sales/login" : "/login");
   }
 }
 
@@ -258,7 +283,9 @@ async function load() {
   error.value = "";
   detail.value = null;
   try {
-    if (workspace.value === "client") {
+    if (page.value === "security-center") {
+      securityQuestions.value = (await getSecurityQuestions()).data;
+    } else if (workspace.value === "client") {
       await loadClientBase();
       if (page.value === "order")
         detail.value = (await getCustomerOrder(route.params.id)).data;
@@ -291,6 +318,8 @@ async function load() {
         reason: `演示数据 · ${item.region} ${item.product}`,
         status: item.status,
       }));
+    } else if (page.value === "admin-sales-users") {
+      orders.value = [];
     } else {
       orders.value = (await getAdminOrders()).data;
     }
@@ -298,6 +327,56 @@ async function load() {
     error.value = requestError.userMessage || "数据加载失败，请稍后重试";
   } finally {
     loading.value = false;
+  }
+}
+
+async function submitSalesUser() {
+  if (storedUser.value.role !== "super_admin" || busy.value) return;
+  error.value = "";
+  success.value = "";
+  if (salesUserForm.password !== salesUserForm.confirmPassword) {
+    error.value = "两次输入的初始密码不一致";
+    return;
+  }
+  busy.value = true;
+  try {
+    const { data } = await createSalesUser({
+      username: salesUserForm.username.trim(),
+      display_name: salesUserForm.display_name.trim(),
+      password: salesUserForm.password,
+    });
+    success.value = `销售账号 ${data.username} 已创建，可以使用初始密码登录`;
+    salesUserForm.username = "";
+    salesUserForm.display_name = "";
+    salesUserForm.password = "";
+    salesUserForm.confirmPassword = "";
+  } catch (requestError) {
+    error.value = requestError.userMessage || "创建销售账号失败，请重试";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function saveSecurityQuestions() {
+  if (busy.value) return;
+  if (securityQuestionForm.question_1 === securityQuestionForm.question_2) {
+    error.value = "请选择两个不同的密保问题";
+    return;
+  }
+  busy.value = true;
+  error.value = "";
+  success.value = "";
+  try {
+    await updateSecurityQuestions({ ...securityQuestionForm });
+    securityQuestions.value = (await getSecurityQuestions()).data;
+    securityQuestionForm.current_password = "";
+    securityQuestionForm.answer_1 = "";
+    securityQuestionForm.answer_2 = "";
+    showSuccess("密保问题已安全保存");
+  } catch (requestError) {
+    error.value = requestError.userMessage || "保存密保问题失败，请重试";
+  } finally {
+    busy.value = false;
   }
 }
 
@@ -1145,6 +1224,24 @@ onMounted(load);
               </button>
             </section></template
           >
+          <template v-else-if="page === 'security-center'">
+            <section class="workspace-panel security-panel">
+              <div class="panel-head">
+                <div><h2>账号密保</h2><p>{{ securityQuestions.configured ? "已设置两项密保问题" : "尚未设置密保问题" }}</p></div>
+              </div>
+              <dl v-if="securityQuestions.configured" class="security-current-questions"><div><dt>第一题</dt><dd>{{ securityQuestionLabel(securityQuestions.question_1) }}</dd></div><div><dt>第二题</dt><dd>{{ securityQuestionLabel(securityQuestions.question_2) }}</dd></div></dl>
+              <p class="security-warning">密保答案可能被熟人或公开资料猜到。请使用只有您知道的、不易搜索到的答案；不要填写真实密码或其他账号的安全答案。</p>
+              <form class="security-question-form" @submit.prevent="saveSecurityQuestions">
+                <label><span>第一道问题</span><select v-model="securityQuestionForm.question_1" required><option value="" disabled>选择问题</option><option v-for="[id, label] in securityQuestionOptions" :key="id" :value="id">{{ label }}</option></select></label>
+                <label><span>第一题答案</span><input v-model="securityQuestionForm.answer_1" type="password" autocomplete="off" minlength="2" maxlength="128" required /></label>
+                <label><span>第二道问题</span><select v-model="securityQuestionForm.question_2" required><option value="" disabled>选择与第一题不同的问题</option><option v-for="[id, label] in securityQuestionOptions" :key="id" :value="id" :disabled="id === securityQuestionForm.question_1">{{ label }}</option></select></label>
+                <label><span>第二题答案</span><input v-model="securityQuestionForm.answer_2" type="password" autocomplete="off" minlength="2" maxlength="128" required /></label>
+                <label class="security-current-password"><span>当前登录密码</span><input v-model="securityQuestionForm.current_password" type="password" autocomplete="current-password" required /></label>
+                <p class="security-question-note">答案只以加密哈希保存，无法在页面查看。修改密保时需要重新填写两题和当前密码。</p>
+                <button class="security-save" type="submit" :disabled="busy"><ShieldCheck :size="16" />{{ busy ? "正在保存…" : "保存密保问题" }}</button>
+              </form>
+            </section>
+          </template>
           <template v-else-if="page === 'profile'"
             ><section v-if="profile" class="workspace-panel detail-panel">
               <div class="detail-heading">
@@ -1480,6 +1577,19 @@ onMounted(load);
               </form>
             </section></template
           >
+          <template v-else-if="page === 'admin-sales-users'">
+            <section class="workspace-panel sales-user-panel">
+              <div class="panel-head"><h2>新建销售账号</h2></div>
+              <form class="sales-user-form" @submit.prevent="submitSalesUser">
+                <label><span>登录用户名</span><input v-model="salesUserForm.username" autocomplete="off" minlength="3" maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required /></label>
+                <label><span>销售姓名</span><input v-model="salesUserForm.display_name" autocomplete="name" maxlength="120" required /></label>
+                <label><span>初始密码</span><input v-model="salesUserForm.password" type="password" autocomplete="new-password" minlength="10" maxlength="128" required /><small>至少 10 位，包含大小写字母、数字和特殊字符</small></label>
+                <label><span>确认初始密码</span><input v-model="salesUserForm.confirmPassword" type="password" autocomplete="new-password" minlength="10" maxlength="128" required /></label>
+                <p class="sales-user-note">账号仅具有销售权限；初始密码由创建者通过安全渠道单独告知。</p>
+                <button class="sales-user-submit" type="submit" :disabled="busy"><UserPlus :size="16" />{{ busy ? "正在创建…" : "创建销售账号" }}</button>
+              </form>
+            </section>
+          </template>
         </template>
       </main>
     </div>
@@ -1880,5 +1990,170 @@ onMounted(load);
 .workspace-alert > span {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+.sales-user-panel {
+  max-width: 720px;
+}
+.sales-user-form {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+.sales-user-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #526862;
+  font-size: 12px;
+  font-weight: 650;
+}
+.sales-user-form input {
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 11px;
+  border: 1px solid #c8d6d2;
+  border-radius: 5px;
+  background: #fff;
+  color: #263b37;
+}
+.sales-user-form small,
+.sales-user-note {
+  color: #71847e;
+  font-size: 11px;
+  font-weight: 400;
+}
+.sales-user-note {
+  margin: 0;
+  line-height: 1.6;
+}
+.sales-user-submit {
+  justify-self: start;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 5px;
+  background: #227f70;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.sales-user-submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+@media (max-width: 640px) {
+  .sales-user-panel {
+    max-width: none;
+  }
+  .sales-user-form {
+    padding: 14px;
+  }
+}
+.security-panel {
+  max-width: 760px;
+}
+.security-panel .panel-head p {
+  margin: 4px 0 10px;
+  color: #71847e;
+  font-size: 11px;
+}
+.security-current-questions {
+  display: grid;
+  gap: 8px;
+  padding: 12px 18px 0;
+  margin: 0;
+}
+.security-current-questions div {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 10px;
+}
+.security-current-questions dt {
+  color: #71847e;
+  font-size: 11px;
+}
+.security-current-questions dd {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.security-warning {
+  margin: 14px 18px 0;
+  padding: 10px 12px;
+  border-radius: 5px;
+  background: #fff3de;
+  color: #755b2e;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.security-question-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 18px;
+}
+.security-question-form label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: #526862;
+  font-size: 11px;
+}
+.security-question-form input,
+.security-question-form select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 7px 9px;
+  border: 1px solid #c8d6d2;
+  border-radius: 5px;
+  background: #fff;
+  color: #263b37;
+}
+.security-current-password,
+.security-question-note {
+  grid-column: 1 / -1;
+}
+.security-question-note {
+  margin: 0;
+  color: #71847e;
+  font-size: 11px;
+}
+.security-save {
+  justify-self: start;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border-radius: 5px;
+  background: #227f70;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.security-save:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+@media (max-width: 640px) {
+  .security-panel {
+    max-width: none;
+  }
+  .security-question-form {
+    grid-template-columns: 1fr;
+    padding: 14px;
+  }
+  .security-current-password,
+  .security-question-note {
+    grid-column: auto;
+  }
+  .security-warning {
+    margin-right: 14px;
+    margin-left: 14px;
+  }
 }
 </style>

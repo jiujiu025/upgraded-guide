@@ -19,8 +19,8 @@ const filters = reactive({ status: '', region: '', product: '', owner: '', keywo
 const storedUser = computed(() => session.user || {})
 const isSales = computed(() => route.meta.workspace === 'sales')
 const nav = computed(() => isSales.value
-  ? [['销售概览', '/sales', Gauge], ['我的客户影响', '/sales/health', Activity], ['客户会话', '/sales/inbox', MessageSquare]]
-  : [['订单处理', '/admin', Box], ['线路健康', '/admin/health', Activity], ['全量会话', '/admin/inbox', MessageSquare], ['资源池', '/admin/resource-pool', Database]])
+  ? [['销售概览', '/sales', Gauge], ['我的客户影响', '/sales/health', Activity], ['客户会话', '/sales/inbox', MessageSquare], ['安全中心', '/sales/security', ShieldCheck]]
+  : [['订单处理', '/admin', Box], ['线路健康', '/admin/health', Activity], ['全量会话', '/admin/inbox', MessageSquare], ['资源池', '/admin/resource-pool', Database], ...(storedUser.value.role === 'super_admin' ? [['销售账号', '/admin/sales-users', UserRound]] : []), ['安全中心', '/admin/security', ShieldCheck]])
 const statusMeta = {
   offline: { label: '离线', tone: 'critical' },
   abnormal: { label: '异常', tone: 'danger' },
@@ -46,7 +46,7 @@ const affectedCustomerRows = computed(() => {
   return rows
 })
 
-async function logout() { await endSession(); router.replace('/login') }
+async function logout() { await endSession(); router.replace(isSales.value ? '/sales/login' : '/admin/login') }
 function formatTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
 function duration(value) {
   const minutes = Math.max(1, Math.floor((new Date('2026-10-23T09:45:00+08:00') - new Date(value)) / 60000))

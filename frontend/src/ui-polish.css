@@ -1,0 +1,282 @@
+:root {
+  --cyan: #53dfc2;
+  --orange: #ff9676;
+  --ui-blue: #4f8de8;
+  --ui-blue-soft: #e9f1ff;
+  --ui-coral: #df705d;
+  --ui-coral-soft: #fff0eb;
+  --ui-amber: #cf922b;
+  --ui-amber-soft: #fff5df;
+  --ui-green: #238c70;
+  --ui-green-soft: #e6f5ef;
+  --ui-shadow: 0 14px 34px rgba(23, 59, 53, .09);
+}
+
+/* 页面切换和内容出现使用短促的位移，不改变用户操作节奏。 */
+.route-view-enter-active,
+.route-view-leave-active {
+  transition: opacity .18s ease, transform .18s ease;
+}
+.route-view-enter-from { opacity: 0; transform: translateY(8px); }
+.route-view-leave-to { opacity: 0; transform: translateY(-5px); }
+
+@keyframes ui-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes ui-pop {
+  0% { opacity: 0; transform: scale(.97) translateY(8px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes ui-line-in {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+button, a, input, select, textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+button, a {
+  transition: color .18s ease, background-color .18s ease, border-color .18s ease,
+    box-shadow .18s ease, transform .18s ease;
+}
+button:active:not(:disabled), .button:active:not(:disabled) { transform: scale(.985); }
+input, select, textarea {
+  transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--ui-blue) !important;
+  box-shadow: 0 0 0 3px rgba(79, 141, 232, .14);
+}
+
+/* 官网以青绿为主，蓝色补充信息层级，珊瑚色只用于少量强调。 */
+.site-header { box-shadow: 0 4px 18px rgba(1, 15, 17, .12); }
+.site-header::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, transparent, rgba(83, 223, 194, .55), rgba(79, 141, 232, .38), transparent);
+}
+.desktop-nav button { position: relative; }
+.desktop-nav button::after {
+  position: absolute;
+  right: 0;
+  bottom: -8px;
+  left: 0;
+  height: 2px;
+  content: "";
+  background: var(--cyan);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform .2s ease;
+}
+.desktop-nav button:hover::after { transform: scaleX(1); }
+.button, .drawer-cta {
+  box-shadow: 0 7px 18px rgba(31, 142, 119, .18);
+}
+.button:hover, .drawer-cta:hover {
+  box-shadow: 0 10px 23px rgba(31, 142, 119, .26);
+}
+.mobile-drawer { animation: ui-pop .22s ease both; }
+.mobile-drawer nav button {
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  transition: color .18s ease, padding-left .18s ease;
+}
+.mobile-drawer nav button:hover { padding-left: 8px; color: var(--cyan); }
+
+.hero-copy { animation: ui-enter .55s .05s both; }
+.network-visual { animation: ui-enter .65s .12s both; }
+.network-visual img { transition: transform .6s cubic-bezier(.2, .7, .2, 1), opacity .3s ease; }
+.network-visual:hover img { transform: scale(1.025); opacity: 1; }
+.visual-label { box-shadow: 0 5px 18px rgba(0, 0, 0, .2); }
+.visual-label.label-b b { color: #83b5ff; }
+.visual-label.label-c b { color: #ffad89; }
+.proof-strip div { transition: background-color .2s ease; }
+.proof-strip div:hover { background: rgba(83, 223, 194, .055); }
+.proof-strip div:nth-child(2) strong { color: #83b5ff; }
+.proof-strip div:nth-child(3) strong { color: #ffad89; }
+.product-card {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .7) inset;
+  animation: ui-enter .45s both;
+}
+.product-card:nth-child(2) { animation-delay: .05s; }
+.product-card:nth-child(3) { animation-delay: .1s; }
+.product-card:nth-child(4) { animation-delay: .15s; }
+.product-card:nth-child(4n + 1) .product-index { color: var(--ui-green); }
+.product-card:nth-child(4n + 2) .product-index { color: var(--ui-blue); }
+.product-card:nth-child(4n + 3) .product-index { color: var(--ui-coral); }
+.product-card:nth-child(4n) .product-index { color: var(--ui-amber); }
+.product-card:hover { box-shadow: var(--ui-shadow); }
+.product-card .card-foot span { transition: gap .18s ease; }
+.product-card:hover .card-foot span { gap: 9px; }
+.page-intro { position: relative; overflow: hidden; animation: ui-enter .4s both; }
+.page-intro::after {
+  position: absolute;
+  right: clamp(20px, 7vw, 110px);
+  bottom: 0;
+  width: min(36vw, 360px);
+  height: 3px;
+  content: "";
+  background: linear-gradient(90deg, var(--cyan), var(--ui-blue), var(--orange));
+  transform-origin: left;
+  animation: ui-line-in .55s .15s both;
+}
+.region-line button { transition: color .18s ease, border-color .18s ease, transform .18s ease; }
+.region-line button:hover { transform: translateY(-2px); background: rgba(83, 223, 194, .08); }
+.flow-item { transition: padding-left .18s ease, background-color .18s ease; }
+.flow-item:hover { padding-left: 10px; background: rgba(79, 141, 232, .045); }
+.flow-item:nth-child(2) > span { color: var(--ui-blue); }
+.flow-item:nth-child(3) > span { color: var(--ui-coral); }
+.flow-item:nth-child(4) > span { color: var(--ui-amber); }
+.contact-band { position: relative; overflow: hidden; }
+.contact-band .button { background: #102c2a; color: #f6faf8; }
+.contact-band .button:hover { background: #17443e; }
+
+/* 登录、安全中心和找回密码保持一致的明亮表单语言。 */
+.auth-page {
+  background: linear-gradient(128deg, #e5f1ee 0%, #f5f8f6 48%, #eaf0fa 100%);
+}
+.staff-auth-page { min-height: 100vh; }
+.auth-aside { animation: ui-enter .5s both; }
+.auth-aside .eyebrow { color: #258e7b; }
+.auth-aside h1 em { color: var(--ui-blue); }
+.auth-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, .82);
+  box-shadow: 0 24px 70px rgba(27, 69, 61, .14);
+  animation: ui-pop .4s .08s both;
+}
+.auth-card::before, .recovery-card::before, .password-form::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 4px;
+  content: "";
+  background: linear-gradient(90deg, var(--ui-green), var(--ui-blue), var(--ui-coral));
+}
+.auth-tabs button { transition: color .18s ease, background-color .18s ease; }
+.auth-tabs button.active { box-shadow: inset 0 -2px var(--ui-green); }
+.auth-card .input-wrap:focus-within { border-color: var(--ui-blue); box-shadow: 0 0 0 3px rgba(79, 141, 232, .13); }
+.auth-card .form-error, .recovery-error { padding: 10px 12px; border: 1px solid #f0c4b9; border-radius: 6px; background: var(--ui-coral-soft); }
+.recovery-link:hover { color: var(--ui-blue); text-decoration: underline; }
+.recovery-page, .password-page {
+  background: linear-gradient(128deg, #e5f1ee 0%, #f4f7f5 48%, #eaf0fa 100%);
+}
+.recovery-card, .password-form {
+  position: relative;
+  overflow: hidden;
+  border-color: #dce7e3;
+  box-shadow: 0 20px 58px rgba(24, 61, 54, .12);
+  animation: ui-pop .4s both;
+}
+.recovery-title { padding: 13px; border-radius: 7px; background: var(--ui-blue-soft); color: #396eaf; }
+.recovery-warning { background: var(--ui-amber-soft); color: #815c1f; }
+.recovery-submit, .password-form button { box-shadow: 0 6px 16px rgba(35, 140, 112, .18); }
+.recovery-submit:hover:not(:disabled), .password-form button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 9px 20px rgba(35, 140, 112, .25); }
+
+/* 工作台通过少量色彩区分导航、数据卡和业务状态，表格仍优先保证扫描效率。 */
+.workspace-sidebar { background: linear-gradient(180deg, #0b191a, #102523 70%, #112b2b); }
+.workspace-sidebar nav button { position: relative; transition: color .18s ease, background-color .18s ease, padding-left .18s ease; }
+.workspace-sidebar nav button:hover { padding-left: 15px; background: rgba(255, 255, 255, .055); }
+.workspace-sidebar nav button.active {
+  background: linear-gradient(90deg, rgba(83, 223, 194, .16), rgba(83, 223, 194, .045));
+  box-shadow: inset 2px 0 var(--cyan);
+}
+.workspace-header { background: linear-gradient(110deg, #fbfcfb, #f1f6f5 72%, #edf3fb); }
+.workspace-header p { color: var(--ui-blue); }
+.workspace-content, .inbox-content { animation: ui-enter .35s both; }
+.metric-grid article, .health-summary, .sales-health-summary, .supplier-summary {
+  box-shadow: 0 2px 10px rgba(29, 67, 60, .035);
+}
+.metric-grid article { position: relative; overflow: hidden; transition: transform .2s ease, box-shadow .2s ease; }
+.metric-grid article::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 3px;
+  content: "";
+  background: var(--metric-tone, var(--ui-green));
+}
+.metric-grid article:nth-child(4n + 2) { --metric-tone: var(--ui-blue); }
+.metric-grid article:nth-child(4n + 3) { --metric-tone: var(--ui-coral); }
+.metric-grid article:nth-child(4n) { --metric-tone: var(--ui-amber); }
+.metric-grid article:hover { transform: translateY(-2px); box-shadow: var(--ui-shadow); }
+.workspace-panel, .health-section, .supplier-section {
+  box-shadow: 0 2px 12px rgba(29, 67, 60, .035);
+}
+.panel-head h2, .health-section-head h2, .section-heading h2 { color: #1f403a; }
+.panel-head, .health-section-head, .section-heading { border-color: #dce9e5; }
+.table-head, .data-head { background: #edf3fa; color: #58708b; }
+.table-row, .data-row { transition: background-color .16s ease, box-shadow .16s ease; }
+.table-row:hover, .data-row:hover { box-shadow: inset 3px 0 var(--ui-blue); }
+.outline-action:hover, .secondary-action:hover, .retry-action:hover { background: var(--ui-blue-soft); border-color: #8fb4eb; color: #376fac; }
+.danger-action:hover { background: var(--ui-coral-soft); }
+.workspace-toast, .inbox-notice { animation: ui-pop .22s ease both; }
+.workspace-toast { border-left: 3px solid var(--cyan); }
+.workspace-alert:not(.success-alert) { background: var(--ui-amber-soft); border-color: #ecd8ad; color: #78551c; }
+.success-alert { background: var(--ui-green-soft); border-color: #b7ddcc; color: #216f58; }
+.notification-button:hover { color: var(--ui-blue); border-color: #a9c5eb; background: var(--ui-blue-soft); }
+.renewal-confirm-backdrop, .compose-backdrop { animation: fade-in .16s ease both; }
+.renewal-confirm-dialog, .compose-panel { animation: ui-pop .2s ease both; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* 收件箱强调选中会话和消息角色，资源池强调数据新鲜度与发布审核。 */
+.inbox-shell .workspace-sidebar nav button.active { box-shadow: inset 2px 0 #83b5ff; }
+.inbox-notice { border-color: #c8dcf5; background: var(--ui-blue-soft); color: #3e648e; }
+.conversation-list > button { transition: background-color .16s ease, border-color .16s ease, transform .16s ease; }
+.conversation-list > button:hover { background: #f2f7ff; }
+.conversation-list > button.active { background: #eaf2ff; box-shadow: inset 3px 0 var(--ui-blue); }
+.conversation-foot em[data-status="open"] { background: var(--ui-coral-soft); color: #a45241; }
+.conversation-foot em[data-status="pending"] { background: var(--ui-amber-soft); color: #865d1e; }
+.conversation-foot em[data-status="closed"] { background: var(--ui-green-soft); color: #287057; }
+.message-stream > * { animation: ui-enter .22s both; }
+.inbox-thread-pane > header { background: linear-gradient(100deg, #fff, #f1f6ff); }
+.supplier-tabs button.active { color: #17695a; box-shadow: inset 0 -2px var(--ui-green); }
+.supplier-section { transition: border-color .18s ease, box-shadow .18s ease; }
+.supplier-section:focus-within { border-color: #b4d8cf; box-shadow: 0 5px 20px rgba(35, 140, 112, .08); }
+.supplier-config-warning { background: var(--ui-amber-soft); border-color: #ead7ae; }
+.supplier-summary > div:nth-child(5n + 2) strong { color: var(--ui-blue); }
+.supplier-summary > div:nth-child(5n + 3) strong { color: var(--ui-green); }
+.supplier-summary > div:nth-child(5n + 4) strong { color: var(--ui-coral); }
+.supplier-summary > div:nth-child(5n) strong { color: var(--ui-amber); }
+.status-chip[data-tone="healthy"] { background: var(--ui-green-soft); color: #216f58; }
+.status-chip[data-tone="info"] { background: var(--ui-blue-soft); color: #3d6ea9; }
+.status-chip[data-tone="warning"] { background: var(--ui-amber-soft); color: #805a1e; }
+.status-chip[data-tone="critical"] { background: var(--ui-coral-soft); color: #a24d3e; }
+.primary-action { box-shadow: 0 5px 13px rgba(35, 140, 112, .16); }
+.primary-action:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 17px rgba(35, 140, 112, .22); }
+.cost-value { color: #315f9d; }
+
+/* 状态颜色在健康页保持语义一致，加载骨架仅在请求期间轻微呼吸。 */
+.health-status[data-tone="healthy"] { background: var(--ui-green-soft); color: #216f58; }
+.health-status[data-tone="warning"] { background: var(--ui-amber-soft); color: #805a1e; }
+.health-status[data-tone="critical"], .health-status[data-tone="danger"] { background: var(--ui-coral-soft); color: #a24d3e; }
+.health-status[data-tone="info"] { background: var(--ui-blue-soft); color: #3d6ea9; }
+.health-table-row:hover { box-shadow: inset 3px 0 var(--ui-blue); }
+.health-bars > div > i > b { background: linear-gradient(90deg, var(--ui-green), #56bca9 70%, var(--ui-blue)); }
+.health-drawer { animation: drawer-in .22s ease both; }
+@keyframes drawer-in { from { opacity: .6; transform: translateX(18px); } to { opacity: 1; transform: translateX(0); } }
+.health-loading span:nth-child(4n + 1), .supplier-loading span:nth-child(4n + 1) { background-color: #dcebe7; }
+
+@media (max-width: 768px) {
+  .site-header { box-shadow: 0 3px 14px rgba(1, 15, 17, .16); }
+  .mobile-drawer { inset: 0 0 0 12%; box-shadow: -14px 0 45px rgba(0, 0, 0, .34); }
+  .auth-page { padding-top: 34px; padding-bottom: 34px; }
+  .workspace-content, .inbox-content { padding-top: 18px; }
+  .metric-grid article:hover { transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
+}

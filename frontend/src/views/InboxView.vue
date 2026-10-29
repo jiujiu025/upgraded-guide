@@ -1,7 +1,7 @@
 <script setup>
 import BrandLogo from '../components/BrandLogo.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Activity, ArchiveRestore, ArrowLeft, Box, CheckCheck, ChevronLeft, ChevronRight, Database, Gauge, Inbox, LogOut, Menu, MessageSquare, PackageSearch, Paperclip, RefreshCw, RotateCw, Search, Send, Server, Settings, ShoppingCart, X } from 'lucide-vue-next'
+import { Activity, ArchiveRestore, ArrowLeft, Box, CheckCheck, ChevronLeft, ChevronRight, Database, Gauge, Inbox, LogOut, Menu, MessageSquare, PackageSearch, Paperclip, RefreshCw, RotateCw, Search, Send, Server, Settings, ShieldCheck, ShoppingCart, UserPlus, X } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { createInboxThread, getCustomerLines, getCustomerOrders, getInboxMessages, getInboxSalesOptions, getInboxThread, getInboxThreads, getInboxUnreadCount, markInboxThreadRead, sendInboxMessage, updateInboxThread } from '../api'
 import { session } from '../api/session'
@@ -42,10 +42,10 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.v
 const hasFilters = computed(() => Object.values(filters).some((value) => String(value).trim()))
 
 const nav = computed(() => isCustomer.value
-  ? [['首页', '/client', Gauge], ['购买线路', '/buy', ShoppingCart], ['我的订单', '/client/orders', PackageSearch], ['我的线路', '/client/lines', Server], ['续费管理', '/client/renewals', RotateCw], ['服务收件箱', '/client/inbox', MessageSquare], ['通知中心', '/client/notifications', Inbox], ['账户资料', '/client/profile', Settings]]
+  ? [['首页', '/client', Gauge], ['购买线路', '/buy', ShoppingCart], ['我的订单', '/client/orders', PackageSearch], ['我的线路', '/client/lines', Server], ['续费管理', '/client/renewals', RotateCw], ['服务收件箱', '/client/inbox', MessageSquare], ['通知中心', '/client/notifications', Inbox], ['账户资料', '/client/profile', Settings], ['安全中心', '/client/security', ShieldCheck]]
   : isSales.value
-    ? [['销售概览', '/sales', Gauge], ['我的客户影响', '/sales/health', Activity], ['客户会话', '/sales/inbox', MessageSquare]]
-    : [['订单处理', '/admin', Box], ['线路健康', '/admin/health', Activity], ['全量会话', '/admin/inbox', MessageSquare], ['资源池', '/admin/resource-pool', Database]])
+    ? [['销售概览', '/sales', Gauge], ['我的客户影响', '/sales/health', Activity], ['客户会话', '/sales/inbox', MessageSquare], ['安全中心', '/sales/security', ShieldCheck]]
+    : [['订单处理', '/admin', Box], ['线路健康', '/admin/health', Activity], ['全量会话', '/admin/inbox', MessageSquare], ['资源池', '/admin/resource-pool', Database], ...(storedUser.value.role === 'super_admin' ? [['销售账号', '/admin/sales-users', UserPlus]] : []), ['安全中心', '/admin/security', ShieldCheck]])
 
 const statusText = { open: '待回复', pending: '跟进中', closed: '已关闭' }
 const dateTime = (value) => new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
@@ -281,7 +281,7 @@ function goPage(nextPage) { page.value = nextPage; loadThreads() }
 
 async function logout() {
   await endSession()
-  router.replace('/login')
+  router.replace(workspace.value === 'admin' ? '/admin/login' : workspace.value === 'sales' ? '/sales/login' : '/login')
 }
 
 watch(() => route.fullPath, load)

@@ -18,6 +18,10 @@ class User(TimestampMixin, Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     auth_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    security_question_1: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    security_answer_hash_1: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    security_question_2: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    security_answer_hash_2: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class AuthSession(TimestampMixin, Base):

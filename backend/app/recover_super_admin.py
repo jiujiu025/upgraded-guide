@@ -42,7 +42,7 @@ def recover_super_admin(username: str, password: str) -> None:
                 raise ValueError("未找到启用中的超级管理员账号")
 
             user.password_hash = hash_password(password)
-            user.must_change_password = True
+            user.must_change_password = False
             revoked = revoke_user_sessions(db, user, "super_admin_password_recovery")
             write_audit(
                 db,
@@ -50,7 +50,7 @@ def recover_super_admin(username: str, password: str) -> None:
                 "super_admin_password_recovery",
                 "user",
                 user.id,
-                f"服务器控制台恢复；已撤销会话数={revoked}；下次登录必须修改密码",
+                f"服务器控制台恢复；已撤销会话数={revoked}",
             )
 
 
@@ -70,7 +70,7 @@ def main() -> int:
     except SQLAlchemyError:
         print("密码恢复失败: 数据库操作失败，请检查数据库连接", file=sys.stderr)
         return 1
-    print("超级管理员密码已重置；下次登录必须修改密码。")
+    print("超级管理员密码已重置。")
     return 0
 
 
