@@ -22,7 +22,16 @@ ss -ltn '( sport = :18081 )'
 
 ## 本地环境文件
 
-把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。无需设置 `GLOBAL_PROXY_API_KEY`、`ADMIN_PASSWORD` 或供应商采购参数。
+把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`GLOBAL_PROXY_API_KEY` 是可选的供应商只读查询凭据，仅由 Compose 注入 API 容器；不要配置在前端、数据库、迁移容器或 Git 中。未配置时资源池页面会禁用同步按钮。
+
+配置或轮换供应商 Key 时，只在服务器编辑 `.env.production`，保持文件权限 `0600`，然后仅重建 API 容器以加载环境变量：
+
+```sh
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps api
+docker compose --env-file .env.production -f docker-compose.prod.yml ps api
+```
+
+之后以管理员登录 `/admin/resource-pool`，先同步商品、国家/城市、库存和报价并核对状态。报价或地区同步失败时保留失败状态，不发布相关快照。该只读适配器不含购买、续费、取消或退款能力，自动采购仍固定关闭。
 
 文件权限要求：目录仅部署账号及必要管理员可访问，`.env.production` 所有者为部署账号，权限 `0600`；备份目录同样限制为 `0700`。不要提交该文件，不要把它放入镜像构建上下文，不要在聊天、工单、CI 日志、命令行参数或 Nginx 配置中写密钥。Docker 管理员仍能通过容器检查读取环境变量，所以 Docker socket 和部署账号必须只授予可信运维人员。
 
