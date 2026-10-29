@@ -64,6 +64,11 @@ def verify(env_file: Path, allow_placeholders: bool = False) -> None:
     encryption_key = api_env.get("SUPPLIER_SECRET_ENCRYPTION_KEY", "")
     if len(encryption_key) != 64 or any(char not in "0123456789abcdefABCDEF" for char in encryption_key):
         raise ValueError("后台供应商凭据加密密钥必须是 64 位十六进制字符串")
+    if services["migrate"]["environment"].get("SUPPLIER_SECRET_ENCRYPTION_KEY") != encryption_key:
+        raise ValueError("迁移服务必须使用同一凭据加密配置以通过生产设置校验")
+    if any("SUPPLIER_SECRET_ENCRYPTION_KEY" in services[name].get("environment", {})
+           for name in ("postgres", "redis", "web")):
+        raise ValueError("供应商凭据加密密钥不得注入数据库、Redis 或前端服务")
     if any("GLOBAL_PROXY_API_KEY" in services[name].get("environment", {})
            for name in ("postgres", "redis", "migrate", "web")):
         raise ValueError("供应商 API Key 不得注入数据库、迁移或前端服务")
