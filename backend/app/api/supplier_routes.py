@@ -23,7 +23,7 @@ from app.services.supplier_credentials import (
 from app.services.supplier_service import (
     CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, INVENTORY_ENDPOINT, begin_sync_run,
     configure_manual_supply_rule, ensure_pool_one, finish_sync_run, map_supplier_product,
-    map_supplier_region, RESOURCE_CATEGORY_CODES, save_inventory, save_ip_segment_snapshots, save_quotes, sync_products, sync_regions,
+    map_supplier_region, RESOURCE_CATEGORY_CODES, save_inventory, save_ip_segment_snapshots, save_quotes, sync_products, sync_regions, sync_supplier_catalog,
 )
 from app.suppliers.base import (
     InventoryItem, ProcurementDisabledError, SupplierBusinessError, SupplierCapabilityUnsupportedError,
@@ -338,6 +338,20 @@ def sync_supplier_products(
     except SupplierError as exc:
         fail_sync_run(db, user, run.id, exc.code, str(exc))
         raise supplier_error(exc) from exc
+
+
+@router.post("/sync/catalog")
+def sync_supplier_catalog_endpoint(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    result = sync_supplier_catalog(db)
+    write_audit(
+        db, user, "sync_catalog", "supplier_catalog",
+        detail=f"创建官网商品={result['created']}; 自动关联地区={result['mapped_regions']}; 缺少售价跳过={result['skipped_no_price']}; 自动采购保持关闭",
+    )
+    db.commit()
+    return {**result, "stock_default": "out_of_stock", "procurement_enabled": False}
 
 
 @router.post("/sync/countries")

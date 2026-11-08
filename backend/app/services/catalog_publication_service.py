@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import (
-    CatalogPublication, Product, Region, Supplier, SupplierInventorySnapshot, SupplierProduct,
+    CatalogPublication, Product, ProductSupplyRule, Region, ResourcePool, Supplier, SupplierInventorySnapshot, SupplierProduct,
     SupplierQuote, SupplierRegion, SupplierSyncRun, User,
 )
 from app.services.audit_service import write_audit
@@ -62,7 +62,20 @@ def publish_catalog(db: Session, actor: User, product_id: int, region_id: int,
     supplier = db.get(Supplier, inventory.supplier_id)
     if not supplier or supplier.status != "active" or not supplier_product or not supplier_region:
         raise PublicationError("供应商快照字段不完整或供应商不可用")
-    if (supplier_product.supplier_id != supplier.id or supplier_product.local_product_id != product.id
+    supply_rule = db.scalar(select(ProductSupplyRule).join(
+        ResourcePool, ResourcePool.id == ProductSupplyRule.pool_id,
+    ).where(
+        ProductSupplyRule.product_id == product.id,
+        ProductSupplyRule.region_id == region.id,
+        ProductSupplyRule.supplier_product_id == supplier_product.id,
+        ProductSupplyRule.supplier_region_id == supplier_region.id,
+        ResourcePool.code == "global_proxy_pool",
+    ))
+    mapped = bool(supply_rule) or (
+        supplier_product.local_product_id == product.id
+        and supplier_region.local_region_id == region.id
+    )
+    if (supplier_product.supplier_id != supplier.id or not mapped
             or supplier_region.supplier_product_id != supplier_product.id
             or supplier_region.local_region_id != region.id
             or inventory.country_code != supplier_region.country_code

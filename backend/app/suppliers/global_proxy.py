@@ -327,7 +327,9 @@ class GlobalProxyReadOnlyAdapter:
                 duration_days = int(duration)
                 quotes.append(self._quote_from_price(product_ref, price_data, duration_days))
                 for country_code, country_price in price_data.items():
-                    if country_code in {"originUnitPrice", "userUnitPrice", "isCustom"}:
+                    if country_code in {"originUnitPrice", "userUnitPrice", "isCustom", "customPriceBalance"}:
+                        continue
+                    if not isinstance(country_code, str) or not re.fullmatch(r"[A-Za-z]{2}", country_code):
                         continue
                     if not isinstance(country_price, dict) or "userUnitPrice" not in country_price:
                         raise SupplierInvalidResponseError("供应商国家报价档位无效")

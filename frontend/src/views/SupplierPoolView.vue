@@ -13,7 +13,7 @@ import {
   getAdminCatalogProducts, getAdminCatalogRegions, getCatalogPublications, getSupplierInventory, getSupplierOverview,
   getSupplierIpSegments, getSupplierProducts, getSupplierQuotes, getSupplierRegions, getSupplierRules, getSupplierSyncRuns,
   checkSupplierInventory, deleteSupplierCredential, mapSupplierProduct, mapSupplierRegion, publishCatalogSnapshot, saveSupplierCredential, saveSupplierRule, syncSupplierCities,
-  syncSupplierCountries, syncSupplierInventory, syncSupplierProducts, syncSupplierQuotes,
+  syncSupplierCatalog, syncSupplierCountries, syncSupplierInventory, syncSupplierProducts, syncSupplierQuotes,
   withdrawCatalogPublication,
 } from '../api'
 
@@ -37,6 +37,7 @@ const syncRuns = ref([])
 const localProducts = ref([])
 const localRegions = ref([])
 const publications = ref([])
+const catalogSyncSummary = ref(null)
 const inventoryCountry = ref('US')
 const selectedResourceCategory = ref('static_residential')
 const selectedInventoryProductId = ref('')
@@ -77,8 +78,6 @@ const stateMeta = {
 const resourceCategories = [
   { code: 'static_residential', label: '独享静态住宅（普通）' },
   { code: 'static_residential_native', label: '独享静态住宅（本土原生）' },
-  { code: 'static_residential_isp', label: '独享静态住宅（运营商原生）' },
-  { code: 'static_datacenter', label: '独享静态数据中心' },
 ]
 const inventoryMeta = {
   available: '可用',
@@ -94,10 +93,11 @@ const storedUser = computed(() => {
   return session.user || {}
 })
 const canManageCredential = computed(() => storedUser.value.role === 'super_admin')
-const mappedProducts = computed(() => supplierProducts.value.filter((item) => item.local_product_id).length)
+const mappedProducts = computed(() => supplierProducts.value.filter((item) => resourceCategories.some((category) => category.code === item.resource_category)).length)
 const mappedRegions = computed(() => supplierRegions.value.filter((item) => item.local_region_id).length)
 const categoryProducts = computed(() => supplierProducts.value.filter((item) => item.resource_category === selectedResourceCategory.value))
 const selectedInventoryProduct = computed(() => categoryProducts.value.find((item) => String(item.id) === String(selectedInventoryProductId.value)) || categoryProducts.value[0])
+const countryDisplayNames = new Intl.DisplayNames(['zh-CN'], { type: 'region' })
 const countryOptions = computed(() => {
   const countries = new Map()
   const inventoryByCountry = new Map()
@@ -124,7 +124,7 @@ const countryOptions = computed(() => {
     const latestInventory = countryInventory?.latest
     return {
       code,
-      name,
+      name: countryDisplayNames.of(code) || localRegions.value.find((region) => region.country_code === code)?.name || name,
       segmentCount: segmentsByCountry.get(code) || 0,
       inventoryCount: countryInventory?.count || 0,
       inventoryState: latestInventory?.data_state || 'not_synced',
@@ -155,8 +155,11 @@ const visibleQuotes = computed(() => quotes.value.filter((item) =>
   (!quoteProductFilter.value || item.external_product_ref === quoteProductFilter.value)
   && (!quoteCountryFilter.value || item.country_code === quoteCountryFilter.value)))
 const localSalePrice = (quote) => {
-  const supplierProduct = supplierProducts.value.find((item) => item.id === quote.supplier_product_id)
-  const product = localProducts.value.find((item) => item.id === supplierProduct?.local_product_id)
+  const regionIds = new Set(localRegions.value.filter((region) => region.country_code === quote.country_code).map((region) => region.id))
+  const rule = rules.value.find((item) => item.supplier_product_id === quote.supplier_product_id
+    && regionIds.has(item.region_id)
+    && localProducts.value.some((product) => product.id === item.product_id && product.billing_days === quote.duration_days))
+  const product = localProducts.value.find((item) => item.id === rule?.product_id)
   return product?.price != null ? `¥${Number(product.price).toFixed(2)}` : '未映射'
 }
 const selectedSegmentRecord = computed(() => inventoryCheckResult.value?.segments?.find((item) => item.cidr === selectedSegment.value))
@@ -166,8 +169,8 @@ const money = (value) => value == null ? '—' : `¥${Number(value).toFixed(4)}`
 const localProductName = (id) => localProducts.value.find((item) => item.id === id)?.name || '未映射'
 const localRegionName = (id) => localRegions.value.find((item) => item.id === id)?.name || '未映射'
 const selectedProduct = computed(() => localProducts.value.find((item) => item.id === Number(publishDraft.product_id)))
-const eligibleInventory = computed(() => inventory.value.filter((item) => item.supplier_region_id && supplierRegions.value.some((region) => region.id === item.supplier_region_id && region.local_region_id === Number(publishDraft.region_id)) && supplierProducts.value.some((product) => product.id === item.supplier_product_id && product.local_product_id === Number(publishDraft.product_id))))
-const eligibleQuotes = computed(() => quotes.value.filter((item) => item.supplier_product_id && supplierProducts.value.some((product) => product.id === item.supplier_product_id && product.local_product_id === Number(publishDraft.product_id)) && (!item.country_code || item.country_code === localRegions.value.find((region) => region.id === Number(publishDraft.region_id))?.country_code) && (!item.duration_days || item.duration_days === selectedProduct.value?.billing_days)))
+const eligibleInventory = computed(() => inventory.value.filter((item) => item.supplier_region_id && rules.value.some((rule) => rule.product_id === Number(publishDraft.product_id) && rule.region_id === Number(publishDraft.region_id) && rule.supplier_product_id === item.supplier_product_id && rule.supplier_region_id === item.supplier_region_id)))
+const eligibleQuotes = computed(() => quotes.value.filter((item) => item.supplier_product_id && rules.value.some((rule) => rule.product_id === Number(publishDraft.product_id) && rule.supplier_product_id === item.supplier_product_id && (!item.country_code || localRegions.value.find((region) => region.id === rule.region_id)?.country_code === item.country_code) && localProducts.value.find((product) => product.id === rule.product_id)?.billing_days === selectedProduct.value?.billing_days) && (!item.duration_days || item.duration_days === selectedProduct.value?.billing_days)))
 const publicationWarning = computed(() => Object.values(overview.value?.states || {}).some((state) => ['stale', 'query_failed', 'out_of_stock'].includes(state)))
 const latestPublicationIds = computed(() => new Set(publications.value.filter((item) => item.version === Math.max(...publications.value.filter((row) => row.product_id === item.product_id).map((row) => row.version))).map((item) => item.id)))
 
@@ -396,20 +399,6 @@ async function retryRun(run) {
   }
 }
 
-async function updateProductMapping(item, value) {
-  busy.value = `product-${item.id}`
-  error.value = ''
-  try {
-    await mapSupplierProduct(item.id, value ? Number(value) : null, item.resource_category)
-    notify('商品映射已保存并写入审计')
-  } catch (requestError) {
-    error.value = errorText(requestError, '商品映射保存失败')
-  } finally {
-    busy.value = ''
-    await load()
-  }
-}
-
 async function updateProductCategory(item, value) {
   busy.value = `product-${item.id}`
   error.value = ''
@@ -426,8 +415,8 @@ async function updateProductCategory(item, value) {
 
 async function syncSelectedProductRegions() {
   const productTypeId = Number(selectedInventoryProduct.value?.external_product_ref)
-  if (!Number.isInteger(productTypeId) || productTypeId < 1) {
-    error.value = '供应商商品编号不是有效的查询类型，无法同步国家目录'
+  if (productTypeId !== 2) {
+    error.value = '当前已核对的官方地区接口仅支持产品 2；产品 3 的国家数据需要供应商接口确认后再同步'
     return
   }
   busy.value = 'category-countries'
@@ -441,6 +430,22 @@ async function syncSelectedProductRegions() {
   } finally {
     busy.value = ''
     await load()
+  }
+}
+
+async function generateWebsiteCatalog() {
+  busy.value = 'catalog'
+  error.value = ''
+  catalogSyncSummary.value = null
+  try {
+    const { data } = await syncSupplierCatalog()
+    catalogSyncSummary.value = data
+    notify(`官网目录同步完成：新增 ${data.created} 个商品，${data.skipped_no_price} 个国家因缺少对应售价跳过`)
+    await load()
+  } catch (requestError) {
+    error.value = errorText(requestError, '官网目录同步失败')
+  } finally {
+    busy.value = ''
   }
 }
 
@@ -596,11 +601,11 @@ onMounted(load)
 
           <template v-else-if="activeTab === 'mappings'">
             <section class="supplier-section">
-              <div class="section-heading"><div><h2>商品映射</h2><p>供应商商品只作为内部来源，不会创建或改价官网商品。</p></div><span>{{ mappedProducts }} 项已映射</span></div>
+              <div class="section-heading"><div><h2>商品映射</h2><p>产品 2/3 自动映射到普通住宅/本土原生；其他供应商产品暂不进入官网目录。</p></div><span>{{ mappedProducts }} 项已分类</span></div>
               <div v-if="!supplierProducts.length" class="supplier-empty">尚未同步供应商商品</div>
               <div v-else class="data-table product-mapping-table">
-                <div class="data-head"><span>供应商商品</span><span>状态</span><span>玖玖IP商品</span><span>资源类型</span><span>同步时间</span></div>
-                <div v-for="item in supplierProducts" :key="item.id" class="data-row"><span><b>{{ item.name_snapshot }}</b><small>产品 {{ item.external_product_ref }} · {{ item.currency }}</small></span><span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em></span><span><select :value="item.local_product_id || ''" :disabled="busy === `product-${item.id}`" @change="updateProductMapping(item, $event.target.value)"><option value="">未映射</option><option v-for="product in localProducts" :key="product.id" :value="product.id">{{ product.name }} · 地区 #{{ product.region_id }}</option></select></span><span><select :value="item.resource_category || ''" :disabled="busy === `product-${item.id}`" @change="updateProductCategory(item, $event.target.value)"><option value="">未分类</option><option v-for="category in resourceCategories" :key="category.code" :value="category.code">{{ category.label }}</option></select></span><span>{{ dateTime(item.last_synced_at) }}</span></div>
+                <div class="data-head"><span>供应商商品</span><span>状态</span><span>官网目录映射</span><span>资源类型</span><span>同步时间</span></div>
+                <div v-for="item in supplierProducts" :key="item.id" class="data-row"><span><b>{{ item.name_snapshot }}</b><small>产品 {{ item.external_product_ref }} · {{ item.currency }}</small></span><span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em></span><span>{{ rules.filter((rule) => rule.supplier_product_id === item.id).length }} 个地区/周期</span><span><select :value="item.resource_category || ''" :disabled="busy === `product-${item.id}`" @change="updateProductCategory(item, $event.target.value)"><option value="">暂不上架</option><option v-for="category in resourceCategories" :key="category.code" :value="category.code">{{ category.label }}</option></select></span><span>{{ dateTime(item.last_synced_at) }}</span></div>
               </div>
             </section>
 
@@ -609,7 +614,7 @@ onMounted(load)
               <div v-if="!supplierRegions.length" class="supplier-empty">尚未同步供应商地区</div>
               <div v-else class="data-table region-mapping-table">
                 <div class="data-head"><span>供应商地区</span><span>层级</span><span>玖玖IP地区</span><span>状态</span></div>
-                <div v-for="item in supplierRegions" :key="item.id" class="data-row"><span><b>{{ item.city_name || item.country_name }}</b><small>{{ item.country_code }} · {{ item.country_name }}</small></span><span>{{ item.city_name ? '城市' : '国家' }}</span><span><select :value="item.local_region_id || ''" :disabled="busy === `region-${item.id}`" @change="updateRegionMapping(item, $event.target.value)"><option value="">未映射</option><option v-for="region in localRegions" :key="region.id" :value="region.id">{{ region.name }} · {{ region.country_code }}</option></select></span><span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em></span></div>
+                <div v-for="item in supplierRegions" :key="item.id" class="data-row"><span><b>{{ item.city_name || countryDisplayNames.of(item.country_code) || item.country_name }}</b><small>{{ item.country_code }} · {{ item.country_name }}</small></span><span>{{ item.city_name ? '城市' : '国家' }}</span><span><select :value="item.local_region_id || ''" :disabled="busy === `region-${item.id}`" @change="updateRegionMapping(item, $event.target.value)"><option value="">未映射</option><option v-for="region in localRegions" :key="region.id" :value="region.id">{{ countryDisplayNames.of(region.country_code) || region.name }} · {{ region.country_code }}</option></select></span><span><em class="status-chip" :data-tone="currentState(item.data_state).tone">{{ currentState(item.data_state).label }}</em></span></div>
               </div>
             </section>
 
@@ -618,7 +623,7 @@ onMounted(load)
               <div class="rule-fields">
                 <label>玖玖IP商品<select v-model="ruleDraft.product_id"><option value="">请选择</option><option v-for="item in localProducts" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
                 <label>玖玖IP地区<select v-model="ruleDraft.region_id"><option value="">请选择</option><option v-for="item in localRegions" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-                <label>供应商商品<select v-model="ruleDraft.supplier_product_id"><option value="">请选择</option><option v-for="item in supplierProducts.filter((row) => row.local_product_id)" :key="item.id" :value="item.id">{{ item.name_snapshot }}</option></select></label>
+                <label>供应商商品<select v-model="ruleDraft.supplier_product_id"><option value="">请选择</option><option v-for="item in supplierProducts.filter((row) => resourceCategories.some((category) => category.code === row.resource_category))" :key="item.id" :value="item.id">{{ item.name_snapshot }}</option></select></label>
                 <label>供应商地区<select v-model="ruleDraft.supplier_region_id"><option value="">请选择</option><option v-for="item in supplierRegions.filter((row) => row.local_region_id)" :key="item.id" :value="item.id">{{ item.city_name || item.country_name }}</option></select></label>
                 <label class="rule-toggle"><input v-model="ruleDraft.is_enabled" type="checkbox" />启用人工来源规则</label>
                 <button class="primary-action" :disabled="busy === 'rule'" @click="submitRule"><Save :size="15" />保存规则</button>
@@ -629,15 +634,20 @@ onMounted(load)
 
           <template v-else-if="activeTab === 'snapshots'">
             <section class="supplier-section category-browser">
-              <div class="section-heading"><div><h2>资源池 1 · 按类型浏览</h2><p>分类由管理员根据供应商资料人工指定；国家只显示该商品同步到的目录。</p></div><span>{{ categoryProducts.length }} 个已归类商品</span></div>
+              <div class="section-heading"><div><h2>资源池 1 · 按类型浏览</h2><p>只展示普通住宅与本土原生；国家映射按 API 国家代码自动关联。</p></div><span>{{ categoryProducts.length }} 个已归类商品</span></div>
               <div class="category-switch" role="group" aria-label="资源类型">
                 <button v-for="category in resourceCategories" :key="category.code" type="button" :aria-pressed="selectedResourceCategory === category.code" :class="{ active: selectedResourceCategory === category.code }" @click="selectedResourceCategory = category.code">{{ category.label }}</button>
               </div>
               <div class="category-browser-controls">
                 <label>供应商商品<select v-model="selectedInventoryProductId"><option v-for="item in categoryProducts" :key="item.id" :value="String(item.id)">{{ item.name_snapshot }} · #{{ item.external_product_ref }}</option></select></label>
-                <button class="secondary-action" type="button" :disabled="!selectedInventoryProduct || !overview.supplier.api_key_configured || !!busy" @click="syncSelectedProductRegions"><RefreshCw :size="14" :class="{ spinning: busy === 'category-countries' }" />同步所选商品国家</button>
-                <span v-if="!categoryProducts.length" class="category-empty">该分类尚未映射供应商商品</span>
+                <button class="secondary-action" type="button" :disabled="!selectedInventoryProduct || Number(selectedInventoryProduct.external_product_ref) !== 2 || !overview.supplier.api_key_configured || !!busy" @click="syncSelectedProductRegions"><RefreshCw :size="14" :class="{ spinning: busy === 'category-countries' }" />同步所选商品国家</button>
+                <span v-if="!categoryProducts.length" class="category-empty">同步供应商商品目录后，产品 2/3 会自动归类到本页。</span>
               </div>
+              <div class="catalog-sync-row">
+                <span>按已同步国家及“商品与价格”周期售价生成官网商品；新增商品默认为无库存，需管理员确认后手动开启。产品 3 国家接口未确认时不会伪造国家数据。</span>
+                <button class="primary-action" type="button" :disabled="busy || !supplierProducts.some((item) => resourceCategories.some((category) => category.code === item.resource_category)) || !supplierRegions.some((item) => !item.city_name && item.local_region_id)" @click="generateWebsiteCatalog"><RefreshCw :size="14" :class="{ spinning: busy === 'catalog' }" />{{ busy === 'catalog' ? '生成中' : '同步到官网目录' }}</button>
+              </div>
+              <p v-if="catalogSyncSummary" class="catalog-sync-result" role="status">本次新增 {{ catalogSyncSummary.created }} 个商品，自动关联 {{ catalogSyncSummary.mapped_regions }} 个地区；{{ catalogSyncSummary.skipped_no_price }} 个国家缺少对应周期售价而跳过。自动采购未开启。</p>
               <div v-if="countryOptions.length" class="country-grid" role="group" aria-label="选择国家">
                 <button v-for="country in countryOptions" :key="country.code" type="button" :aria-pressed="inventoryCountry === country.code" :class="{ active: inventoryCountry === country.code }" @click="inventoryCountry = country.code">
                   <span class="country-card-top"><span class="country-code">{{ country.code }}</span><Check v-if="inventoryCountry === country.code" :size="15" aria-hidden="true" /></span>
@@ -775,7 +785,8 @@ onMounted(load)
 .segment-snapshot-list>div>span{display:grid;gap:3px;min-width:0}.segment-snapshot-list b{font-size:11px;font-variant-numeric:tabular-nums}.segment-snapshot-list small{color:#74867e;font-size:9px}
 .segment-snapshot-list .secondary-action{min-height:30px;padding:5px 8px;font-size:10px}
 .product-mapping-table .data-head,.product-mapping-table .data-row{grid-template-columns:1.2fr .55fr 1.1fr 1.25fr .8fr}
-@media(max-width:768px){.category-browser-controls{grid-template-columns:1fr}.category-browser-controls .secondary-action{width:100%}.segment-snapshot-list>div{grid-template-columns:minmax(0,1fr) auto}.segment-snapshot-list>div>.secondary-action{grid-column:1/-1}.supplier-shell .workspace-sidebar{position:fixed}.supplier-header{height:76px}.supplier-content{padding:18px}}
+.catalog-sync-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 13px;margin:12px 0;background:#edf4f1;border:1px solid #d4e3dd;border-radius:5px}.catalog-sync-row>span{max-width:78ch;color:#4e6961;font-size:11px;line-height:1.5}.catalog-sync-result{margin:0 0 12px;padding:10px 12px;border:1px solid #c9e3d6;border-radius:5px;background:#f0faf4;color:#28664d;font-size:11px;line-height:1.5}
+@media(max-width:768px){.category-browser-controls{grid-template-columns:1fr}.category-browser-controls .secondary-action{width:100%}.catalog-sync-row{align-items:stretch;flex-direction:column}.catalog-sync-row .primary-action{width:100%}.segment-snapshot-list>div{grid-template-columns:minmax(0,1fr) auto}.segment-snapshot-list>div>.secondary-action{grid-column:1/-1}.supplier-shell .workspace-sidebar{position:fixed}.supplier-header{height:76px}.supplier-content{padding:18px}}
 @media(max-width:480px){.country-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.country-grid button{min-height:148px;padding:11px}.country-grid strong{font-size:13px}.category-browser-controls select{width:100%}.supplier-content{padding:14px}}
 @media(prefers-reduced-motion:reduce){.spinning,.supplier-loading span{animation:none}.country-grid button{transition:none}.country-grid button:hover{transform:none}}
 .credential-form{display:grid;gap:7px;margin:12px 0 0 28px}.credential-form>label{font-size:11px;font-weight:700;color:#405a53}.credential-input-row{display:flex;align-items:center;gap:8px}.credential-input-row input{flex:1;min-width:0;height:38px;padding:0 10px;border:1px solid #b9cbc4;border-radius:5px;background:#fff;color:#243b34;font-size:13px}.credential-input-row input:focus{outline:2px solid #4a9c8e;outline-offset:1px}.credential-input-row input:disabled{background:#eef2f0}.credential-form>small,.credential-readonly{font-size:10px;color:#6d817a}.credential-readonly{margin:10px 0 0 28px}.credential-clear{justify-self:start;padding:4px 0;color:#536b64;font-size:10px;text-decoration:underline;text-underline-offset:2px}.credential-clear-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:9px 10px;border:1px solid #e4c99e;border-radius:5px;background:#fff8eb;color:#765820;font-size:10px}.credential-clear-confirm span{flex:1 1 240px}.credential-clear-danger{padding:6px 9px;border-radius:4px;background:#9c3f36;color:#fff;font-size:10px}.credential-config-error{margin:10px 0 0 28px;padding:9px 10px;border:1px solid #e6b8b2;border-radius:5px;background:#fff2f0;color:#923c34;font-size:11px}.rebuild-command{display:block;margin-top:9px;padding:9px 10px;border:1px solid #d7e1dd;border-radius:5px;background:#fff;font-size:10px;overflow-wrap:anywhere}.rebuild-copy{margin-top:7px}

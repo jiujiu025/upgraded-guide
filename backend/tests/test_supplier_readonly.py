@@ -57,7 +57,10 @@ def test_global_proxy_documented_queries_parse_successfully():
         if request.url.path.endswith("getBuyProductSku"):
             return response({"code": 1, "msg": "ok", "data": [{"country_code": "US", "city_name": "Los Angeles", "sku_status": 0}]})
         if request.url.path.endswith("getProductUnitPrice"):
-            return response({"code": 1, "msg": "ok", "data": {"2": {"30": {"originUnitPrice": 60, "userUnitPrice": 15, "isCustom": True}}, "customPriceBalance": 100}})
+            return response({"code": 1, "msg": "ok", "data": {"2": {"30": {
+                "originUnitPrice": 60, "userUnitPrice": 15, "isCustom": True,
+                "customPriceBalance": 100, "US": {"originUnitPrice": 75, "userUnitPrice": 18, "isCustom": True},
+            }}, "customPriceBalance": 100}})
         raise AssertionError(request.url.path)
 
     adapter = mock_adapter(handler)
@@ -70,6 +73,9 @@ def test_global_proxy_documented_queries_parse_successfully():
         quote = adapter.get_quotes()[0]
         assert quote.unit_cost == Decimal("15")
         assert quote.duration_days == 30
+        quotes = adapter.get_quotes()
+        country_quote = next(item for item in quotes if item.country_code == "US")
+        assert country_quote.unit_cost == Decimal("18")
     finally:
         adapter.close()
 

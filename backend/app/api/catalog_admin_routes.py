@@ -156,6 +156,12 @@ def list_retail_prices(
     rows = db.scalars(query.order_by(RetailPriceRule.resource_category, RetailPriceRule.country_code,
                                      RetailPriceRule.billing_days)
                       .offset((page - 1) * page_size).limit(page_size)).all()
+    countries = db.scalars(
+        select(RetailPriceRule.country_code).distinct().order_by(RetailPriceRule.country_code)
+    ).all()
+    billing_days_options = db.scalars(
+        select(RetailPriceRule.billing_days).distinct().order_by(RetailPriceRule.billing_days)
+    ).all()
     return {
         "items": [{
             "id": item.id,
@@ -172,6 +178,8 @@ def list_retail_prices(
         "page": page,
         "page_size": page_size,
         "categories": [{"code": code, "label": label} for code, label in RESOURCE_CATEGORY_CODES.items()],
+        "countries": [{"code": code} for code in countries],
+        "billing_days_options": billing_days_options,
     }
 
 

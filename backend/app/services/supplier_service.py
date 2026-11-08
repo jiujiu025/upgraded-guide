@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Product, ProductSupplyRule, Region, ResourcePool, ResourcePoolSupplier, Supplier,
+    Product, ProductSupplyRule, Region, ResourcePool, ResourcePoolSupplier, RetailPriceRule, Supplier,
     SupplierInventorySnapshot, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
 )
 from app.services.audit_service import write_audit
@@ -25,6 +25,10 @@ RESOURCE_CATEGORY_CODES = {
     "static_residential_native": "独享静态住宅（本土原生）",
     "static_residential_isp": "独享静态住宅（运营商原生）",
     "static_datacenter": "独享静态数据中心",
+}
+PUBLISHABLE_PRODUCT_CATEGORIES = {
+    "2": "static_residential",
+    "3": "static_residential_native",
 }
 
 
@@ -123,6 +127,7 @@ def sync_products(db: Session, items: list[SupplierProductItem]) -> list[Supplie
             db.add(record)
         record.name_snapshot = item.name
         record.suffix = item.suffix
+        record.resource_category = PUBLISHABLE_PRODUCT_CATEGORIES.get(item.external_ref)
         record.currency = "CNY"
         record.is_available = True
         record.source_endpoint = PRODUCTS_ENDPOINT
@@ -153,6 +158,10 @@ def sync_regions(
     synced_at = utcnow()
     records = []
     for item in items:
+        # 必须先解析本地地区：_ensure_local_region 内部查库会触发 autoflush，
+        # 若此时 SupplierRegion 已 add 但必填字段（source_endpoint 等）还没赋完，
+        # SQLAlchemy 会把半成品提前 INSERT，导致 NOT NULL constraint failed。
+        local_region = _ensure_local_region(db, item.country_code, item.country_name)
         record = db.scalar(select(SupplierRegion).where(
             SupplierRegion.supplier_product_id == product.id,
             SupplierRegion.external_country_ref == item.external_country_ref,
@@ -165,15 +174,109 @@ def sync_regions(
                 external_city_ref=item.external_city_ref,
             )
             db.add(record)
-        record.country_code = item.country_code
+        record.country_code = item.country_code.strip().upper()
         record.country_name = item.country_name
         record.city_name = item.city_name
+        record.local_region_id = local_region.id
         record.is_available = True
         record.source_endpoint = source_endpoint
         record.last_synced_at = synced_at
         records.append(record)
     db.flush()
     return records
+
+
+def _ensure_local_region(db: Session, country_code: str, country_name: str) -> Region:
+    code = country_code.strip().upper()
+    with db.no_autoflush:
+        region = db.scalar(select(Region).where(Region.country_code == code).order_by(Region.is_active.desc(), Region.id).limit(1))
+        if region:
+            return region
+        name = country_name.strip() or code
+        duplicate = db.scalar(select(Region).where(Region.name == name))
+    if duplicate and duplicate.country_code != code:
+        name = f"{name} ({code})"
+    region = Region(name=name[:80], country_code=code, is_active=True)
+    db.add(region)
+    db.flush()
+    return region
+
+
+def sync_supplier_catalog(db: Session) -> dict[str, int]:
+    """按已有供应商国家和零售价规则幂等生成静态住宅官网目录。"""
+    supplier, pool = ensure_pool_one(db)
+    supplier_products = db.scalars(select(SupplierProduct).where(
+        SupplierProduct.supplier_id == supplier.id,
+        SupplierProduct.external_product_ref.in_(PUBLISHABLE_PRODUCT_CATEGORIES),
+        SupplierProduct.is_available.is_(True),
+    )).all()
+    prices = db.scalars(select(RetailPriceRule).where(
+        RetailPriceRule.resource_category.in_(PUBLISHABLE_PRODUCT_CATEGORIES.values()),
+    )).all()
+    price_by_key = {
+        (item.resource_category, item.country_code.upper(), item.billing_days): item
+        for item in prices
+    }
+    created = mapped_regions = skipped_no_price = 0
+
+    for supplier_product in supplier_products:
+        category = PUBLISHABLE_PRODUCT_CATEGORIES[supplier_product.external_product_ref]
+        supplier_product.resource_category = category
+        regions = db.scalars(select(SupplierRegion).where(
+            SupplierRegion.supplier_product_id == supplier_product.id,
+            SupplierRegion.city_name.is_(None),
+            SupplierRegion.is_available.is_(True),
+        )).all()
+        for supplier_region in regions:
+            if supplier_region.local_region_id is None:
+                supplier_region.local_region_id = _ensure_local_region(
+                    db, supplier_region.country_code, supplier_region.country_name,
+                ).id
+                mapped_regions += 1
+            local_region = db.get(Region, supplier_region.local_region_id)
+            if not local_region:
+                continue
+            matching_prices = [
+                price for (price_category, country_code, _), price in price_by_key.items()
+                if price_category == category and country_code == supplier_region.country_code.upper()
+            ]
+            if not matching_prices:
+                skipped_no_price += 1
+                continue
+            for retail_price in matching_prices:
+                rule = db.scalar(select(ProductSupplyRule).where(
+                    ProductSupplyRule.pool_id == pool.id,
+                    ProductSupplyRule.supplier_product_id == supplier_product.id,
+                    ProductSupplyRule.supplier_region_id == supplier_region.id,
+                ).join(Product, Product.id == ProductSupplyRule.product_id).where(
+                    Product.region_id == local_region.id,
+                    Product.billing_days == retail_price.billing_days,
+                ))
+                if rule:
+                    continue
+                product = Product(
+                    name=f"{local_region.name} {RESOURCE_CATEGORY_CODES[category]} {retail_price.billing_days}天",
+                    product_type=RESOURCE_CATEGORY_CODES[category],
+                    price=float(retail_price.unit_price),
+                    billing_days=retail_price.billing_days,
+                    region_id=local_region.id,
+                    is_active=True,
+                    is_in_stock=False,
+                )
+                db.add(product)
+                db.flush()
+                db.add(ProductSupplyRule(
+                    product_id=product.id,
+                    region_id=local_region.id,
+                    pool_id=pool.id,
+                    supplier_product_id=supplier_product.id,
+                    supplier_region_id=supplier_region.id,
+                    mode="manual",
+                    is_enabled=False,
+                ))
+                created += 1
+    db.flush()
+    return {"created": created, "mapped_regions": mapped_regions, "skipped_no_price": skipped_no_price}
 
 
 def save_inventory(
@@ -332,8 +435,6 @@ def configure_manual_supply_rule(
         raise ValueError("玖玖云商品与地区不匹配")
     if not supplier_product or not supplier_region or supplier_region.supplier_product_id != supplier_product.id:
         raise ValueError("供应商商品与地区不匹配")
-    if supplier_product.local_product_id != product.id or supplier_region.local_region_id != region.id:
-        raise ValueError("请先完成供应商商品和地区映射")
     rule = db.scalar(select(ProductSupplyRule).where(
         ProductSupplyRule.product_id == product.id,
         ProductSupplyRule.region_id == region.id,

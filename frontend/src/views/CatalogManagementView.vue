@@ -24,6 +24,8 @@ const prices = ref([])
 const priceTotal = ref(0)
 const pricePage = ref(1)
 const priceCategories = ref([])
+const priceCountries = ref([])
+const priceBillingDays = ref([])
 const priceFilter = reactive({ resource_category: '', country_code: '', billing_days: '' })
 const priceDrafts = reactive({})
 const selectedPrices = ref(new Set())
@@ -42,6 +44,17 @@ const productBulkSummary = computed(() => {
 
 const priceLabel = (value) => `¥${Number(value || 0).toFixed(2)}`
 const dateLabel = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+const countryDisplayNames = new Intl.DisplayNames(['zh-CN'], { type: 'region' })
+const countryName = (code) => {
+  const normalized = String(code || '').toUpperCase()
+  try {
+    return countryDisplayNames.of(normalized) || normalized || '未知国家'
+  } catch {
+    return normalized || '未知国家'
+  }
+}
+const sortedPriceCountries = computed(() => [...priceCountries.value].sort((a, b) =>
+  countryName(a.code).localeCompare(countryName(b.code), 'zh-CN')))
 
 function showNotice(message) {
   notice.value = message
@@ -93,6 +106,8 @@ async function loadPrices() {
     prices.value = data.items
     priceTotal.value = data.total
     priceCategories.value = data.categories
+    priceCountries.value = data.countries || []
+    priceBillingDays.value = data.billing_days_options || []
     setPriceDrafts(data.items)
   } catch (requestError) {
     error.value = requestError.userMessage || '国家周期零售价加载失败'
@@ -135,7 +150,7 @@ async function saveRetailPrice(item) {
   try {
     await updateManagedRetailPrice(item.id, { unit_price: value })
     await loadPrices()
-    showNotice(`${item.country_code} · ${item.billing_days} 天售价已更新`)
+    showNotice(`${countryName(item.country_code)}（${item.country_code}）· ${item.billing_days} 天售价已更新`)
   } catch (requestError) {
     error.value = requestError.userMessage || '保存零售价失败'
   } finally {
@@ -208,6 +223,13 @@ function applyPriceFilters() {
   loadPrices()
 }
 
+function resetPriceFilters() {
+  priceFilter.resource_category = ''
+  priceFilter.country_code = ''
+  priceFilter.billing_days = ''
+  applyPriceFilters()
+}
+
 function toggleAllProducts(checked) {
   const next = new Set(selectedProducts.value)
   for (const item of products.value) {
@@ -267,11 +289,17 @@ onMounted(loadProducts)
     </template>
 
     <template v-else>
-      <form class="catalog-filters retail-filters" @submit.prevent="applyPriceFilters"><label><span>资源类型</span><select v-model="priceFilter.resource_category"><option value="">全部类型</option><option v-for="item in priceCategories" :key="item.code" :value="item.code">{{ item.label }}</option></select></label><label><span>国家代码</span><input v-model="priceFilter.country_code" maxlength="10" placeholder="如 US" /></label><label><span>计费周期</span><select v-model="priceFilter.billing_days"><option value="">全部周期</option><option value="30">30 天</option><option value="180">180 天</option><option value="360">360 天</option></select></label><button class="secondary-action" type="submit">筛选</button></form>
+      <form class="catalog-filters retail-filters" @submit.prevent="applyPriceFilters">
+        <label><span>资源类型</span><select v-model="priceFilter.resource_category"><option value="">全部类型</option><option v-for="item in priceCategories" :key="item.code" :value="item.code">{{ item.label }}</option></select></label>
+        <label><span>国家/地区</span><select v-model="priceFilter.country_code"><option value="">全部国家/地区</option><option v-for="country in sortedPriceCountries" :key="country.code" :value="country.code">{{ countryName(country.code) }}（{{ country.code }}）</option></select></label>
+        <label><span>计费周期</span><select v-model="priceFilter.billing_days"><option value="">全部周期</option><option v-for="days in priceBillingDays" :key="days" :value="String(days)">{{ days }} 天</option></select></label>
+        <button class="secondary-action" type="submit" :disabled="loading">筛选</button>
+        <button class="text-action" type="button" :disabled="loading" @click="resetPriceFilters">重置</button>
+      </form>
       <section v-if="selectedPrices.size" class="bulk-editor"><div class="bulk-head"><b>已选 {{ selectedPrices.size }} 条价格规则</b><small>跨页选择</small><button type="button" class="text-action" @click="selectedPrices = new Set()">清除选择</button></div><div class="bulk-fields retail-bulk"><label><span>统一零售价（元 / 所选周期）</span><input v-model="retailBulkPrice" type="number" min="0.01" max="99999999" step="0.01" placeholder="输入统一售价" /></label><button class="primary-action" type="button" @click="previewBulk('prices')"><Save :size="14" />预览批量修改</button></div><div v-if="pendingBulk === 'prices'" class="bulk-confirm"><span>将 {{ selectedPrices.size }} 条规则的售价统一调整为 {{ priceLabel(retailBulkPrice) }} / 所选周期</span><button type="button" class="secondary-action" @click="pendingBulk = ''">返回</button><button type="button" class="primary-action" :disabled="busy" @click="applyBulk">{{ busy ? '提交中…' : '确认修改' }}</button></div></section>
       <section class="catalog-table-section">
         <div v-if="loading" class="table-state"><RefreshCw :size="17" class="spinning" />正在加载零售价</div><div v-else-if="!prices.length" class="table-state"><Tags :size="22" />没有匹配的价格规则</div>
-        <div v-else class="table-scroll"><table class="catalog-table retail-table"><thead><tr><th class="select-column"><input type="checkbox" aria-label="选择当前页全部零售价" :checked="prices.length > 0 && prices.every((item) => selectedPrices.has(item.id))" @change="toggleAllPrices($event.target.checked)" /></th><th>资源类型</th><th>国家</th><th>计费周期</th><th>零售价</th><th>来源版本</th><th>更新时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in prices" :key="item.id"><td class="select-column"><input type="checkbox" :aria-label="`选择 ${item.category_label} ${item.country_code} ${item.billing_days} 天`" :checked="selectedPrices.has(item.id)" @change="togglePriceSelection(item.id, $event.target.checked)" /></td><td>{{ item.category_label }}</td><td><b class="country-code">{{ item.country_code }}</b></td><td>{{ item.billing_days }} 天</td><td><label class="price-input"><span>¥</span><input v-model="priceDrafts[item.id]" type="number" min="0.01" max="99999999" step="0.01" :aria-label="`${item.country_code} ${item.billing_days} 天售价`" /></label></td><td>{{ item.source_version }}</td><td>{{ dateLabel(item.updated_at) }}</td><td><button class="save-row" type="button" :disabled="busy || Number(priceDrafts[item.id]) === Number(item.unit_price)" @click="saveRetailPrice(item)"><Save :size="14" />保存</button></td></tr></tbody></table></div>
+        <div v-else class="table-scroll"><table class="catalog-table retail-table"><thead><tr><th class="select-column"><input type="checkbox" aria-label="选择当前页全部零售价" :checked="prices.length > 0 && prices.every((item) => selectedPrices.has(item.id))" @change="toggleAllPrices($event.target.checked)" /></th><th>资源类型</th><th>国家名称</th><th>国家代码</th><th>计费周期</th><th>零售价</th><th>来源版本</th><th>更新时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in prices" :key="item.id"><td class="select-column"><input type="checkbox" :aria-label="`选择 ${item.category_label} ${countryName(item.country_code)} ${item.country_code} ${item.billing_days} 天`" :checked="selectedPrices.has(item.id)" @change="togglePriceSelection(item.id, $event.target.checked)" /></td><td>{{ item.category_label }}</td><td>{{ countryName(item.country_code) }}</td><td><b class="country-code">{{ item.country_code }}</b></td><td>{{ item.billing_days }} 天</td><td><label class="price-input"><span>¥</span><input v-model="priceDrafts[item.id]" type="number" min="0.01" max="99999999" step="0.01" :aria-label="`${countryName(item.country_code)} ${item.country_code} ${item.billing_days} 天售价`" /></label></td><td>{{ item.source_version }}</td><td>{{ dateLabel(item.updated_at) }}</td><td><button class="save-row" type="button" :disabled="busy || Number(priceDrafts[item.id]) === Number(item.unit_price)" @click="saveRetailPrice(item)"><Save :size="14" />保存</button></td></tr></tbody></table></div>
         <footer v-if="priceTotal" class="table-footer"><span>{{ priceTotal }} 条价格规则 · 第 {{ pricePage }} / {{ pricePageCount }} 页</span><div><button type="button" aria-label="上一页" :disabled="pricePage <= 1 || loading" @click="pricePage--; loadPrices()"><ChevronLeft :size="16" /></button><button type="button" aria-label="下一页" :disabled="pricePage >= pricePageCount || loading" @click="pricePage++; loadPrices()"><ChevronRight :size="16" /></button></div></footer>
       </section>
     </template>

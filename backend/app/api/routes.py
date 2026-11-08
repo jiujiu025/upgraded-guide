@@ -13,7 +13,7 @@ from app.core.security import create_access_token, hash_password, verify_passwor
 from app.core.client_ip import get_client_ip
 from app.db import get_db
 from app.models import (
-    AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, Product, Region, RetailPriceRule,
+    AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
     SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
 )
 from app.schemas.common import (
@@ -978,7 +978,17 @@ def admin_create_resource_order(
         raise HTTPException(status_code=422, detail="商品、国家、网段或报价快照不存在")
     if payload.resource_category not in RESOURCE_CATEGORY_CODES or supplier_product.resource_category != payload.resource_category:
         raise HTTPException(status_code=422, detail="供应商商品尚未人工映射到所选资源分类")
-    if supplier_product.local_product_id != product.id or not supplier_product.is_available:
+    supply_rule = db.scalar(select(ProductSupplyRule).join(
+        ResourcePool, ResourcePool.id == ProductSupplyRule.pool_id,
+    ).where(
+        ProductSupplyRule.product_id == product.id,
+        ProductSupplyRule.region_id == product.region_id,
+        ProductSupplyRule.supplier_product_id == supplier_product.id,
+        ProductSupplyRule.supplier_region_id == supplier_region.id,
+        ResourcePool.code == "global_proxy_pool",
+    ))
+    legacy_mapping = supplier_product.local_product_id == product.id
+    if (not (supply_rule or legacy_mapping) or not supplier_product.is_available):
         raise HTTPException(status_code=409, detail="供应商商品与平台产品未匹配或已停用")
     if supplier_region.supplier_product_id != supplier_product.id or not supplier_region.is_available or supplier_region.city_name is not None:
         raise HTTPException(status_code=409, detail="所选国家不属于当前供应商商品或已不可用")

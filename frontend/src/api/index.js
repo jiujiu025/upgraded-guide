@@ -159,6 +159,7 @@ export const getCatalogPublications = () => client.get('/admin/suppliers/publica
 export const publishCatalogSnapshot = (payload) => client.post('/admin/suppliers/publications', payload)
 export const withdrawCatalogPublication = (id) => client.post(`/admin/suppliers/publications/${id}/withdraw`)
 export const syncSupplierProducts = () => client.post('/admin/suppliers/sync/products')
+export const syncSupplierCatalog = () => client.post('/admin/suppliers/sync/catalog')
 export const syncSupplierCountries = (productTypeId = 2) => client.post(`/admin/suppliers/sync/countries?product_type_id=${encodeURIComponent(productTypeId)}`)
 export const syncSupplierCities = (productTypeId = 2) => client.post(`/admin/suppliers/sync/cities?product_type_id=${encodeURIComponent(productTypeId)}`)
 export const syncSupplierInventory = (countryCode, productTypeId = 2) => client.post(`/admin/suppliers/sync/inventory?product_type_id=${encodeURIComponent(productTypeId)}&country_code=${encodeURIComponent(countryCode)}`)
