@@ -68,6 +68,12 @@ jobs:
           test "$heads" -eq 1
           python -m alembic check
 
+      - name: 钱包账本巡检（空库必须无问题）
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:///./ci_migrations.db
+        run: python scripts/audit_wallet_ledger.py
+
   frontend:
     name: 前端构建与测试
     runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
