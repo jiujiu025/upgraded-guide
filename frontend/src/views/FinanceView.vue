@@ -3,7 +3,7 @@ import BrandLogo from '../components/BrandLogo.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { AlertTriangle, ArrowDownToLine, Check, CircleDollarSign, ClipboardCheck, CreditCard, Gauge, LogOut, Menu, PackageSearch, RefreshCw, Search, ShieldCheck, Users, X } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
-import { checkPaymentApi, createOfflineRecharge, getFinanceSummary, getPaymentConfig, logout as endSession, recordOrderRefund, searchFinanceAccounts, updatePaymentConfig } from '../api'
+import { checkPaymentApi, createOfflineRecharge, downloadFinanceExport, getFinanceExports, getFinanceSummary, getPaymentConfig, logout as endSession, recordOrderRefund, searchFinanceAccounts, updatePaymentConfig } from '../api'
 import { session } from '../api/session'
 import { getAdminNavigation } from '../navigation/adminNavigation'
 
@@ -36,6 +36,16 @@ const configLoaded = ref(false)
 const form = reactive({ merchant_id: '', secret: '', channel_types: 'alipay,wxpay', min_amount: '1.00', max_amount: '100000.00', online_enabled: false })
 const acceptance = ref(null)
 const dateRange = reactive({ from: '', to: '' })
+// 报表清单由后端提供（口径说明必须和导出的实际行为同源）；接口没回来时用本地兜底，
+// 别让一个说明性接口的失败把导出功能一起挡掉。
+const EXPORT_FALLBACK = [
+  { kind: 'orders', title: '订单明细', basis: '按下单时间归属，含未付款订单' },
+  { kind: 'payments', title: '收款明细', basis: '按支付时间归属，含退款情况' },
+  { kind: 'wallet', title: '钱包流水', basis: '按记账时间归属，含余额变动' },
+  { kind: 'monthly', title: '月度汇总', basis: '按自然月汇总，只算真实现金' },
+]
+const exportOptions = ref(EXPORT_FALLBACK)
+const exportBusy = ref('')
 const apiHealth = ref(null)
 const nav = computed(() => getAdminNavigation(user.value.role))
 
@@ -54,6 +64,54 @@ function showNotice(message) {
 function userError(err, fallback) { return err?.userMessage || fallback }
 function makeIdempotencyKey() { return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}` }
 async function logout() { await endSession(); router.replace('/admin/login') }
+async function loadExportOptions() {
+  try {
+    const { data } = await getFinanceExports()
+    if (Array.isArray(data) && data.length) exportOptions.value = data
+  } catch { /* 清单拉不到就用本地兜底，导出本身不依赖它 */ }
+}
+function saveBlob(blob, disposition, kind) {
+  const matched = /filename="([^"]+)"/.exec(disposition || '')
+  const filename = matched ? matched[1] : `finance-${kind}.csv`
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  // 立刻 revoke 会让部分浏览器把还没落盘的下载取消掉。
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+async function exportErrorMessage(err) {
+  // 请求了 blob，错误体也是 blob：不解出来只能给一句「导出失败」，用户不知道是区间超限还是没权限。
+  const data = err?.response?.data
+  if (data && typeof data.text === 'function') {
+    try {
+      const parsed = JSON.parse(await data.text())
+      if (parsed?.detail) return parsed.detail
+    } catch { /* 不是 JSON 就落回通用文案 */ }
+  }
+  return userError(err, '导出失败，请稍后重试')
+}
+async function exportCsv(kind) {
+  if (exportBusy.value) return
+  exportBusy.value = kind
+  error.value = ''
+  try {
+    const params = {}
+    if (dateRange.from) params.date_from = dateRange.from
+    if (dateRange.to) params.date_to = dateRange.to
+    const response = await downloadFinanceExport(kind, params)
+    saveBlob(response.data, response.headers['content-disposition'], kind)
+    const title = exportOptions.value.find((item) => item.kind === kind)?.title || '报表'
+    showNotice(`${title}已导出`)
+  } catch (err) {
+    error.value = await exportErrorMessage(err)
+  } finally {
+    exportBusy.value = ''
+  }
+}
 async function loadSummary() {
   const params = {}
   if (dateRange.from) params.date_from = dateRange.from
@@ -78,6 +136,7 @@ async function load() {
   error.value = ''
   try { await loadSummary() } catch (err) { error.value = userError(err, '财务数据暂时无法加载') }
   finally { loading.value = false }
+  loadExportOptions()
 }
 async function switchTab(nextTab) {
   tab.value = nextTab
@@ -234,6 +293,16 @@ onMounted(load)
             <div class="section-head"><div><h2>每日收支与业绩</h2><p>客户完成订单付款后按订单金额计提 15%；退款完成登记后冲销对应佣金。</p></div><button class="secondary-button" @click="loadSummary"><RefreshCw :size="14" />更新</button></div>
             <div class="date-filters"><label>开始日期<input v-model="dateRange.from" type="date" /></label><label>结束日期<input v-model="dateRange.to" type="date" /></label><button class="primary-button" @click="loadSummary">查询</button></div>
             <div class="finance-table-wrap"><table><thead><tr><th>日期</th><th>实收</th><th>充值入账</th><th>销售额</th><th>退款</th><th>佣金净额</th><th>新增客户</th><th>新增销售</th></tr></thead><tbody><tr v-for="row in summary?.daily || []" :key="row.date"><td>{{ row.date }}</td><td>{{ totalLabel(row.cash_received_cents) }}</td><td>{{ totalLabel(row.recharge_cents) }}</td><td>{{ totalLabel(row.sales_cents) }}</td><td>{{ totalLabel(row.refund_cents) }}</td><td>{{ totalLabel(row.commission_cents) }}</td><td>{{ row.new_customers }}</td><td>{{ row.new_sales }}</td></tr></tbody></table></div>
+          </section>
+          <section class="finance-section export-section">
+            <div class="section-head"><div><h2>导出报表</h2><p>按上面的日期区间导出 CSV，Excel 可直接打开。四张表归属口径不同，数字对不上时先看这里的说明。</p></div></div>
+            <div class="export-grid">
+              <button v-for="item in exportOptions" :key="item.kind" class="export-card" :disabled="!!exportBusy" @click="exportCsv(item.kind)">
+                <ArrowDownToLine :size="16" />
+                <span><b>{{ item.title }}</b><small>{{ item.basis }}</small></span>
+                <em>{{ exportBusy === item.kind ? '导出中…' : 'CSV' }}</em>
+              </button>
+            </div>
           </section>
           <section class="finance-section">
             <div class="section-head"><div><h2>销售佣金累计</h2><p>金额按实收订单的 15% 记录，退款以负向流水冲回。</p></div></div>
@@ -429,4 +498,15 @@ onMounted(load)
 @media(max-width:900px){.finance-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.finance-summary article:nth-child(2){border-right:0}.finance-summary article:nth-child(n+3){border-top:1px solid #e5ece8}.finance-content{padding:18px}}
 @media(max-width:560px){.finance-content{padding:14px}.finance-header{padding:0 14px}.finance-header h1{font-size:19px}.finance-tabs button{padding:0 9px;font-size:10px}.finance-summary strong{font-size:19px}.finance-summary article{padding:12px 10px}.finance-summary small{font-size:9px}.finance-section{padding:12px}.section-head h2{font-size:14px}.date-filters{display:grid;grid-template-columns:1fr 1fr}.date-filters label,.date-filters input{width:100%;min-width:0}.date-filters button{grid-column:1/-1}.recharge-fields,.payment-form{grid-template-columns:1fr}.payment-form .field-wide{grid-column:auto}.account-results>button{grid-template-columns:minmax(0,1fr) auto;gap:7px}.account-results>button svg{display:none}.account-balance{font-size:9px}.payment-actions{flex-wrap:wrap}.section-head>span{white-space:normal}.confirm-dialog{padding:19px}.dialog-actions>*{flex:1}.finance-table-wrap{max-width:calc(100vw - 58px)}.api-result{grid-template-columns:1fr;gap:4px}}
 @media(prefers-reduced-motion:reduce){.finance-loading span,.rotate,.confirm-dialog{animation:none}.finance-tabs button,.primary-button,.secondary-button{transition:none}}
+.export-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.export-card{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;padding:12px 13px;border:1px solid #dce5e1;border-radius:6px;background:#fff;text-align:left;cursor:pointer}
+.export-card:hover:not(:disabled){border-color:#b7cdc5;background:#f7faf9}
+.export-card:disabled{opacity:.6;cursor:default}
+.export-card>svg{color:#3c7f74}
+.export-card>span{display:grid;gap:2px;min-width:0}
+.export-card b{font-size:12px;color:#24463c}
+.export-card small{color:#7b8d86;font-size:9px;line-height:1.5}
+.export-card em{font-style:normal;font-size:9px;font-weight:650;color:#3c7f74;white-space:nowrap}
+@media(max-width:900px){.export-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.export-grid{grid-template-columns:1fr}}
 </style>

@@ -111,6 +111,11 @@ export const getAdminSubscriptions = (params = {}) => client.get('/admin/order-c
 export const getAdminOrderCenterOrders = () => client.get('/admin/order-center/orders')
 export const createAdminResourceOrder = (payload) => client.post('/admin/order-center/orders', payload)
 export const getFinanceSummary = (params = {}) => client.get('/admin/finance/summary', { params })
+export const getFinanceExports = () => client.get('/admin/finance/exports')
+// 导出是流式响应，区间大时要扫几千行，默认 10 秒超时不够用；
+// responseType 必须是 blob，否则中文会被当文本按错误的编码解一遍。
+export const downloadFinanceExport = (kind, params = {}) =>
+  client.get(`/admin/finance/exports/${kind}`, { params, responseType: 'blob', timeout: 120000 })
 export const getTaskRuns = (params = {}) => client.get('/admin/task-runs', { params })
 export const getTaskCatalog = () => client.get('/admin/task-runs/catalog')
 export const runTaskNow = (name) => client.post(`/admin/task-runs/${encodeURIComponent(name)}/run`)
