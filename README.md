@@ -18,4 +18,4 @@
 
 定时任务（关单、到期提醒、支付对账）由 `worker` 容器执行 `python -m app.scheduler` 拉起，设计与运维说明见 [定时任务与支付对账设计](docs/定时任务与支付对账设计.md)。
 
-金额对账：`python scripts/audit_wallet_ledger.py` 只读核对"账户余额 / 明细流水 / 客户表浮点副本"三者是否自洽，退出码 1 表示账本身有问题。现状核查与迁移路径见 [金额一致性现状与迁移方案](docs/金额一致性现状与迁移方案.md)。
+金额对账：`python scripts/audit_wallet_ledger.py` 只读核对"账户余额 / 明细流水 / 客户表浮点副本"三者是否自洽，退出码 1 表示账本身有问题。存量余额补进钱包用 `python scripts/migrate_customer_balance_to_wallet.py`（默认预演，加 `--apply` 才写库，可重复执行）。现状核查与迁移路径见 [金额一致性现状与迁移方案](docs/金额一致性现状与迁移方案.md)。
