@@ -4,6 +4,8 @@ name: CI
 # GitHub 从 2026-10-19 起把 ubuntu-latest 滚动迁移到 Ubuntu 26.04（预计 11-19 完成），
 # 迁移期间同一个 workflow 可能随机落在 24.04 或 26.04 上，构建结果不再可复现。
 # 需要提前验证下一代镜像时，手动触发并选择 runner=ubuntu-26.04。
+# 2026-11-08 已用 runner=ubuntu-26.04 跑通全部 job（后端测试与迁移、前端构建与测试均 success），
+# 说明本项目的工具链不依赖镜像内的系统 Python/Node，后续迁移到 26.04 时把默认值改掉即可。
 on:
   push:
   pull_request:
