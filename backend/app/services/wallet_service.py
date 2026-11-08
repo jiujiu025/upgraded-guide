@@ -72,7 +72,11 @@ def apply_wallet_delta(
     db.add(transaction)
     customer = db.scalar(select(Customer).where(Customer.user_id == user_id))
     if customer:
+        # 过渡期仍写浮点副本（还有地方读它），但写进去的值必须能原样还原成整数分，
+        # 否则说明副本被写坏了。当场报错好过月底对账时才发现。
         customer.balance = after / 100
+        if int(round(customer.balance * 100)) != after:
+            raise ValueError(f"余额副本精度异常：{after} 分写成 {customer.balance}")
     db.flush()
     return transaction
 

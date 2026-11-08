@@ -25,6 +25,7 @@ from app.schemas.common import (
 )
 from app.services.audit_service import write_audit
 from app.services.customer_scope import get_customer_profile, scoped_customer_ids
+from app.services.customer_view import balance_cents_of, customer_view, customer_views
 from app.services.health_service import check_node
 from app.services.order_service import (
     TERMINAL_ORDER_STATUSES, add_notification, calculate_order_price, claim_delivery_slot,
@@ -390,7 +391,7 @@ def list_customers(keyword: str | None = None, db: Session = Depends(get_db), us
     query = select(Customer).where(Customer.id.in_(scoped_customer_ids(db, user)))
     if keyword:
         query = query.where(Customer.name.contains(keyword) | Customer.email.contains(keyword))
-    return list(db.scalars(query.order_by(Customer.created_at.desc()).limit(200)).all())
+    return customer_views(db, db.scalars(query.order_by(Customer.created_at.desc()).limit(200)).all())
 
 
 @router.post("/customers", response_model=CustomerOut)
@@ -401,7 +402,7 @@ def create_customer(payload: CustomerIn, db: Session = Depends(get_db), user: Us
     write_audit(db, user, "create", "customer", detail=customer.name)
     db.commit()
     db.refresh(customer)
-    return customer
+    return customer_view(customer, balance_cents_of(db, customer.user_id))
 
 
 @router.get("/customers/{customer_id}", response_model=CustomerOut)
@@ -409,7 +410,7 @@ def get_customer(customer_id: int, db: Session = Depends(get_db), user: User = D
     customer = db.scalar(select(Customer).where(Customer.id == customer_id, Customer.id.in_(scoped_customer_ids(db, user))))
     if not customer:
         raise HTTPException(status_code=404, detail="客户不存在或无权访问")
-    return customer
+    return customer_view(customer, balance_cents_of(db, customer.user_id))
 
 
 @router.get("/products", response_model=list[ProductOut])
@@ -658,7 +659,8 @@ def public_order_preview(payload: OrderPreviewIn, db: Session = Depends(get_db))
 # 客户接口：客户身份和数据范围全部从 Token 解析。
 @router.get("/customer/me", response_model=CustomerOut)
 def customer_me(db: Session = Depends(get_db), user: User = Depends(require_roles("customer"))):
-    return get_customer_profile(db, user)
+    customer = get_customer_profile(db, user)
+    return customer_view(customer, balance_cents_of(db, customer.user_id))
 
 
 @router.get("/customer/orders", response_model=list[OrderOut])
@@ -813,7 +815,7 @@ def sales_dashboard(db: Session = Depends(get_db), user: User = Depends(require_
 
 @router.get("/sales/customers", response_model=list[CustomerOut])
 def sales_customers(db: Session = Depends(get_db), user: User = Depends(require_roles("sales"))):
-    return list(db.scalars(select(Customer).where(Customer.sales_id == user.id, Customer.is_deleted.is_(False)).order_by(Customer.created_at.desc())).all())
+    return customer_views(db, db.scalars(select(Customer).where(Customer.sales_id == user.id, Customer.is_deleted.is_(False)).order_by(Customer.created_at.desc())).all())
 
 
 @router.get("/sales/orders", response_model=list[OrderOut])
@@ -1231,7 +1233,7 @@ def admin_assign_customer(customer_id: int, payload: AssignCustomerIn, db: Sessi
         write_audit(db, user, "assign_sales", "customer", customer.id, f"sales_id={payload.sales_id}")
         db.commit()
         db.refresh(customer)
-        return customer
+        return customer_view(customer, balance_cents_of(db, customer.user_id))
     except Exception:
         db.rollback()
         raise

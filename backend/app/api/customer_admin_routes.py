@@ -212,7 +212,8 @@ def list_admin_customers(
             "user_id": customer.user_id,
             "username": account_username,
             "account_active": account_active,
-            "balance_cents": int(balance_cents if balance_cents is not None else round(customer.balance * 100)),
+            # 没有钱包账户即 0，与 /wallet 口径一致；不再回退 customers.balance 浮点副本
+            "balance_cents": int(balance_cents or 0),
             "line_count": line_counts.get(customer.id, 0),
             "created_at": customer.created_at,
         })
@@ -336,7 +337,8 @@ def get_admin_customer(
             "user_id": customer.user_id,
             "username": account.username if account else None,
             "account_active": account.is_active if account else None,
-            "balance_cents": int(wallet.balance_cents if wallet else round(customer.balance * 100)),
+            # 同上：以钱包为唯一口径，缺失按 0 处理
+            "balance_cents": int(wallet.balance_cents if wallet else 0),
             "created_at": customer.created_at,
             "updated_at": customer.updated_at,
         },
