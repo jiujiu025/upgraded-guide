@@ -251,8 +251,15 @@ class ProductOut(BaseModel):
     is_in_stock: bool = True
 
 
+class PricePeriodOut(BaseModel):
+    billing_days: int
+    unit_price: float
+
+
 class PublicProductOut(ProductOut):
     region: str
+    resource_category: str | None = None
+    periods: list[PricePeriodOut] = []
 
 
 class RegionOut(BaseModel):
@@ -278,8 +285,9 @@ class OrderPreviewOut(BaseModel):
     quantity: int
     billing_days: int
     unit_price: float
-    discount: float
     total_amount: float
+    periods: list[PricePeriodOut] = []
+    # 无折扣口径：不再返回 discount 字段（详见 docs/定价收敛实施方案.md）
 
 
 class LineIn(BaseModel):

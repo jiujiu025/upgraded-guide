@@ -1,28 +1,21 @@
-from decimal import Decimal, ROUND_HALF_UP
-
 from fastapi import HTTPException
 from sqlalchemy import case, update
 from sqlalchemy.orm import Session
 
 from app.models import Customer, Notification, Order, Product, User
+from app.services.pricing_service import PricingError, quote as _quote
 
 PAYMENT_METHODS = {"balance", "online", "contact_manager"}
 TERMINAL_ORDER_STATUSES = {"completed", "cancelled", "refunded"}
-PERIOD_FACTORS = {1: Decimal("1"), 6: Decimal("5.5"), 12: Decimal("10")}
 
 
-def calculate_order_price(product: Product, quantity: int, billing_days: int) -> tuple[float, float]:
-    """只使用数据库产品价格，按基础周期、半年和年度周期计算。"""
-    if product.billing_days <= 0 or billing_days % product.billing_days:
-        raise HTTPException(status_code=422, detail="使用周期不合法")
-    multiplier = billing_days // product.billing_days
-    factor = PERIOD_FACTORS.get(multiplier)
-    if factor is None:
-        raise HTTPException(status_code=422, detail="仅支持基础周期、6 个周期或 12 个周期")
-    unit_price = Decimal(str(product.price))
-    total = (unit_price * quantity * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    discount = (factor / Decimal(multiplier)).quantize(Decimal("0.0001"))
-    return float(total), float(discount)
+def calculate_order_price(db: Session, product: Product, quantity: int, billing_days: int) -> tuple[float, float]:
+    """返回 (该周期单价, 合计)。实现在 pricing_service，这里只做类型适配与 HTTP 映射。"""
+    try:
+        unit_price, total = _quote(db, product, quantity, billing_days)
+    except PricingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return float(unit_price), float(total)
 
 
 def initial_order_status(payment_method: str, order_type: str = "purchase") -> str:

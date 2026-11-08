@@ -30,6 +30,9 @@ from app.services.order_service import (
     TERMINAL_ORDER_STATUSES, add_notification, calculate_order_price, claim_delivery_slot,
     ensure_sales_user, initial_order_status, notify_order_parties,
 )
+from app.services.pricing_service import (
+    SELLABLE_PERIODS, PricingError, monthly_price_for, periods_of, unit_price_for,
+)
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
 from app.services.registration_service import (enforce_login_rate_limit, enforce_password_recovery_rate_limit,
     enforce_registration_rate_limit)
@@ -189,7 +192,7 @@ def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, o
     if region_id != product.region_id or not region:
         raise HTTPException(status_code=422, detail="产品与地区不匹配")
     billing_days = payload.billing_days or product.billing_days
-    total_amount, _ = calculate_order_price(product, payload.quantity, billing_days)
+    unit_price, total_amount = calculate_order_price(db, product, payload.quantity, billing_days)
     order = Order(
         order_no=f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}",
         customer_id=customer.id,
@@ -197,7 +200,7 @@ def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, o
         amount=total_amount,
         quantity=payload.quantity,
         billing_days=billing_days,
-        unit_price=product.price,
+        unit_price=unit_price,
         total_amount=total_amount,
         region_id=product.region_id,
         region_name=region.name,
@@ -617,7 +620,9 @@ def public_register(
 @router.get("/public/products", response_model=list[PublicProductOut])
 def public_products(db: Session = Depends(get_db)):
     rows = db.execute(select(Product, Region).join(Region, Product.region_id == Region.id).where(Product.is_active.is_(True), Region.is_active.is_(True)).order_by(Product.id)).all()
-    return [{**ProductOut.model_validate(product).model_dump(), "region": region.name} for product, region in rows]
+    return [{**ProductOut.model_validate(product).model_dump(), "region": region.name,
+             "resource_category": product.resource_category,
+             "periods": periods_of(db, product)} for product, region in rows]
 
 
 @router.get("/public/products/{product_id}", response_model=PublicProductOut)
@@ -626,7 +631,9 @@ def public_product(product_id: int, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(status_code=404, detail="产品不存在或已停用")
     product, region = row
-    return {**ProductOut.model_validate(product).model_dump(), "region": region.name}
+    return {**ProductOut.model_validate(product).model_dump(), "region": region.name,
+            "resource_category": product.resource_category,
+            "periods": periods_of(db, product)}
 
 
 @router.get("/public/regions", response_model=list[RegionOut])
@@ -642,8 +649,10 @@ def public_order_preview(payload: OrderPreviewIn, db: Session = Depends(get_db))
         raise HTTPException(status_code=404, detail="产品不存在、已停用或暂时无货")
     if not region or product.region_id != region.id:
         raise HTTPException(status_code=422, detail="产品与地区不匹配")
-    total, discount = calculate_order_price(product, payload.quantity, payload.billing_days)
-    return {"product_id": product.id, "product_name": product.name, "region_id": region.id, "region": region.name, "quantity": payload.quantity, "billing_days": payload.billing_days, "unit_price": product.price, "discount": discount, "total_amount": total}
+    unit_price, total = calculate_order_price(db, product, payload.quantity, payload.billing_days)
+    return {"product_id": product.id, "product_name": product.name, "region_id": region.id, "region": region.name,
+            "quantity": payload.quantity, "billing_days": payload.billing_days, "unit_price": unit_price,
+            "periods": periods_of(db, product), "total_amount": total}
 
 
 # 客户接口：客户身份和数据范围全部从 Token 解析。
@@ -1003,14 +1012,13 @@ def admin_create_resource_order(
             or quote.quoted_at < quote_floor or not quote.is_available
             or quote.duration_days not in (None, billing_days)):
         raise HTTPException(status_code=409, detail="报价快照已过期或与当前国家、周期不匹配，请重新同步报价")
-    retail_rule = db.scalar(select(RetailPriceRule).where(
-        RetailPriceRule.resource_category == payload.resource_category,
-        RetailPriceRule.country_code == supplier_region.country_code,
-        RetailPriceRule.billing_days == billing_days,
-    ))
-    if not retail_rule:
-        raise HTTPException(status_code=409, detail="该产品分类、国家和周期暂无销售价，请勿手动估价")
-    unit_price = Decimal(retail_rule.unit_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    # 定价口径：月价 × 周期数（线性、无折扣）。资源池下单与官网必须同价。
+    if billing_days not in SELLABLE_PERIODS:
+        raise HTTPException(status_code=409, detail=f"仅支持 {'/'.join(map(str, SELLABLE_PERIODS))} 天周期")
+    try:
+        unit_price = unit_price_for(monthly_price_for(db, payload.resource_category, supplier_region.country_code), billing_days)
+    except PricingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     total = (unit_price * payload.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     cost_total = (Decimal(str(quote.unit_cost)) * payload.quantity).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     order = Order(

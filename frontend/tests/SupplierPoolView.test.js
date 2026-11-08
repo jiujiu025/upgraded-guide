@@ -101,19 +101,19 @@ describe('管理员资源池工作台', () => {
     expect(api.syncSupplierCities).toHaveBeenCalledTimes(1)
   })
 
-  it('保存商品映射时只提交内部商品 ID', async () => {
+  it('保存资源类型映射时只提交内部商品 ID 与分类代码', async () => {
     setLoadData({
       overview: { ...overview, supplier: { ...overview.supplier, api_key_configured: true }, counts: { ...overview.counts, products: 1 } },
-      products: [{ id: 8, external_product_ref: '2', name_snapshot: '静态住宅', currency: 'CNY', local_product_id: null, data_state: 'fresh', last_synced_at: '2026-10-27T10:00:00' }],
+      products: [{ id: 8, external_product_ref: '2', name_snapshot: '静态住宅', currency: 'CNY', local_product_id: 7, resource_category: null, data_state: 'fresh', last_synced_at: '2026-10-27T10:00:00' }],
       localProducts: [{ id: 7, name: '玖玖IP美国线路', region_id: 3 }],
     })
     const wrapper = mount(SupplierPoolView)
     await flushPromises()
     await wrapper.findAll('.supplier-tabs button')[1].trigger('click')
-    await wrapper.find('.product-mapping-table select').setValue('7')
+    await wrapper.find('.product-mapping-table select').setValue('static_residential_native')
     await flushPromises()
 
-    expect(api.mapSupplierProduct).toHaveBeenCalledWith(8, 7, undefined)
+    expect(api.mapSupplierProduct).toHaveBeenCalledWith(8, 7, 'static_residential_native')
   })
 
   it('供应商失败时告警并禁用发布，但仍可撤回已发布版本', async () => {

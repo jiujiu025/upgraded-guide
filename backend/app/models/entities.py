@@ -83,6 +83,8 @@ class Product(TimestampMixin, Base):
     region_id: Mapped[int] = mapped_column(ForeignKey("regions.id"), index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     is_in_stock: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 资源分类：有值表示按零售价目表的月价线性定价；为空表示固定价商品（如直播专线）
+    resource_category: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
 
 
 class Node(TimestampMixin, Base):

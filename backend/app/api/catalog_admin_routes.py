@@ -9,6 +9,7 @@ from app.api.deps import require_roles
 from app.db import get_db
 from app.models import Product, Region, RetailPriceRule, User
 from app.services.audit_service import write_audit
+from app.services.pricing_service import BASE_PERIOD_DAYS, sync_display_price
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
 
 
@@ -47,6 +48,8 @@ def _product_view(product: Product, region_name: str | None) -> dict:
         "region_name": region_name,
         "is_in_stock": product.is_in_stock,
         "is_active": product.is_active,
+        "resource_category": product.resource_category,
+        "price_locked": bool(product.resource_category),
         "updated_at": product.updated_at,
     }
 
@@ -58,6 +61,43 @@ def _validate_product_update(changes: dict) -> None:
         raise HTTPException(status_code=422, detail="售价不能为空")
     if "is_in_stock" in changes and changes["is_in_stock"] is None:
         raise HTTPException(status_code=422, detail="库存状态不能为空")
+
+
+def _reject_direct_price_edit(product: Product, changes: dict) -> None:
+    """归入资源分类的商品，价格由零售价目表的月价线性决定。
+
+    直接改 Product.price 既不会生效、又会让人误以为改成功了，所以这里直接拒绝，
+    把改价入口收敛到「零售价」页。
+    """
+    if "price" not in changes or not product.resource_category:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail="该商品价格由零售价目表决定（月价 × 周期数），请到「零售价」页修改月价",
+    )
+
+
+def _reject_long_period_price_edit(item: RetailPriceRule) -> None:
+    """长周期价由月价派生，不允许单独配置，否则会出现第二份价格。"""
+    if item.billing_days != BASE_PERIOD_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{item.billing_days} 天价格由月价自动计算（{item.billing_days // BASE_PERIOD_DAYS} 倍），请修改 30 天档月价",
+        )
+
+
+def _sync_products_of_rule(db: Session, actor: User, rule: RetailPriceRule) -> None:
+    """月价变更后，把派生价回写到该分类 + 该国家下所有商品的展示价。"""
+    if rule.billing_days != BASE_PERIOD_DAYS:
+        return
+    products = db.scalars(select(Product).where(
+        Product.resource_category == rule.resource_category,
+        Product.region_id.in_(select(Region.id).where(Region.country_code == rule.country_code.strip().upper())),
+    )).all()
+    for product in products:
+        if sync_display_price(db, product):
+            write_audit(db, actor, "sync_display_price", "product", product.id,
+                        f"跟随月价回写={product.price}")
 
 
 @router.get("/products")
@@ -100,6 +140,7 @@ def update_catalog_product(
         raise HTTPException(status_code=404, detail="商品不存在")
     changes = payload.model_dump(exclude_unset=True)
     _validate_product_update(changes)
+    _reject_direct_price_edit(product, changes)
     old_values = {field: getattr(product, field) for field in changes}
     for field, value in changes.items():
         setattr(product, field, float(value) if field == "price" else value)
@@ -124,6 +165,8 @@ def bulk_update_catalog_products(
     products = db.scalars(select(Product).where(Product.id.in_(ids)).order_by(Product.id)).all()
     if len(products) != len(ids):
         raise HTTPException(status_code=404, detail="部分商品已不存在，未执行批量修改")
+    for product in products:
+        _reject_direct_price_edit(product, changes)
     for product in products:
         old_values = {field: getattr(product, field) for field in changes}
         for field, value in changes.items():
@@ -193,10 +236,12 @@ def update_retail_price(
     item = db.get(RetailPriceRule, price_rule_id)
     if not item:
         raise HTTPException(status_code=404, detail="零售价规则不存在")
+    _reject_long_period_price_edit(item)
     before = item.unit_price
     item.unit_price = payload.unit_price
     write_audit(db, actor, "update_retail_price", "retail_price_rule", item.id,
                 f"售价={before}→{item.unit_price}; 类型={item.resource_category}; 国家={item.country_code}; 周期={item.billing_days}")
+    _sync_products_of_rule(db, actor, item)
     db.commit()
     return {"id": item.id, "unit_price": str(item.unit_price), "updated_at": item.updated_at}
 
@@ -214,9 +259,13 @@ def bulk_update_retail_prices(
     if len(rows) != len(ids):
         raise HTTPException(status_code=404, detail="部分价格规则已不存在，未执行批量修改")
     for item in rows:
+        _reject_long_period_price_edit(item)
+    for item in rows:
         before = item.unit_price
         item.unit_price = payload.unit_price
         write_audit(db, actor, "bulk_update_retail_price", "retail_price_rule", item.id,
                     f"批量操作，共 {len(rows)} 条；售价={before}→{item.unit_price}; 类型={item.resource_category}; 国家={item.country_code}; 周期={item.billing_days}")
+    for item in rows:
+        _sync_products_of_rule(db, actor, item)
     db.commit()
     return {"updated_count": len(rows)}

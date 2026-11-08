@@ -10,6 +10,7 @@ from app.models import (
     SupplierQuote, SupplierRegion, SupplierSyncRun, User,
 )
 from app.services.audit_service import write_audit
+from app.services.pricing_service import display_price_of
 from app.services.supplier_service import CITIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, utcnow
 
 
@@ -117,6 +118,12 @@ def publish_catalog(db: Session, actor: User, product_id: int, region_id: int,
             and previous.after_values["price"] == price):
         raise PublicationError("同一快照及售价已发布，请勿重复提交")
     before = _catalog_values(product)
+    # 归入资源分类的商品，发布价必须等于「月价 × 周期数」；固定价商品不受此约束
+    expected_price = display_price_of(db, product) if product.resource_category else 0.0
+    if expected_price and abs(float(price) - expected_price) > 0.005:
+        raise PublicationError(
+            f"发布价 ¥{price:g} 与月价派生的 ¥{expected_price:g} 不一致，请先在「零售价」页调整月价"
+        )
     product.price = price
     product.is_in_stock = True
     after = _catalog_values(product)
