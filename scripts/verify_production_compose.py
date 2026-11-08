@@ -21,10 +21,10 @@ def verify(env_file: Path, allow_placeholders: bool = False) -> None:
         raise ValueError("Compose 解析失败；请在私有终端检查变量与语法")
     config = json.loads(result.stdout)
     services = config["services"]
-    if config["name"] != "99ipxin" or set(services) != {"postgres", "redis", "migrate", "api", "web"}:
+    if config["name"] != "99ipxin" or set(services) != {"postgres", "redis", "migrate", "api", "worker", "web"}:
         raise ValueError("项目名称或服务集合与独立部署契约不符")
-    if services["postgres"].get("ports") or services["redis"].get("ports") or services["api"].get("ports"):
-        raise ValueError("数据库、Redis 或 API 不得发布宿主机端口")
+    if any(services[name].get("ports") for name in ("postgres", "redis", "api", "worker")):
+        raise ValueError("数据库、Redis、API 或调度进程不得发布宿主机端口")
     if services["postgres"].get("user") != "postgres" or services["redis"].get("user") != "redis":
         raise ValueError("数据库或 Redis 未配置非 root 服务账号")
     ports = services["web"].get("ports", [])
@@ -56,11 +56,21 @@ def verify(env_file: Path, allow_placeholders: bool = False) -> None:
     if (services["web"]["networks"].keys() != {"edge"}
             or services["redis"]["networks"].keys() != {"data"}
             or services["postgres"]["networks"].keys() != {"data"}
-            or services["api"]["networks"].keys() != {"data", "edge"}):
+            or services["api"]["networks"].keys() != {"data", "edge"}
+            or services["worker"]["networks"].keys() != {"data"}):
         raise ValueError("服务网络隔离配置不符")
     api_env = services["api"]["environment"]
     if "GLOBAL_PROXY_API_KEY" not in api_env:
         raise ValueError("供应商 API Key 必须仅注入后端 API")
+    worker = services["worker"]
+    # 供应商刷新任务跑在 scheduler 进程里，环境变量回退值必须同时注入 worker，
+    # 否则后台没录密文时定时刷新会一直以"未配置 Key"跳过。
+    if "GLOBAL_PROXY_API_KEY" not in worker.get("environment", {}):
+        raise ValueError("供应商 API Key 必须同时注入调度容器，否则定时刷新会被跳过")
+    if worker.get("command") != ["python", "-m", "app.scheduler"]:
+        raise ValueError("调度容器必须运行 app.scheduler")
+    if not worker.get("healthcheck", {}).get("disable"):
+        raise ValueError("调度容器没有可探活的 HTTP 端点，健康检查必须显式关闭")
     encryption_key = api_env.get("SUPPLIER_SECRET_ENCRYPTION_KEY", "")
     if len(encryption_key) != 64 or any(char not in "0123456789abcdefABCDEF" for char in encryption_key):
         raise ValueError("后台供应商凭据加密密钥必须是 64 位十六进制字符串")

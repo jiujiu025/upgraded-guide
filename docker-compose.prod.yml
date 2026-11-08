@@ -85,11 +85,13 @@ services:
     tmpfs:
       - /tmp
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      # 用 /readyz 而不是 /healthz：数据库或 Redis 打不通、迁移没跑到 head 时
+      # 容器要被判成 unhealthy，编排层才不会把坏服务当健康、白等它自愈。
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5)"]
       interval: 30s
-      timeout: 3s
+      timeout: 8s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   worker:
     image: 99ipxin-api:prod
@@ -98,6 +100,9 @@ services:
       dockerfile: Dockerfile
     environment:
       <<: *api-environment
+      # 供应商刷新任务跑在这个容器里，环境变量回退值必须一起注入，
+      # 否则后台没录密文时定时刷新会每轮都以"未配置 Key"跳过且不报警。
+      GLOBAL_PROXY_API_KEY: ${GLOBAL_PROXY_API_KEY:-}
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
       ORDER_PAYMENT_TIMEOUT_MINUTES: ${ORDER_PAYMENT_TIMEOUT_MINUTES:-1440}
       LINE_REMINDER_DAYS: ${LINE_REMINDER_DAYS:-7,3,1}

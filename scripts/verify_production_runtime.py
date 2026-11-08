@@ -57,6 +57,14 @@ def main() -> None:
     with urllib.request.urlopen("http://127.0.0.1:18081/healthz", timeout=5) as response:
         if response.status != 200:
             raise RuntimeError("Web 健康端点未返回 200")
+    # 容器 healthy 已经隐含了 /readyz 通过，这里再显式读一次响应体：
+    # 一旦失败能直接看出是库、Redis 还是迁移版本的问题，而不是只看到 unhealthy。
+    readyz = json.loads(command("exec", "-T", "api", "python", "-c",
+                                "import json,urllib.request;"
+                                "print(json.dumps(json.load(urllib.request.urlopen("
+                                "'http://127.0.0.1:8000/readyz', timeout=5))))"))
+    if readyz.get("status") != "ready":
+        raise RuntimeError(f"API 就绪探针未通过: {readyz}")
     result = subprocess.run([*BASE, "exec", "-T", "api", "python", "-m", "app.bootstrap_admin"],
                             cwd=ROOT, text=True, capture_output=True)
     if result.returncode == 0 or "必须通过交互终端输入" not in result.stderr:

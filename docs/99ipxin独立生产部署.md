@@ -22,7 +22,7 @@ ss -ltn '( sport = :18081 )'
 
 ## 本地环境文件
 
-把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`SUPPLIER_SECRET_ENCRYPTION_KEY` 与 `PAYMENT_SECRET_ENCRYPTION_KEY` 必须分别用 `openssl rand -hex 32` 生成并妥善备份，二者不可复用；丢失对应主密钥后数据库中的密文无法恢复，直接更换会使已有密文无法解密。支付密钥主密钥仅用于支付通道 V1 MD5 密钥的 AES-GCM 密文。线上支付默认关闭，必须先跑支付自检登记验收记录才能开启（见下文第 38 行起的说明）；支付管理里的域名连通性检查不验证商户凭据，也不构成验收。首次部署完成迁移（当前 head 为 `0025_renewal_outreaches`）后，超级管理员可在 `/admin/resource-pool` 直接录入全球代理 Key；页面只显示配置状态，不回显 Key。后台密文优先于环境变量。`GLOBAL_PROXY_API_KEY` 仍可作为服务器环境配置回退，仅由 Compose 注入 API 容器；不要配置在前端、数据库明文、迁移容器或 Git 中。未配置任一凭据时资源池页面会禁用同步按钮。
+把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`SUPPLIER_SECRET_ENCRYPTION_KEY` 与 `PAYMENT_SECRET_ENCRYPTION_KEY` 必须分别用 `openssl rand -hex 32` 生成并妥善备份，二者不可复用；丢失对应主密钥后数据库中的密文无法恢复，直接更换会使已有密文无法解密。支付密钥主密钥仅用于支付通道 V1 MD5 密钥的 AES-GCM 密文。线上支付默认关闭，必须先跑支付自检登记验收记录才能开启（见下文第 38 行起的说明）；支付管理里的域名连通性检查不验证商户凭据，也不构成验收。首次部署完成迁移（当前 head 为 `0025_renewal_outreaches`）后，超级管理员可在 `/admin/resource-pool` 直接录入全球代理 Key；页面只显示配置状态，不回显 Key。后台密文优先于环境变量。`GLOBAL_PROXY_API_KEY` 仍可作为服务器环境配置回退，由 Compose 同时注入 API 与调度（worker）容器——定时刷新的供应商任务跑在 worker 里，漏注会让刷新每轮以"未配置 Key"跳过；不要配置在前端、数据库明文、迁移容器或 Git 中。未配置任一凭据时资源池页面会禁用同步按钮。
 
 若使用环境变量方式配置或轮换供应商 Key，只在服务器编辑 `.env.production`，保持文件权限 `0600`，然后仅重建 API 容器以加载环境变量：
 
@@ -69,6 +69,39 @@ docker compose --env-file .env.production -f docker-compose.prod.yml ps
 初始化命令要求交互终端，用户名和两次密码提示在终端输入；密码由 `getpass` 隐藏，不能通过参数、管道或环境变量传入。它只接受生产 PostgreSQL，要求用户表完全为空，使用 PostgreSQL 事务锁防止并发重复初始化并创建审计记录。再次运行会失败。初始密码只经独立安全渠道交付；初始化不会打印密码。生产环境执行 `python -m app.seed` 会被拒绝。首次登录无需强制改密，建议管理员通过安全渠道交付高强度初始密码。
 
 如果已有用户而没有超级管理员，不要清空用户表来绕过初始化限制；先做数据核查和人工恢复方案。
+
+### 健康检查与就绪探针
+
+部署后确认"服务到底是活的，还是只是没死"，用两个端点：
+
+| 端点 | 语义 | 检查内容 | 失败时做什么 |
+| --- | --- | --- | --- |
+| `/healthz` | 存活 | 什么都不查，进程能回 200 即可 | 容器重启（`restart: unless-stopped`） |
+| `/readyz` | 就绪 | `SELECT 1`、共享限流 Redis `PING`、数据库迁移版本 == 代码 head | 回 503，负载均衡摘流量，容器不重启 |
+
+`docker-compose.prod.yml` 里 api 的 healthcheck 与镜像内置 `HEALTHCHECK` 都指向 `/readyz`：数据库连不上、Redis 连不上、迁移没跑到 head，容器会显示 `unhealthy`，而不是骗人的 `healthy`。
+
+```sh
+docker compose --env-file .env.production -f docker-compose.prod.yml exec api \
+  python -c "import urllib.request,json;print(json.dumps(json.load(urllib.request.urlopen('http://127.0.0.1:8000/readyz')),ensure_ascii=False,indent=2))"
+```
+
+正常时返回 200：
+
+```json
+{
+  "status": "ready",
+  "checks": {
+    "database": {"status": "ok", "latency_ms": 3.1},
+    "migrations": {"status": "ok", "current": "0025_renewal_outreaches", "head": "0025_renewal_outreaches"},
+    "redis": {"status": "ok", "latency_ms": 1.2}
+  }
+}
+```
+
+排障对照：`checks.migrations.status = fail` → 先 `run --rm migrate`，别急着重启 api；`checks.database.status = fail` → 查 postgres 容器与连接串；`checks.redis.status = fail` → 查 redis 容器，此时登录与注册会因限流失效而拒绝服务，是设计内的失败关闭。开发/测试环境用内存限流，`redis` 项显示 `skipped` 属正常。非生产环境数据库没有迁移版本表时只报 `warn`，生产环境视为 `fail`——生产库必须是 `alembic upgrade head` 建出来的。
+
+`/readyz` 只回异常类型不回连接串，可安全用于编排层探活；它不写库、不写日志，可高频调用。
 
 ### 忘记超级管理员密码
 
