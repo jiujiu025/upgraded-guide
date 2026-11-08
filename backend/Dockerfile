@@ -16,4 +16,6 @@ USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=8s --start-period=15s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5)"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]
+# --no-access-log：访问日志由 app/core/request_logging.py 统一输出（带 request_id 和耗时），
+# 保留 uvicorn 的会变成每个请求两行，且其中一行没有排查所需的字段。
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers", "--no-access-log"]

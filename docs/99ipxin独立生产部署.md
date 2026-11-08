@@ -113,6 +113,28 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec api py
 
 此命令只接受生产 PostgreSQL 和 TTY 交互输入，并写入审计记录；不要用 `app.seed`、直接 SQL 更新密码哈希或删除数据库来恢复账号。
 
+## 数据库连接池与访问日志
+
+连接池参数在 `x-api-environment` 里，默认 `DB_POOL_SIZE=5`、`DB_MAX_OVERFLOW=10`、`DB_POOL_RECYCLE_SECONDS=1800`、`DB_CONNECT_TIMEOUT_SECONDS=5`。判断依据只有一条：`DB_POOL_SIZE × 副本数` 要明显小于 PostgreSQL 的 `max_connections`（默认 100），否则数据库先耗尽连接，报错会比现在的性能问题更难查。改完 `up -d api worker` 生效。
+
+`pool_pre_ping` 在代码里强制开启、不受环境变量影响：数据库重启或云厂商掐掉空闲连接后，池里的连接已经死了而 SQLAlchemy 不知道，**下一个请求必然失败一次**，表现就是"偶尔一个 500，刷新一下又好了"。
+
+每个请求会打一行访问日志：
+
+```
+2026-11-08 22:41:03,512 INFO app.request request method=POST path=/api/admin/finance/orders/12/offline-payment status=200 duration_ms=48.7 request_id=7f3a9c1e2b4d4a8f9e0c1d2b3a4f5e6d client=203.0.113.10
+```
+
+- `request_id` 优先取上游传入的 `X-Request-ID`（8~64 位字母数字与 `. _ -`，否则重新生成），并回写在响应头里；用户报障时让他提供这个值，`docker compose logs api | grep <request_id>` 就能捞出那一条，以及同一时间点的异常堆栈。
+- `client` 是按 `TRUSTED_PROXY_CIDRS` 从转发链解析出的真实客户端地址，不是反代 IP，可以直接用于限流排查。
+- `status >= 500` 的行是 `WARNING` 级；`/healthz`、`/readyz` 降到 `DEBUG`，因为编排层每 30 秒探一次，按 INFO 记会淹没业务日志。
+
+```sh
+docker compose --env-file .env.production -f docker-compose.prod.yml logs -f --tail=100 api
+```
+
+日志只写 stdout，由 Docker 的 json-file 驱动落盘，默认没有轮转上限。上线前在宿主机 `/etc/docker/daemon.json` 配好 `log-opts`（`max-size` / `max-file`），否则长期运行会把磁盘写满。
+
 ## 宿主机 Nginx 与 Cloudflare
 
 只为 `1.ipip99.com` 准备独立站点配置，不编辑其他项目的 upstream、server block、证书路径或全局配置。若此域名已有 server block，应先核对归属，不能叠加冲突配置。下列片段由服务器管理员在确认现有 Nginx 布局后使用；这里不写入服务器。

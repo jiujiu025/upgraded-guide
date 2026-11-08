@@ -11,6 +11,12 @@ INSECURE_JWT_SECRETS = {"change-this-in-production", "development-only-change-th
 
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/ops_platform.db"
+    # 连接池参数只对 PostgreSQL 生效：SQLite 单文件没有"连接被服务端掐断"的问题。
+    # pre_ping 是这里最关键的一项，见 app/db.py 的说明。
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_recycle_seconds: int = 1800
+    db_connect_timeout_seconds: int = 5
     jwt_secret_key: str = "development-only-change-this-secret"
     jwt_expire_minutes: int = 10
     refresh_session_days: int = 7
@@ -79,6 +85,12 @@ class Settings(BaseSettings):
             raise ValueError("支付对账宽限时间不得为负数")
         if not 100 <= self.payment_sandbox_max_cents <= 10000000:
             raise ValueError("沙箱单笔上限必须在 1 元到 10 万元之间（单位：分）")
+        if not 1 <= self.db_pool_size <= 50 or not 0 <= self.db_max_overflow <= 50:
+            raise ValueError("数据库连接池大小必须在 1 到 50 之间、溢出连接在 0 到 50 之间")
+        if self.db_pool_recycle_seconds < 60:
+            raise ValueError("数据库连接回收时间不得小于 60 秒")
+        if not 1 <= self.db_connect_timeout_seconds <= 60:
+            raise ValueError("数据库连接超时必须在 1 到 60 秒之间")
         self._parse_line_reminder_days()
         if self.global_proxy_base_url.rstrip("/") != "https://admin.quanqiudaili.com":
             raise ValueError("全球代理 API 地址必须使用官方 HTTPS 地址")

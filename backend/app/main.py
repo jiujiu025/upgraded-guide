@@ -14,6 +14,8 @@ from app.api.task_admin_routes import router as task_admin_router
 from app.api.outreach_routes import router as outreach_router
 from app.api.finance_export_routes import router as finance_export_router
 from app.core.config import get_settings
+from app.core.logging_config import configure_logging
+from app.core.request_logging import RequestLoggingMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.services.readiness_service import readiness_report
 from app.services.registration_service import verify_rate_limit_backend
@@ -23,6 +25,7 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    configure_logging()
     verify_rate_limit_backend()
     yield
 
@@ -30,6 +33,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="玖玖云运营中台", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(SecurityHeadersMiddleware)
+# 最后添加 = 最外层：这样 404、CORS 预检和未捕获异常的响应也会带上 request_id。
+app.add_middleware(RequestLoggingMiddleware)
 app.include_router(router, prefix="/api")
 app.include_router(inbox_router, prefix="/api")
 app.include_router(finance_router, prefix="/api")

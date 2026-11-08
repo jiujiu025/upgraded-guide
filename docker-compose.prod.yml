@@ -10,6 +10,12 @@ x-api-environment: &api-environment
   FRONTEND_ORIGIN: https://1.ipip99.com
   RATE_LIMIT_BACKEND: redis
   REDIS_URL: redis://redis:6379/0
+  # 连接池按"单个副本 × 预期并发"调；pre_ping 在 app/db.py 里强制开启，
+  # 这几项只决定大小和寿命，不改语义。
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+  DB_POOL_RECYCLE_SECONDS: ${DB_POOL_RECYCLE_SECONDS:-1800}
+  DB_CONNECT_TIMEOUT_SECONDS: ${DB_CONNECT_TIMEOUT_SECONDS:-5}
   TRUSTED_PROXY_CIDRS: ${OPS_EDGE_WEB_IP:-172.29.99.10}/32,${OPS_EDGE_GATEWAY_IP:-172.29.99.1}/32
 
 services:
