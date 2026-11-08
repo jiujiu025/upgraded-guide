@@ -8,11 +8,13 @@ permissions:
 
 jobs:
   infrastructure:
-    runs-on: ubuntu-latest
+    # 显式锁定镜像：验收依赖 docker / systemd / TLS 等系统组件，
+    # ubuntu-latest 正在迁移到 26.04，不能让验收基线随镜像漂移。
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Prepare isolated trusted test certificate

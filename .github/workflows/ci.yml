@@ -1,9 +1,21 @@
 name: CI
 
+# 运行镜像显式锁定，不使用 ubuntu-latest。
+# GitHub 从 2026-10-19 起把 ubuntu-latest 滚动迁移到 Ubuntu 26.04（预计 11-19 完成），
+# 迁移期间同一个 workflow 可能随机落在 24.04 或 26.04 上，构建结果不再可复现。
+# 需要提前验证下一代镜像时，手动触发并选择 runner=ubuntu-26.04。
 on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 运行镜像（提前验证下一代镜像用）
+        type: choice
+        default: ubuntu-24.04
+        options:
+          - ubuntu-24.04
+          - ubuntu-26.04
 
 permissions:
   contents: read
@@ -15,7 +27,7 @@ concurrency:
 jobs:
   backend:
     name: 后端测试与迁移
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       ENVIRONMENT: test
@@ -56,7 +68,7 @@ jobs:
 
   frontend:
     name: 前端构建与测试
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -83,7 +95,7 @@ jobs:
     name: CI 通过
     if: always()
     needs: [backend, frontend]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
     steps:
       - name: 汇总上游结果
         run: |
