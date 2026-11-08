@@ -34,6 +34,7 @@ const mobileNav = ref(false)
 const paymentStatus = ref('')
 const configLoaded = ref(false)
 const form = reactive({ merchant_id: '', secret: '', channel_types: 'alipay,wxpay', min_amount: '1.00', max_amount: '100000.00', online_enabled: false })
+const acceptance = ref(null)
 const dateRange = reactive({ from: '', to: '' })
 const apiHealth = ref(null)
 const nav = computed(() => getAdminNavigation(user.value.role))
@@ -68,6 +69,7 @@ async function loadConfig() {
   form.min_amount = (data.min_amount_cents / 100).toFixed(2)
   form.max_amount = (data.max_amount_cents / 100).toFixed(2)
   form.online_enabled = data.online_enabled
+  acceptance.value = data.acceptance || null
   paymentStatus.value = data.secret_configured ? '支付密钥已加密保存，不会回显' : '尚未配置支付密钥'
   configLoaded.value = true
 }
@@ -178,7 +180,17 @@ async function saveConfig() {
     form.secret = ''
     await loadConfig()
     showNotice('支付配置已保存')
-  } catch (err) { error.value = userError(err, '支付配置保存失败') }
+  } catch (err) {
+    // 409 表示配置已落库、但线上收款仍被验收门槛拦住；先刷新再展示原因，
+    // 否则界面会停在"提交失败"，看不出配置其实已经保存了。
+    if (err?.response?.status === 409) {
+      form.secret = ''
+      try { await loadConfig() } catch { /* 刷新失败时保留原始错误 */ }
+      error.value = userError(err, '线上收款未启用')
+    } else {
+      error.value = userError(err, '支付配置保存失败')
+    }
+  }
   finally { saving.value = false }
 }
 async function testPaymentApi() {
@@ -250,7 +262,7 @@ onMounted(load)
         </template>
 
         <template v-else-if="tab === 'payment' && canConfigurePayment">
-          <section class="payment-lock-note"><ShieldCheck :size="18" /><span><b>商户密钥仅保存在后端密文中</b><small>这里只配置裕汇通 V1。正式启用前需要完成沙箱或受控小额支付、通知验签和金额核对；当前没有经确认的沙箱。</small></span></section>
+          <section class="payment-lock-note"><ShieldCheck :size="18" /><span><b>线上收款要靠验收记录开，不再写死关闭</b><small>在服务器跑 <code>python scripts/payment_selftest.py --apply</code> 完成一轮回调验签与入账核对，才会有开启资格。只做过本地闭环验收时单笔限额 100 元；跑通一笔真实支付并加 <code>--live</code> 核对后才放开。</small></span></section>
           <section class="finance-section payment-section">
             <div class="section-head"><div><h2>支付通道配置</h2><p>接口地址固定为官方 HTTPS；密钥保存后不回显。</p></div><span class="finance-status" :data-tone="form.online_enabled ? 'good' : 'warn'">{{ form.online_enabled ? '在线收款已启用' : '在线收款关闭' }}</span></div>
             <div class="payment-form">
@@ -260,7 +272,16 @@ onMounted(load)
               <label><span>已开通的支付类型</span><input v-model="form.channel_types" maxlength="240" placeholder="以逗号分隔，例如 alipay,wxpay" /><small>只填写商户后台确认已开通的 type 编码。</small></label>
               <label><span>单笔最低金额（元）</span><input v-model="form.min_amount" inputmode="decimal" /></label>
               <label><span>单笔最高金额（元）</span><input v-model="form.max_amount" inputmode="decimal" /></label>
-              <div class="inline-hint field-wide">在线收款当前由后端保持关闭。API 连通性检查不验证商户密钥；完成真实沙箱或受控小额支付、回调验签和重复通知核对后，需通过受控发布流程启用。</div>
+              <div class="inline-hint field-wide">密钥只保存在后端密文中，保存后不回显。API 连通性检查只探测域名可达，不验证商户凭据，也不能代替验收。</div>
+              <div class="payment-acceptance field-wide" :data-state="acceptance?.accepted ? (acceptance.sandbox_limited ? 'limited' : 'live') : 'blocked'">
+                <div class="acceptance-head">
+                  <b>{{ !acceptance?.accepted ? '未通过验收' : acceptance.sandbox_limited ? '已验收 · 本地闭环（限额收款）' : '已验收 · 真实支付已核对' }}</b>
+                  <span v-if="acceptance?.acceptance_verified_at">{{ dateLabel(acceptance.acceptance_verified_at) }}</span>
+                </div>
+                <p>{{ acceptance?.limit_note || '尚未读取到验收状态' }}</p>
+                <p v-if="acceptance?.accepted" class="acceptance-limit">当前单笔线上收款上限 ¥{{ ((acceptance.online_limit_cents || 0) / 100).toFixed(2) }}</p>
+                <ul v-if="acceptance?.blockers?.length"><li v-for="item in acceptance.blockers" :key="item">{{ item }}</li></ul>
+              </div>
               <div class="payment-actions field-wide"><button class="primary-button" :disabled="saving" @click="saveConfig"><Check :size="15" />{{ saving ? '保存中' : '保存配置' }}</button><button class="secondary-button" :disabled="testing" @click="testPaymentApi"><RefreshCw :size="15" :class="{ rotate: testing }" />{{ testing ? '检查中' : '检查 API 连通性' }}</button></div>
               <div v-if="paymentStatus" class="inline-hint field-wide">{{ paymentStatus }}</div>
               <div v-if="apiHealth" class="api-result field-wide" :data-state="apiHealth.status"><b>{{ apiHealth.status === 'reachable' ? '域名可连接' : apiHealth.status === 'not_configured' ? '未配置' : '连接异常' }}</b><span>{{ apiHealth.message }}</span><small v-if="apiHealth.http_status">HTTP {{ apiHealth.http_status }}</small></div>
@@ -365,7 +386,18 @@ onMounted(load)
 .caution-note svg{flex:none;color:#94713a}
 .payment-lock-note{display:flex;align-items:flex-start;gap:10px;margin-bottom:13px;padding:11px 13px;border:1px solid #e8d3ab;border-radius:5px;background:#fff8eb;color:#755316}
 .payment-lock-note>span{display:grid;gap:3px}.payment-lock-note b{font-size:11px}.payment-lock-note small{color:#806b43;font-size:9px;line-height:1.5}
+.payment-lock-note code{padding:1px 4px;border-radius:3px;background:#0000000d;font-size:9px}
 .payment-section .section-head{align-items:center}
+.payment-acceptance{display:grid;gap:5px;padding:10px 12px;border:1px solid #d8e2dd;border-radius:5px;background:#f6f9f7;color:#4c6159;font-size:10px;line-height:1.55}
+.payment-acceptance[data-state="blocked"]{border-color:#e5c4bd;background:#fff3f0;color:#8e493d}
+.payment-acceptance[data-state="limited"]{border-color:#e8d3ab;background:#fff8eb;color:#755316}
+.payment-acceptance[data-state="live"]{border-color:#b9dcc9;background:#eef8f1;color:#236648}
+.payment-acceptance .acceptance-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.payment-acceptance .acceptance-head b{font-size:11px}
+.payment-acceptance p{margin:0}
+.payment-acceptance .acceptance-limit{font-weight:600}
+.payment-acceptance ul{margin:0;padding-left:16px;display:grid;gap:3px}
+.payment-acceptance code{padding:1px 4px;border-radius:3px;background:#0000000d;font-size:9px}
 .payment-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .payment-form label small{color:#7e8d85;font-size:9px;line-height:1.45;font-weight:400}
 .field-wide{grid-column:1/-1}

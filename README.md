@@ -18,4 +18,6 @@
 
 定时任务（关单、到期提醒、支付对账）由 `worker` 容器执行 `python -m app.scheduler` 拉起，设计与运维说明见 [定时任务与支付对账设计](docs/定时任务与支付对账设计.md)。
 
+线上收款：不是写死关闭，而是没有验收记录打不开。`python scripts/payment_selftest.py` 跑本地闭环（下单/回调验签/入账/重放/巡检），`--apply` 登记验收后可开启但单笔限额 100 元；真实支付一笔后 `--live <out_trade_no> --apply` 才放开限额。说明见 [支付与余额功能设计](docs/支付与余额功能设计.md) 第 8 节。
+
 金额对账：`python scripts/audit_wallet_ledger.py` 只读核对"账户余额 / 明细流水 / 客户表浮点副本"三者是否自洽，退出码 1 表示账本身有问题。存量余额补进钱包用 `python scripts/migrate_customer_balance_to_wallet.py`（默认预演，加 `--apply` 才写库，可重复执行）。现状核查与迁移路径见 [金额一致性现状与迁移方案](docs/金额一致性现状与迁移方案.md)。
