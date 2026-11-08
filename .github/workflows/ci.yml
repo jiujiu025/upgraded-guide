@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端测试与迁移
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ENVIRONMENT: test
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: 安装依赖
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: 运行测试
+        working-directory: backend
+        run: python -m pytest -q --no-header
+
+      - name: 空库跑通全部迁移并校验无漂移
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:///./ci_migrations.db
+        run: |
+          set -euo pipefail
+          rm -f ci_migrations.db
+          python -m alembic upgrade head
+          heads=$(python -m alembic heads | grep -c '(head)')
+          echo "head 数量: $heads"
+          test "$heads" -eq 1
+          python -m alembic check
+
+  frontend:
+    name: 前端构建与测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖（严格按 lock 文件）
+        working-directory: frontend
+        run: npm ci
+
+      - name: 构建
+        working-directory: frontend
+        run: npm run build
+
+      - name: 运行测试
+        working-directory: frontend
+        run: npm test
+
+  ci-gate:
+    name: CI 通过
+    if: always()
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总上游结果
+        run: |
+          echo "backend=${{ needs.backend.result }}"
+          echo "frontend=${{ needs.frontend.result }}"
+          if [ "${{ needs.backend.result }}" != "success" ] || [ "${{ needs.frontend.result }}" != "success" ]; then
+            echo "::error::存在未通过的任务，CI 判定为失败"
+            exit 1
+          fi
