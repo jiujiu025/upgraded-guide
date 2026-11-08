@@ -11,7 +11,7 @@ from app.models import (
     ScheduledTaskRun, User,
 )
 from app.models.base import Base
-from app.tasks import lines, orders, payments, registry
+from app.tasks import lines, orders, payments, registry, wallet
 from app.tasks.runner import execute
 
 NOW = datetime(2026, 11, 8, 12, 0, 0)
@@ -255,3 +255,62 @@ def test_execute_records_failure_when_handler_raises(env, monkeypatch):
     db.refresh(run)
     assert run.status == "failed"
     assert "上游接口不可用" in run.error
+
+
+# --- 钱包账本巡检任务 -------------------------------------------------------
+
+def _break_wallet_balance(db, user_id: int) -> None:
+    """造一个阻断项：账户余额与流水累计不符（模拟绕过应用改库）。"""
+    from app.models import WalletAccount
+    from app.services.wallet_service import apply_wallet_delta
+
+    apply_wallet_delta(db, user_id, 10000, "offline_recharge", "audit-task-1")
+    account = db.scalar(select(WalletAccount).where(WalletAccount.user_id == user_id))
+    account.balance_cents = 9000
+    db.commit()
+
+
+def test_wallet_audit_is_silent_when_ledger_is_clean(env):
+    db, _ = env
+    result = wallet.audit_wallet(db, now=NOW)
+    assert result["blocking"] == 0
+    # 提示项（这里没有）也不该推通知，否则过渡期天天报警
+    assert result["admins_notified"] == 0
+    assert db.scalars(select(Notification)).all() == []
+
+
+def test_wallet_audit_notifies_once_per_day_while_broken(env):
+    db, _ = env
+    user_id = db.scalar(select(User.id).where(User.username == "task_customer"))
+    _break_wallet_balance(db, user_id)
+
+    first = wallet.audit_wallet(db, now=NOW)
+    assert first["blocking"] == 1
+    assert first["balance_vs_ledger"] == 1
+    assert first["admins_notified"] == 1
+    notification = db.scalar(select(Notification).where(Notification.category == "finance"))
+    assert "钱包账本巡检发现阻断问题" == notification.title
+    assert "余额" in notification.content
+
+    # 同一天再跑：账还没修，但不重复刷屏
+    second = wallet.audit_wallet(db, now=NOW)
+    assert second["admins_notified"] == 0
+    assert len(db.scalars(select(Notification).where(Notification.category == "finance")).all()) == 1
+
+    # 次日仍然坏着，再提醒一次
+    third = wallet.audit_wallet(db, now=NOW + timedelta(days=1))
+    assert third["admins_notified"] == 1
+
+
+def test_wallet_audit_does_not_notify_on_warnings_only(env):
+    db, _ = env
+    # 客户有余额但没钱包账户：属提示项，不该推通知
+    customer = db.scalar(select(Customer).where(Customer.name == "客户甲"))
+    customer.balance = 88.88
+    db.commit()
+
+    result = wallet.audit_wallet(db, now=NOW)
+    assert result["blocking"] == 0
+    assert result["warnings"] == 1
+    assert result["orphan_customer_balance"] == 1
+    assert result["admins_notified"] == 0

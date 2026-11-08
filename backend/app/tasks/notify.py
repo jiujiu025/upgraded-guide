@@ -35,4 +35,8 @@ def notify_admins(db: Session, title: str, content: str, category: str, *, marke
             continue
         db.add(Notification(user_id=admin_id, title=title, content=content, category=category))
         sent += 1
+    if sent:
+        # 立刻 flush：去重靠查库，若同一会话里连续调两次（如测试直连 service），
+        # 未落库的待写行查不到，会把同一条提醒发两遍。
+        db.flush()
     return sent

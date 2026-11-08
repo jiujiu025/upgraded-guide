@@ -7,7 +7,7 @@ from typing import Callable
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.tasks import lines, orders, payments, suppliers
+from app.tasks import lines, orders, payments, suppliers, wallet
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,10 @@ def _payment_reconcile(db: Session, now: datetime) -> dict:
     return payments.reconcile_payments(db, now=now, grace_minutes=settings.payment_reconcile_grace_minutes)
 
 
+def _wallet_audit(db: Session, now: datetime) -> dict:
+    return wallet.audit_wallet(db, now=now)
+
+
 def _supplier_catalog_refresh(db: Session, now: datetime) -> dict:
     return suppliers.refresh_catalog(db, now=now)
 
@@ -53,8 +57,11 @@ def _supplier_inventory_refresh(db: Session, now: datetime) -> dict:
 
 # 顺序即执行顺序：先跑影响钱和客户的，再跑上游刷新；库存是唯一需要逐个国家
 # 串行请求的任务，放最后，避免它拖慢同一轮里的关单和到期提醒。
+# 钱包巡检是只读的且很快，紧跟支付对账，保证"钱有问题"在每轮最早被看见。
 SPECS = (
     TaskSpec("payment_reconcile", "支付对账与挂单清理", 15, _payment_reconcile),
+    # 每天一次：账的变化以天为单位，跑太勤除了多写流水没有收益。
+    TaskSpec("wallet_audit", "钱包账本巡检", 1440, _wallet_audit),
     TaskSpec("close_expired_orders", "关闭超时未支付订单", 30, _close_expired_orders),
     TaskSpec("line_expiry_reminders", "线路到期提醒", 360, _line_expiry_reminders),
     TaskSpec("supplier_catalog_refresh", "供应商目录刷新", 360, _supplier_catalog_refresh),
