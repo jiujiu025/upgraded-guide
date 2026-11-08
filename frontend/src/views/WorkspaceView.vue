@@ -46,9 +46,11 @@ import {
   getSalesDashboard,
   getSalesExpiringLines,
   getSalesOrders,
+  getSalesOutreach,
   getSecurityQuestions,
   markAllNotificationsRead,
   markNotificationRead,
+  recordRenewalTouch,
   renewCustomerLine,
   updateSecurityQuestions,
   updateCustomerLineNote,
@@ -76,6 +78,10 @@ const salesCustomers = ref([]);
 const salesOrders = ref([]);
 const expiringLines = ref([]);
 const healthImpacts = ref([]);
+const outreach = ref(null);
+const outreachOpen = ref(false);
+const outreachBusy = ref(0);
+const touchForm = reactive({ lineId: null, channel: "wechat", outcome: "sent", note: "" });
 const salesUserForm = reactive({ username: "", display_name: "", phone: "", password: "", confirmPassword: "" });
 const securityQuestions = ref({ configured: false, question_1: null, question_2: null });
 const securityQuestionForm = reactive({ current_password: "", question_1: "", answer_1: "", question_2: "", answer_2: "" });
@@ -252,6 +258,62 @@ function showSuccess(message) {
     success.value = "";
   }, 2800);
 }
+const visibleOutreach = computed(() => {
+  const items = outreach.value?.items || [];
+  return outreachOpen.value ? items : items.slice(0, 6);
+});
+async function loadOutreach() {
+  // 单独加载：触达清单挂了不该让整个销售工作台白屏。
+  try {
+    outreach.value = (await getSalesOutreach({ days: 30 })).data;
+  } catch {
+    outreach.value = null;
+  }
+}
+function outreachTone(days) {
+  if (days <= 0) return "bad";
+  if (days <= 7) return "warn";
+  return "muted";
+}
+function outreachDaysLabel(days) {
+  if (days < 0) return `已过期 ${-days} 天`;
+  if (days === 0) return "今天到期";
+  return `剩 ${days} 天`;
+}
+async function copyOutreach(item) {
+  const text = item.suggested_message;
+  try {
+    await navigator.clipboard.writeText(text);
+    showSuccess(`已复制 ${item.customer_name} 的续费文案`);
+  } catch {
+    // 非 HTTPS 或浏览器拒绝授权时如实说，不假装复制成功。
+    showSuccess("复制失败，请手动选中文案复制");
+  }
+}
+function startTouch(item) {
+  touchForm.lineId = item.line_id;
+  touchForm.channel = "wechat";
+  touchForm.outcome = "sent";
+  touchForm.note = "";
+}
+async function saveTouch(item) {
+  outreachBusy.value = item.line_id;
+  try {
+    await recordRenewalTouch(item.line_id, {
+      channel: touchForm.channel,
+      outcome: touchForm.outcome,
+      message: item.suggested_message,
+      note: touchForm.note || null,
+    });
+    touchForm.lineId = null;
+    showSuccess("已记录本次触达");
+    await loadOutreach();
+  } catch (err) {
+    error.value = err.userMessage || "触达记录保存失败";
+  } finally {
+    outreachBusy.value = 0;
+  }
+}
 async function logout() {
   try {
     await endSession();
@@ -321,6 +383,7 @@ async function load() {
         reason: `演示数据 · ${item.region} ${item.product}`,
         status: item.status,
       }));
+      loadOutreach();
     } else if (page.value === "admin-sales-users") {
       orders.value = [];
     } else {
@@ -1321,6 +1384,127 @@ onMounted(load);
                 ><strong>{{ money(dashboard.monthly_renewals) }}</strong>
               </article>
             </section>
+            <section class="workspace-panel outreach-panel">
+              <div class="panel-head">
+                <h2>到期触达</h2>
+                <span v-if="outreach"
+                  >{{ outreach.summary.untouched }} / {{ outreach.summary.total }}
+                  条待联系</span
+                >
+              </div>
+              <p v-if="!outreach" class="outreach-hint">
+                触达清单加载失败，刷新页面重试。
+              </p>
+              <template v-else>
+                <div class="outreach-stats">
+                  <span data-tone="bad"
+                    >已过期 {{ outreach.summary.overdue }}</span
+                  >
+                  <span data-tone="warn"
+                    >7 天内 {{ outreach.summary.urgent }}</span
+                  >
+                  <span>30 天内 {{ outreach.summary.soon }}</span>
+                  <span v-if="outreach.summary.promised" data-tone="good"
+                    >已答应续费 {{ outreach.summary.promised }}</span
+                  >
+                </div>
+                <div v-if="!outreach.items.length" class="inline-empty">
+                  未来 30 天没有需要续费的线路
+                </div>
+                <div
+                  v-for="item in visibleOutreach"
+                  :key="item.line_id"
+                  class="outreach-row"
+                >
+                  <div class="outreach-main">
+                    <b>{{ item.customer_name }}</b>
+                    <small
+                      >{{ item.line_name }} ·
+                      {{ item.region || item.product_type }} ·
+                      {{ String(item.expires_at).slice(0, 10) }} 到期</small
+                    >
+                    <span class="outreach-tags">
+                      <em :data-tone="outreachTone(item.days_left)">{{
+                        outreachDaysLabel(item.days_left)
+                      }}</em>
+                      <em v-if="item.renewal_price != null"
+                        >续费 {{ money(item.renewal_price) }}</em
+                      >
+                      <em v-else class="outreach-noprice">价格待确认</em>
+                      <em v-if="item.last_touch" data-tone="good"
+                        >{{ item.last_touch.days_ago }} 天前 ·
+                        {{ item.last_touch.channel_label }} ·
+                        {{ item.last_touch.outcome_label }}</em
+                      >
+                      <em v-else data-tone="muted">未联系</em>
+                    </span>
+                    <p class="outreach-message">{{ item.suggested_message }}</p>
+                  </div>
+                  <div class="outreach-actions">
+                    <button class="outline-action" @click="copyOutreach(item)">
+                      复制文案
+                    </button>
+                    <button class="outline-action" @click="startTouch(item)">
+                      记一笔
+                    </button>
+                  </div>
+                  <div
+                    v-if="touchForm.lineId === item.line_id"
+                    class="outreach-form"
+                  >
+                    <label
+                      >渠道<select v-model="touchForm.channel">
+                        <option
+                          v-for="choice in outreach.channels"
+                          :key="choice.value"
+                          :value="choice.value"
+                        >
+                          {{ choice.label }}
+                        </option>
+                      </select></label
+                    >
+                    <label
+                      >结果<select v-model="touchForm.outcome">
+                        <option
+                          v-for="choice in outreach.outcomes"
+                          :key="choice.value"
+                          :value="choice.value"
+                        >
+                          {{ choice.label }}
+                        </option>
+                      </select></label
+                    >
+                    <label class="outreach-note"
+                      >备注<input
+                        v-model="touchForm.note"
+                        maxlength="200"
+                        placeholder="例如：说周五打款"
+                    /></label>
+                    <button
+                      class="outline-action"
+                      :disabled="outreachBusy === item.line_id"
+                      @click="saveTouch(item)"
+                    >
+                      {{ outreachBusy === item.line_id ? "保存中" : "保存" }}
+                    </button>
+                    <button class="text-action" @click="touchForm.lineId = null">
+                      取消
+                    </button>
+                  </div>
+                </div>
+                <button
+                  v-if="outreach.items.length > 6"
+                  class="outreach-more"
+                  @click="outreachOpen = !outreachOpen"
+                >
+                  {{
+                    outreachOpen
+                      ? "收起"
+                      : `查看全部 ${outreach.items.length} 条`
+                  }}
+                </button>
+              </template>
+            </section>
             <div class="workspace-columns">
               <section class="workspace-panel">
                 <div class="panel-head">
@@ -2164,4 +2348,33 @@ onMounted(load);
   }
 }
 .resource-order-note{display:flex;align-items:center;gap:7px;margin:0 18px 14px;padding:9px 11px;border:1px solid #e8d3ab;border-radius:5px;background:#fff8eb;color:#755316;font-size:10px}
+.outreach-panel .panel-head{margin-bottom:10px}
+.outreach-hint{margin:10px 0 0;font-size:12px;color:#8a6a3c}
+.outreach-stats{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
+.outreach-stats span{font-size:11px;padding:3px 9px;border-radius:999px;background:#eef3f1;color:#5b726b}
+.outreach-stats span[data-tone="bad"]{background:#fdecea;color:#a83e2c}
+.outreach-stats span[data-tone="warn"]{background:#fff4e2;color:#8a6321}
+.outreach-stats span[data-tone="good"]{background:#e6f6ee;color:#1d6b52}
+.outreach-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 16px;padding:13px 2px;border-bottom:1px solid #e4e9e7}
+.outreach-row:last-of-type{border-bottom:0}
+.outreach-main{display:grid;gap:3px;min-width:0}
+.outreach-main b{font-size:13px}
+.outreach-main small{font-size:11px;color:#788a85}
+.outreach-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.outreach-tags em{font-style:normal;font-size:11px;padding:2px 7px;border-radius:4px;background:#eef3f1;color:#4f6a63;white-space:nowrap}
+.outreach-tags em[data-tone="bad"]{background:#fdecea;color:#a83e2c}
+.outreach-tags em[data-tone="warn"]{background:#fff4e2;color:#8a6321}
+.outreach-tags em[data-tone="good"]{background:#e6f6ee;color:#1d6b52}
+.outreach-tags em[data-tone="muted"]{background:#f0f2f1;color:#7c8b86}
+.outreach-tags .outreach-noprice{background:#fff4e2;color:#8a6321}
+.outreach-message{margin:4px 0 0;padding:8px 10px;background:#f2f6f4;border-left:2px solid #c9dad4;border-radius:4px;font-size:12px;line-height:1.6;color:#3f574f}
+.outreach-actions{display:flex;align-items:start;gap:8px}
+.outreach-actions .outline-action{min-height:32px;padding:5px 10px;font-size:12px}
+.outreach-form{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:end;gap:10px;padding:10px 12px;background:#f2f6f4;border-radius:6px}
+.outreach-form label{display:grid;gap:4px;font-size:11px;color:#6b8078}
+.outreach-form select,.outreach-form input{height:34px;padding:0 9px;border:1px solid #cfdad7;border-radius:5px;background:#fff;font-size:12px}
+.outreach-form .outreach-note{flex:1;min-width:160px}
+.outreach-form .outreach-note input{width:100%}
+.outreach-more{margin-top:10px;font-size:12px;color:#3c7f74;font-weight:650}
+@media(max-width:760px){.outreach-row{grid-template-columns:1fr}.outreach-actions{justify-content:flex-start}}
 </style>

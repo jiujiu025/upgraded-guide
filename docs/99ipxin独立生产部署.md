@@ -22,7 +22,7 @@ ss -ltn '( sport = :18081 )'
 
 ## 本地环境文件
 
-把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`SUPPLIER_SECRET_ENCRYPTION_KEY` 与 `PAYMENT_SECRET_ENCRYPTION_KEY` 必须分别用 `openssl rand -hex 32` 生成并妥善备份，二者不可复用；丢失对应主密钥后数据库中的密文无法恢复，直接更换会使已有密文无法解密。支付密钥主密钥仅用于支付通道 V1 MD5 密钥的 AES-GCM 密文。线上支付默认关闭，必须先跑支付自检登记验收记录才能开启（见下文第 38 行起的说明）；支付管理里的域名连通性检查不验证商户凭据，也不构成验收。首次部署完成迁移（当前 head 为 `0024_payment_acceptance`）后，超级管理员可在 `/admin/resource-pool` 直接录入全球代理 Key；页面只显示配置状态，不回显 Key。后台密文优先于环境变量。`GLOBAL_PROXY_API_KEY` 仍可作为服务器环境配置回退，仅由 Compose 注入 API 容器；不要配置在前端、数据库明文、迁移容器或 Git 中。未配置任一凭据时资源池页面会禁用同步按钮。
+把仓库根目录的 `.env.production.example` 复制成服务器项目目录下的 `.env.production`，仅在服务器本地填写。数据库密码必须与 `DATABASE_URL` 中的密码一致；URL 中的特殊字符须按 URL 规则编码，静态检查器会比对解码后的值。JWT 密钥和会话哈希密钥要分别使用独立、至少 32 字节的随机值。不得使用模板占位符或默认密码。`SUPPLIER_SECRET_ENCRYPTION_KEY` 与 `PAYMENT_SECRET_ENCRYPTION_KEY` 必须分别用 `openssl rand -hex 32` 生成并妥善备份，二者不可复用；丢失对应主密钥后数据库中的密文无法恢复，直接更换会使已有密文无法解密。支付密钥主密钥仅用于支付通道 V1 MD5 密钥的 AES-GCM 密文。线上支付默认关闭，必须先跑支付自检登记验收记录才能开启（见下文第 38 行起的说明）；支付管理里的域名连通性检查不验证商户凭据，也不构成验收。首次部署完成迁移（当前 head 为 `0025_renewal_outreaches`）后，超级管理员可在 `/admin/resource-pool` 直接录入全球代理 Key；页面只显示配置状态，不回显 Key。后台密文优先于环境变量。`GLOBAL_PROXY_API_KEY` 仍可作为服务器环境配置回退，仅由 Compose 注入 API 容器；不要配置在前端、数据库明文、迁移容器或 Git 中。未配置任一凭据时资源池页面会禁用同步按钮。
 
 若使用环境变量方式配置或轮换供应商 Key，只在服务器编辑 `.env.production`，保持文件权限 `0600`，然后仅重建 API 容器以加载环境变量：
 
@@ -35,7 +35,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml ps api
 
 文件权限要求：目录仅部署账号及必要管理员可访问，`.env.production` 所有者为部署账号，权限 `0600`；备份目录同样限制为 `0700`。不要提交该文件，不要把它放入镜像构建上下文，不要在聊天、工单、CI 日志、命令行参数或 Nginx 配置中写密钥。Docker 管理员仍能通过容器检查读取环境变量，所以 Docker socket 和部署账号必须只授予可信运维人员。
 
-财务功能当前迁移 head 为 `0024_payment_acceptance`，包含钱包账本、支付订单、退款、销售佣金表、支付通道验收记录表和定时任务流水表。线上支付**不是写死关闭**，而是没验收记录打不开：
+财务功能当前迁移 head 为 `0025_renewal_outreaches`，包含钱包账本、支付订单、退款、销售佣金表、支付通道验收记录表、定时任务流水表和到期触达记录表。线上支付**不是写死关闭**，而是没验收记录打不开：
 
 1. 在服务器 `backend` 目录跑 `python scripts/payment_selftest.py`，先跑通本地闭环（12 项检查）；
 2. 加 `--apply` 登记 `simulated` 验收——此后可以开启在线收款，但单笔限额 `PAYMENT_SANDBOX_MAX_CENTS`（默认 100 元）；
