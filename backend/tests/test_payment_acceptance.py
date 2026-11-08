@@ -21,6 +21,7 @@ from app.models import PaymentChannelAcceptance, PaymentChannelConfig, User
 from app.models.base import Base
 from app.services.payment_acceptance_service import record_acceptance
 from app.services.payment_gateway import encrypt_secret
+from app.services.registration_service import registration_rate_limiter
 
 SECRET = "merchant-secret-v1"
 NEW_SECRET = "merchant-secret-v2"
@@ -59,6 +60,7 @@ def api(monkeypatch):
     yield client
 
     app.dependency_overrides.clear()
+    registration_rate_limiter.clear()
     db.close()
     engine.dispose()
 

@@ -440,6 +440,33 @@ class PaymentChannelAcceptance(TimestampMixin, Base):
     verified_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
 
+class RenewalOutreach(TimestampMixin, Base):
+    """一次到期触达的留痕。
+
+    为什么不用 ``Notification`` 代替：Notification 是发给客户的站内信，客户不登录就没人看见。
+    实际流程是销售在微信里催续费，系统唯一能做的是告诉销售"今天该找谁"，并记下"找过了"。
+    这张表存的就是后者——谁、何时、通过什么渠道、说了什么、结果如何。
+
+    文案存快照而不是引用模板：模板会随产品和价格变，三个月后回看要知道当时到底发的是哪句话。
+    """
+
+    __tablename__ = "renewal_outreaches"
+    __table_args__ = (
+        Index("ix_renewal_outreaches_line_created", "line_id", "created_at"),
+    )
+    line_id: Mapped[int] = mapped_column(ForeignKey("customer_lines.id"), index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    # 触达人。销售离职后仍要能回答"这条线是谁跟的"，所以不删不覆盖。
+    sales_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(20), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    # 触达时的剩余天数与到期日快照：线路续费后 expires_at 会变，历史记录不能跟着漂。
+    days_left: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class PaymentOrder(TimestampMixin, Base):
     __tablename__ = "payment_orders"
     __table_args__ = (
