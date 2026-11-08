@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     supplier_catalog_ttl_minutes: int = 1440
     supplier_inventory_ttl_minutes: int = 30
     supplier_quote_ttl_minutes: int = 1440
+    supplier_inventory_batch_size: int = 10
+    supplier_snapshot_retention_days: int = 7
     scheduler_enabled: bool = True
     scheduler_poll_seconds: int = 60
     task_lock_ttl_seconds: int = 900
@@ -60,6 +62,10 @@ class Settings(BaseSettings):
             raise ValueError("供应商重试退避参数无效")
         if min(self.supplier_catalog_ttl_minutes, self.supplier_inventory_ttl_minutes, self.supplier_quote_ttl_minutes) < 1:
             raise ValueError("供应商快照有效期必须为正整数")
+        if not 1 <= self.supplier_inventory_batch_size <= 50:
+            raise ValueError("供应商库存轮转批量必须在 1 到 50 之间")
+        if self.supplier_snapshot_retention_days < 1:
+            raise ValueError("供应商快照保留天数必须为正整数")
         if self.scheduler_poll_seconds < 10:
             raise ValueError("调度轮询间隔不得小于 10 秒")
         if self.task_lock_ttl_seconds < 60:

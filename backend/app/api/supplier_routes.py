@@ -18,7 +18,7 @@ from app.services.audit_service import write_audit
 from app.services.catalog_publication_service import PublicationError, publish_catalog, withdraw_catalog
 from app.services.supplier_credentials import (
     SupplierCredentialError, clear_api_key, credential_encryption_ready, credential_source, has_configured_api_key,
-    resolve_api_key, save_api_key,
+    save_api_key,
 )
 from app.services.supplier_service import (
     CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, INVENTORY_ENDPOINT, begin_sync_run,
@@ -31,6 +31,7 @@ from app.suppliers.base import (
     SupplierTimeoutError, reject_procurement,
 )
 from app.suppliers.global_proxy import GlobalProxyReadOnlyAdapter
+from app.suppliers.factory import build_readonly_adapter
 
 router = APIRouter(prefix="/admin/suppliers", tags=["供应商只读接入"])
 
@@ -94,19 +95,10 @@ class CatalogPublishIn(BaseModel):
 
 
 def get_global_proxy_adapter(db: Session = Depends(get_db)) -> Generator[GlobalProxyReadOnlyAdapter, None, None]:
-    settings = get_settings()
     try:
-        key = resolve_api_key(db)
+        adapter = build_readonly_adapter(db)
     except SupplierCredentialError as exc:
         raise HTTPException(status_code=503, detail={"code": "SUPPLIER_CONFIGURATION_ERROR", "message": str(exc)}) from exc
-    adapter = GlobalProxyReadOnlyAdapter(
-        api_key=key,
-        base_url=settings.global_proxy_base_url,
-        timeout_seconds=settings.supplier_http_timeout_seconds,
-        max_attempts=settings.supplier_read_retry_attempts,
-        backoff_base_seconds=settings.supplier_retry_backoff_seconds,
-        max_retry_delay_seconds=settings.supplier_retry_max_delay_seconds,
-    )
     try:
         yield adapter
     finally:

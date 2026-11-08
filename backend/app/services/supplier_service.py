@@ -113,9 +113,11 @@ def finish_sync_run(
     return run
 
 
-def sync_products(db: Session, items: list[SupplierProductItem]) -> list[SupplierProduct]:
+def sync_products(
+    db: Session, items: list[SupplierProductItem], synced_at: datetime | None = None,
+) -> list[SupplierProduct]:
     supplier, _ = ensure_pool_one(db)
-    synced_at = utcnow()
+    observed_at = synced_at or utcnow()
     records = []
     for item in items:
         record = db.scalar(select(SupplierProduct).where(
@@ -131,7 +133,7 @@ def sync_products(db: Session, items: list[SupplierProductItem]) -> list[Supplie
         record.currency = "CNY"
         record.is_available = True
         record.source_endpoint = PRODUCTS_ENDPOINT
-        record.last_synced_at = synced_at
+        record.last_synced_at = observed_at
         records.append(record)
     db.flush()
     return records
@@ -153,9 +155,10 @@ def sync_regions(
     product_type_id: int,
     items: list[SupplierRegionItem],
     source_endpoint: str,
+    synced_at: datetime | None = None,
 ) -> list[SupplierRegion]:
     product = get_supplier_product(db, product_type_id)
-    synced_at = utcnow()
+    observed_at = synced_at or utcnow()
     records = []
     for item in items:
         # 必须先解析本地地区：_ensure_local_region 内部查库会触发 autoflush，
@@ -180,7 +183,7 @@ def sync_regions(
         record.local_region_id = local_region.id
         record.is_available = True
         record.source_endpoint = source_endpoint
-        record.last_synced_at = synced_at
+        record.last_synced_at = observed_at
         records.append(record)
     db.flush()
     return records
@@ -284,10 +287,11 @@ def save_inventory(
     product_type_id: int,
     items: list[InventoryItem],
     source_endpoint: str = INVENTORY_ENDPOINT,
+    checked_at: datetime | None = None,
 ) -> list[SupplierInventorySnapshot]:
     supplier, _ = ensure_pool_one(db)
     product = get_supplier_product(db, product_type_id)
-    checked_at = utcnow()
+    observed_at = checked_at or utcnow()
     records = []
     for item in items:
         region = db.scalar(select(SupplierRegion).where(
@@ -304,7 +308,7 @@ def save_inventory(
             availability=item.availability,
             available_quantity=None,
             source_endpoint=source_endpoint,
-            checked_at=checked_at,
+            checked_at=observed_at,
         )
         db.add(record)
         records.append(record)
@@ -312,9 +316,9 @@ def save_inventory(
     return records
 
 
-def save_quotes(db: Session, items: list[QuoteItem]) -> list[SupplierQuote]:
+def save_quotes(db: Session, items: list[QuoteItem], quoted_at: datetime | None = None) -> list[SupplierQuote]:
     supplier, _ = ensure_pool_one(db)
-    quoted_at = utcnow()
+    observed_at = quoted_at or utcnow()
     products = {
         product.external_product_ref: product
         for product in db.scalars(select(SupplierProduct).where(SupplierProduct.supplier_id == supplier.id)).all()
@@ -334,7 +338,7 @@ def save_quotes(db: Session, items: list[QuoteItem]) -> list[SupplierQuote]:
             is_custom=item.is_custom,
             is_available=True,
             source_endpoint=QUOTES_ENDPOINT,
-            quoted_at=quoted_at,
+            quoted_at=observed_at,
         )
         db.add(record)
         records.append(record)
