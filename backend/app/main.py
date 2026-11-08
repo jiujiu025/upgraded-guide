@@ -11,6 +11,7 @@ from app.api.catalog_admin_routes import router as catalog_admin_router
 from app.api.supplier_routes import router as supplier_router
 from app.api.task_admin_routes import router as task_admin_router
 from app.api.outreach_routes import router as outreach_router
+from app.api.finance_export_routes import router as finance_export_router
 from app.core.config import get_settings
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.services.registration_service import verify_rate_limit_backend
@@ -35,6 +36,7 @@ app.include_router(catalog_admin_router, prefix="/api")
 app.include_router(supplier_router, prefix="/api")
 app.include_router(task_admin_router, prefix="/api")
 app.include_router(outreach_router, prefix="/api")
+app.include_router(finance_export_router, prefix="/api")
 
 
 @app.get("/healthz")

@@ -2,7 +2,6 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_user, require_roles
 from app.core.config import get_settings
+from app.core.timeutil import SHANGHAI, local_date_of, local_day_range_utc
 from app.db import get_db
 from app.models import (
     Customer, Order, PaymentChannelAcceptance, PaymentChannelConfig, PaymentOrder, PaymentRefund,
@@ -33,7 +33,6 @@ from app.services.wallet_service import (
 
 
 router = APIRouter(tags=["财务中心与钱包"])
-SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class OfflineRechargeIn(BaseModel):
@@ -181,8 +180,8 @@ def admin_finance_summary(
     start_day = date_from or (end_day - timedelta(days=29))
     if end_day < start_day or (end_day - start_day).days > 89:
         raise HTTPException(status_code=422, detail="统计区间最多 90 天")
-    start_utc = datetime.combine(start_day, time.min, SHANGHAI).astimezone(timezone.utc).replace(tzinfo=None)
-    end_utc = datetime.combine(end_day + timedelta(days=1), time.min, SHANGHAI).astimezone(timezone.utc).replace(tzinfo=None)
+    # 与财务导出共用同一套换算，否则同一个月在概览页和 CSV 里会差一天。
+    start_utc, end_utc = local_day_range_utc(start_day, end_day)
 
     payments = db.scalars(select(PaymentOrder).where(
         PaymentOrder.paid_at >= start_utc, PaymentOrder.paid_at < end_utc,
@@ -207,7 +206,7 @@ def admin_finance_summary(
         "refund_cents": 0, "commission_cents": 0, "new_customers": 0, "new_sales": 0,
     })
     for item in payments:
-        day_key = item.paid_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI).date().isoformat()
+        day_key = local_date_of(item.paid_at).isoformat()
         bucket = buckets[day_key]
         if item.purpose == "wallet_recharge":
             bucket["recharge_cents"] += item.amount_cents
@@ -216,7 +215,7 @@ def admin_finance_summary(
         if item.channel in {"online", "offline"}:
             bucket["cash_received_cents"] += item.amount_cents
     for item in refunds:
-        day_key = item.created_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI).date().isoformat()
+        day_key = local_date_of(item.created_at).isoformat()
         bucket = buckets[day_key]
         bucket["refund_cents"] += item.amount_cents
         payment = db.get(PaymentOrder, item.payment_order_id)
@@ -225,13 +224,13 @@ def admin_finance_summary(
         if item.channel in {"online", "offline"}:
             bucket["cash_received_cents"] -= item.amount_cents
     for entry in commissions:
-        day_key = entry.created_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI).date().isoformat()
+        day_key = local_date_of(entry.created_at).isoformat()
         buckets[day_key]["commission_cents"] += entry.amount_cents
     for created_at, in customers:
-        day_key = created_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI).date().isoformat()
+        day_key = local_date_of(created_at).isoformat()
         buckets[day_key]["new_customers"] += 1
     for created_at, in sales:
-        day_key = created_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI).date().isoformat()
+        day_key = local_date_of(created_at).isoformat()
         buckets[day_key]["new_sales"] += 1
 
     daily = [{"date": (start_day + timedelta(days=index)).isoformat(), **buckets[(start_day + timedelta(days=index)).isoformat()]}
