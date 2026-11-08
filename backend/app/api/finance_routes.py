@@ -15,10 +15,13 @@ from app.api.deps import current_user, require_roles
 from app.core.config import get_settings
 from app.db import get_db
 from app.models import (
-    Customer, Order, PaymentChannelConfig, PaymentOrder, PaymentRefund,
+    Customer, Order, PaymentChannelAcceptance, PaymentChannelConfig, PaymentOrder, PaymentRefund,
     SalesCommissionEntry, User, WalletAccount, WalletTransaction,
 )
 from app.services.audit_service import write_audit
+from app.services.payment_acceptance_service import (
+    acceptance_view, channel_types_key, enable_blockers, online_limit_cents, status_summary, valid_acceptance,
+)
 from app.services.payment_gateway import (
     PAYMENT_API_URL, PaymentGatewayError, config_for_update, create_provider_payment,
     decrypt_secret, encrypt_secret, new_payment_order_values, verify_signature,
@@ -127,11 +130,23 @@ def _record_paid_order(db: Session, payment_order: PaymentOrder, customer: Custo
 def _create_online_order(db: Session, user: User, payment_order: PaymentOrder, payment_type: str) -> dict:
     config = config_for_update(db)
     if not config.online_enabled:
-        raise HTTPException(status_code=409, detail="在线充值尚未启用，管理员需先完成支付通道配置和沙箱验收")
+        raise HTTPException(status_code=409, detail="在线收款尚未启用，管理员需先完成支付通道配置与验收")
     if payment_type not in (config.channel_types or []):
         raise HTTPException(status_code=422, detail="该支付方式未在商户后台确认开通")
     if not config.encrypted_secret or not config.merchant_id:
         raise HTTPException(status_code=409, detail="支付通道尚未完整配置")
+    # 只做过本地闭环验收时按沙箱上限收款，跑通真实支付后自动放开。
+    acceptance = valid_acceptance(db, config)
+    limit = online_limit_cents(config, acceptance)
+    if int(payment_order.amount_cents) > limit:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"当前单笔线上收款上限 {limit / 100:.2f} 元"
+                + ("（仅完成本地闭环验收；跑通一笔真实支付并登记 live 验收后可放开）"
+                   if acceptance is not None and acceptance.mode == "simulated" else "")
+            ),
+        )
     db.commit()
     try:
         url = create_provider_payment(config, payment_order, payment_type, user.role)
@@ -320,6 +335,11 @@ def get_payment_config(db: Session = Depends(get_db), _: User = Depends(require_
         "max_amount_cents": config.max_amount_cents if config else 10000000, "online_enabled": config.online_enabled if config else False,
         "sandbox_verified": bool(config.verified_at) if config else False, "verified_at": config.verified_at if config else None,
         "provider_url": PAYMENT_API_URL,
+        # 验收状态：能不能开、为什么不能开、开了以后单笔能收多少
+        "acceptance": status_summary(db, config),
+        "acceptance_history": [acceptance_view(item) for item in db.scalars(
+            select(PaymentChannelAcceptance).order_by(PaymentChannelAcceptance.id.desc()).limit(10)
+        ).all()],
     }
 
 
@@ -336,6 +356,7 @@ def update_payment_config(
     config = config_for_update(db)
     merchant_changed = config.merchant_id != payload.merchant_id.strip()
     secret_changed = payload.secret is not None and payload.secret != ""
+    previous_types = channel_types_key(config)
     config.merchant_id = payload.merchant_id.strip()
     config.channel_types = sorted(set(value.strip() for value in payload.channel_types))
     config.min_amount_cents = payload.min_amount_cents
@@ -345,17 +366,24 @@ def update_payment_config(
             config.encrypted_secret = encrypt_secret(payload.secret)
         except PaymentGatewayError as exc:
             raise HTTPException(status_code=503, detail=exc.message) from exc
-    if merchant_changed or secret_changed:
+    # 商户号、密钥、支付方式任一变化，之前的验收都不再代表当前配置，必须重跑。
+    if merchant_changed or secret_changed or previous_types != channel_types_key(config):
         config.verified_at = None
         config.online_enabled = False
-    if payload.online_enabled:
-        raise HTTPException(status_code=409, detail="在线收款保持关闭；支付域名连通性检查不能代替真实沙箱、回调验签和小额支付核对")
-    config.online_enabled = False
+    blockers = enable_blockers(db, config) if payload.online_enabled else []
+    config.online_enabled = bool(payload.online_enabled) and not blockers
     write_audit(db, actor, "payment_config_update", "payment_channel", 1,
                 f"商户号已配置; 支付方式={','.join(config.channel_types)}; 线上收款={'启用' if config.online_enabled else '关闭'}")
+    # 先落库再报错：换过密钥就必须立刻关闭收款，不能因为"顺手点了开启"整单回滚，
+    # 否则界面上的密钥已经换了、开关却还是开着的旧状态，谁也说不清该信哪个。
     db.commit()
+    if blockers:
+        raise HTTPException(
+            status_code=409,
+            detail="配置已保存，但线上收款仍为关闭：" + "；".join(blockers),
+        )
     return {"ok": True, "secret_configured": bool(config.encrypted_secret), "online_enabled": config.online_enabled,
-            "sandbox_verified": bool(config.verified_at)}
+            "sandbox_verified": bool(config.verified_at), "acceptance": status_summary(db, config)}
 
 
 @router.post("/admin/finance/payment-config/health")
@@ -420,8 +448,9 @@ def create_online_recharge(payload: OnlinePaymentIn, db: Session = Depends(get_d
     config = config_for_update(db)
     if not config.online_enabled:
         raise HTTPException(status_code=409, detail="在线充值通道尚未启用")
-    if not config.min_amount_cents <= payload.amount_cents <= config.max_amount_cents:
-        raise HTTPException(status_code=422, detail="充值金额超出单笔限额")
+    limit = online_limit_cents(config, valid_acceptance(db, config))
+    if not config.min_amount_cents <= payload.amount_cents <= limit:
+        raise HTTPException(status_code=422, detail=f"充值金额超出单笔限额（当前上限 {limit / 100:.2f} 元）")
     idem = f"online-recharge:{user.id}:{payload.idempotency_key}"
     existing = db.scalar(select(PaymentOrder).where(PaymentOrder.idempotency_key == idem))
     if existing:

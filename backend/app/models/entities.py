@@ -408,6 +408,38 @@ class PaymentChannelConfig(TimestampMixin, Base):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class PaymentChannelAcceptance(TimestampMixin, Base):
+    """支付通道验收记录：开启线上收款的前提证据。
+
+    为什么需要这张表：线上收款曾经是"写死关闭"，理由是没验收过就不许开。
+    但字符串写死只能二选一——要么永远收不了钱，要么有人手工改库绕过检查。
+    这里把"关闭"换成"没证据不许开"：每条记录是一次真实跑过的验签与入账核对，
+    商户号或密钥一变，旧记录自动失效（靠 ``secret_fingerprint`` 比对）。
+    """
+
+    __tablename__ = "payment_channel_acceptances"
+    __table_args__ = (
+        CheckConstraint("amount_cents >= 0", name="ck_payment_acceptance_amount_nonnegative"),
+        Index("ix_payment_acceptance_scope", "merchant_id", "secret_fingerprint", "status"),
+    )
+    # simulated：本地闭环（模拟回调验签 + 入账 + 巡检）；live：真实支付单核对
+    mode: Mapped[str] = mapped_column(String(12), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False)
+    merchant_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    # 密钥指纹，不存明文也不存密文；换密钥后旧验收自动失效
+    secret_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 验收时的支付方式快照（排序后逗号拼接）。新增一种没验过的支付方式要重新验，
+    # 所以这里存字符串而不是 JSON——PostgreSQL 的 json 类型不支持等值比较。
+    channel_types_key: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    out_trade_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    amount_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 逐项检查结果，形如 [{"name": "callback_signature", "ok": true, "detail": "..."}]
+    checks: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    verified_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
 class PaymentOrder(TimestampMixin, Base):
     __tablename__ = "payment_orders"
     __table_args__ = (

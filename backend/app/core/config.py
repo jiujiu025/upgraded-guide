@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     order_payment_timeout_minutes: int = 1440
     line_reminder_days: str = "7,3,1"
     payment_reconcile_grace_minutes: int = 5
+    # 只通过"本地模拟闭环"验收时，线上单笔金额被压到这个上限，避免没跑过真实
+    # 回调就先放开大额收款；跑通一笔真实支付并登记 live 验收后自动解除。
+    payment_sandbox_max_cents: int = 10000
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     @model_validator(mode="after")
@@ -74,6 +77,8 @@ class Settings(BaseSettings):
             raise ValueError("订单支付超时时间必须为正整数")
         if self.payment_reconcile_grace_minutes < 0:
             raise ValueError("支付对账宽限时间不得为负数")
+        if not 100 <= self.payment_sandbox_max_cents <= 10000000:
+            raise ValueError("沙箱单笔上限必须在 1 元到 10 万元之间（单位：分）")
         self._parse_line_reminder_days()
         if self.global_proxy_base_url.rstrip("/") != "https://admin.quanqiudaili.com":
             raise ValueError("全球代理 API 地址必须使用官方 HTTPS 地址")
