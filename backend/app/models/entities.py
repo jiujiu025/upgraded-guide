@@ -217,6 +217,20 @@ class AuditLog(TimestampMixin, Base):
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ScheduledTaskRun(TimestampMixin, Base):
+    """定时任务的执行流水。只由调度进程写入，接口只读。"""
+
+    __tablename__ = "scheduled_task_runs"
+    task_name: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    triggered_by: Mapped[str] = mapped_column(String(20), default="scheduler", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class Supplier(TimestampMixin, Base):
     __tablename__ = "suppliers"
     code: Mapped[str] = mapped_column(String(50), unique=True, index=True)

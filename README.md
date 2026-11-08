@@ -15,3 +15,5 @@
 生产 Docker：使用 `docker-compose.prod.yml`。生产部署还依赖 PostgreSQL、共享 Redis、TLS 反向代理及完整的密钥和可信代理配置；请按 `backend/.env.production.example` 与下方部署文档配置，不要把真实密钥提交到仓库。生产配置不运行种子脚本，前端使用构建后的静态文件。
 
 生产变量、隔离 PostgreSQL 验收和镜像检查命令见 [生产部署与隔离验收](docs/生产部署与隔离验收.md)。
+
+定时任务（关单、到期提醒、支付对账）由 `worker` 容器执行 `python -m app.scheduler` 拉起，设计与运维说明见 [定时任务与支付对账设计](docs/定时任务与支付对账设计.md)。

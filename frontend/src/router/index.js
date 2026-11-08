@@ -10,6 +10,7 @@ import WalletView from '../views/WalletView.vue'
 import CustomerManagerView from '../views/CustomerManagerView.vue'
 import SalesManagementView from '../views/SalesManagementView.vue'
 import CatalogManagementView from '../views/CatalogManagementView.vue'
+import AdminTasksView from '../views/AdminTasksView.vue'
 import AdminLayout from '../layouts/AdminLayout.vue'
 import ChangePasswordView from '../views/ChangePasswordView.vue'
 import PasswordRecoveryView from '../views/PasswordRecoveryView.vue'
@@ -53,6 +54,7 @@ const routes = [
       { path: 'sales-users', redirect: '/admin/sales-management' },
       { path: 'security', component: WorkspaceView, meta: { page: 'security-center' } },
       { path: 'health', component: HealthView, meta: { page: 'admin-health' } },
+      { path: 'tasks', component: AdminTasksView, meta: { page: 'admin-tasks' } },
       { path: 'inbox', component: InboxView, meta: { page: 'admin-inbox' } },
       { path: 'resource-pool', component: SupplierPoolView, meta: { page: 'admin-resource-pool' } },
       { path: 'orders', component: OrderCenterView, meta: { page: 'admin-orders' } },

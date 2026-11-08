@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     supplier_catalog_ttl_minutes: int = 1440
     supplier_inventory_ttl_minutes: int = 30
     supplier_quote_ttl_minutes: int = 1440
+    scheduler_enabled: bool = True
+    scheduler_poll_seconds: int = 60
+    task_lock_ttl_seconds: int = 900
+    order_payment_timeout_minutes: int = 1440
+    line_reminder_days: str = "7,3,1"
+    payment_reconcile_grace_minutes: int = 5
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     @model_validator(mode="after")
@@ -54,6 +60,15 @@ class Settings(BaseSettings):
             raise ValueError("供应商重试退避参数无效")
         if min(self.supplier_catalog_ttl_minutes, self.supplier_inventory_ttl_minutes, self.supplier_quote_ttl_minutes) < 1:
             raise ValueError("供应商快照有效期必须为正整数")
+        if self.scheduler_poll_seconds < 10:
+            raise ValueError("调度轮询间隔不得小于 10 秒")
+        if self.task_lock_ttl_seconds < 60:
+            raise ValueError("任务锁有效期不得小于 60 秒")
+        if self.order_payment_timeout_minutes < 1:
+            raise ValueError("订单支付超时时间必须为正整数")
+        if self.payment_reconcile_grace_minutes < 0:
+            raise ValueError("支付对账宽限时间不得为负数")
+        self._parse_line_reminder_days()
         if self.global_proxy_base_url.rstrip("/") != "https://admin.quanqiudaili.com":
             raise ValueError("全球代理 API 地址必须使用官方 HTTPS 地址")
         if self.environment != "production":
@@ -111,6 +126,22 @@ class Settings(BaseSettings):
         if redis_url.hostname.lower() in {"localhost", "127.0.0.1", "::1"}:
             raise ValueError("生产环境 REDIS_URL 禁止使用 localhost 或回环地址")
         return self
+
+    def _parse_line_reminder_days(self):
+        raw = [item.strip() for item in self.line_reminder_days.split(",") if item.strip()]
+        if not raw:
+            raise ValueError("LINE_REMINDER_DAYS 不能为空")
+        try:
+            days = sorted({int(item) for item in raw})
+        except ValueError as exc:
+            raise ValueError("LINE_REMINDER_DAYS 必须是逗号分隔的正整数") from exc
+        if days[0] < 1 or days[-1] > 90:
+            raise ValueError("LINE_REMINDER_DAYS 取值必须在 1 到 90 天之间")
+        return tuple(days)
+
+    @property
+    def line_reminder_day_list(self) -> tuple[int, ...]:
+        return self._parse_line_reminder_days()
 
     def _parse_trusted_proxy_networks(self):
         values = [item.strip() for item in self.trusted_proxy_cidrs.split(",") if item.strip()]

@@ -91,6 +91,32 @@ services:
       retries: 3
       start_period: 10s
 
+  worker:
+    image: 99ipxin-api:prod
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      <<: *api-environment
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      ORDER_PAYMENT_TIMEOUT_MINUTES: ${ORDER_PAYMENT_TIMEOUT_MINUTES:-1440}
+      LINE_REMINDER_DAYS: ${LINE_REMINDER_DAYS:-7,3,1}
+    command: ["python", "-m", "app.scheduler"]
+    networks:
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+
   web:
     image: 99ipxin-web:prod
     build:
