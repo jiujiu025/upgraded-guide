@@ -36,6 +36,20 @@ class RegisterIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     email: str = Field(min_length=3, max_length=160)
     phone: str | None = Field(default=None, max_length=40)
+    # 销售邀请码：走谁的码注册，客户就归谁。可选；失效码不影响注册成功。
+    invite_code: str | None = Field(default=None, max_length=12)
+
+    @field_validator("invite_code")
+    @classmethod
+    def normalize_invite_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if not normalized:
+            return None
+        if len(normalized) < 4 or not re.fullmatch(r"[0-9A-Z]+", normalized):
+            raise ValueError("邀请码格式不正确")
+        return normalized
 
     @field_validator("username")
     @classmethod
@@ -224,6 +238,37 @@ class PasswordRecoveryIn(BaseModel):
         if len(value.encode("utf-8")) > 72:
             raise ValueError("密码 UTF-8 长度不能超过 72 字节")
         return value
+
+
+class InviteCodePublicOut(BaseModel):
+    """公开校验接口的响应：有效/失效同构，不带失效原因细节（防枚举探测）。"""
+    valid: bool
+    inviter_name: str | None = None
+
+
+class InviteCodeCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, max_length=120)
+    max_uses: int | None = Field(default=None, ge=1, le=100000)
+    expires_at: datetime | None = None
+
+
+class InviteCodeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    sales_user_id: int
+    sales_name: str | None = None
+    status: str
+    max_uses: int | None
+    used_count: int
+    expires_at: datetime | None
+    note: str | None
+    register_url: str | None = None
+    created_at: datetime
+    disabled_at: datetime | None
 
 
 class CustomerIn(BaseModel):

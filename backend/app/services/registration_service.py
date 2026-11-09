@@ -130,6 +130,11 @@ def enforce_registration_rate_limit(request: Request) -> None:
     _enforce(request, "register", settings.registration_rate_limit)
 
 
+def enforce_invite_check_rate_limit(request: Request) -> None:
+    """邀请码公开校验接口的限流：与注册同级别的 IP 限流，防码枚举扫描。"""
+    _enforce(request, "invite_check", settings.registration_rate_limit)
+
+
 def enforce_login_rate_limit(request: Request, username: str) -> None:
     """登录限流双键。
 

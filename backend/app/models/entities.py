@@ -556,3 +556,24 @@ class CatalogPublication(TimestampMixin, Base):
 
 Index("ix_customer_lines_customer_status", CustomerLine.customer_id, CustomerLine.status)
 Index("ix_orders_customer_status", Order.customer_id, Order.status)
+
+
+class SalesInviteCode(TimestampMixin, Base):
+    """销售邀请码：走谁的码注册，客户就归谁。
+
+    设计要点见 docs/销售邀请码客户归属设计.md：
+    - code 只能系统生成（Crockford Base32 去混淆字符），防钓鱼/防枚举；
+    - 一个销售最多 10 个 active 码，分渠道投放但归属同一人；
+    - 失效码不拒绝注册（归公海 + 通知管理员），客户无感知。
+    """
+    __tablename__ = "sales_invite_codes"
+
+    code: Mapped[str] = mapped_column(String(12), unique=True, index=True)
+    sales_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    disabled_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)

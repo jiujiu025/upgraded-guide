@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Activity, Check, ChevronLeft, ChevronRight, CircleAlert, KeyRound, Pencil, Plus, RefreshCw, Search, ShieldCheck, UserRound, Users, X } from 'lucide-vue-next'
 import {
-  createSalesUser, getAdminSalesCustomers, getAdminSalesLoginLogs, getAdminSalesUsers,
+  createSalesUser, disableAdminInviteCode, getAdminInviteCodes, getAdminSalesCustomers, getAdminSalesLoginLogs, getAdminSalesUsers,
   resetAdminUserPassword, updateAdminSalesUser, updateAdminUserAccess,
 } from '../api'
 
@@ -23,6 +23,8 @@ const logs = ref([])
 const customers = ref([])
 const customerTotal = ref(0)
 const customerPage = ref(1)
+// 邀请码：走谁的码注册客户就归谁，管理员可看全量并强制停用。
+const inviteCodes = ref([])
 const page = ref(1)
 const filters = reactive({ keyword: '', status: '' })
 const createForm = reactive({ username: '', display_name: '', phone: '', password: '', confirmPassword: '' })
@@ -66,16 +68,19 @@ async function loadDetail() {
   logs.value = []
   customers.value = []
   customerTotal.value = 0
+  inviteCodes.value = []
   if (!selectedId.value) return
   try {
-    const [logResponse, customerResponse] = await Promise.all([
+    const [logResponse, customerResponse, inviteResponse] = await Promise.all([
       getAdminSalesLoginLogs(selectedId.value, 50),
       getAdminSalesCustomers(selectedId.value, { page: customerPage.value, page_size: 25 }),
+      getAdminInviteCodes({ sales_id: selectedId.value }).catch(() => ({ data: [] })),
     ])
     if (request !== detailRequest) return
     logs.value = logResponse.data
     customers.value = customerResponse.data.items
     customerTotal.value = customerResponse.data.total
+    inviteCodes.value = inviteResponse.data
   } catch (requestError) {
     if (request === detailRequest) error.value = requestError.userMessage || '销售详情加载失败'
   }
@@ -98,6 +103,32 @@ watch(() => filters.keyword, () => {
 watch(page, loadUsers)
 watch(customerPage, loadDetail)
 onMounted(loadUsers)
+
+async function forceDisableInviteCode(item) {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    await disableAdminInviteCode(item.id)
+    showNotice(`邀请码 ${item.code} 已停用`)
+    const response = await getAdminInviteCodes({ sales_id: selectedId.value })
+    inviteCodes.value = response.data
+  } catch (requestError) {
+    error.value = requestError.userMessage || '停用邀请码失败'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function copyInviteLink(item) {
+  const link = item.register_url || `${window.location.origin}/register?invite=${item.code}`
+  try {
+    await navigator.clipboard.writeText(link)
+    showNotice('注册链接已复制')
+  } catch {
+    error.value = `复制失败，请手动复制：${link}`
+  }
+}
 
 async function createUser() {
   if (busy.value) return
@@ -236,7 +267,7 @@ function refresh() {
           <span class="account-state" :data-state="selected.is_active ? 'active' : 'disabled'">{{ selected.is_active ? '正常' : '已停用' }}</span>
         </div>
         <div class="detail-meta"><span><Users :size="14" />{{ selected.customer_count }} 位名下客户</span><span><Activity :size="14" />最近登录 {{ dateLabel(selected.last_login_at) }}</span><span v-if="selected.locked_until"><ShieldCheck :size="14" />锁定至 {{ dateLabel(selected.locked_until) }}</span></div>
-        <nav class="detail-tabs" aria-label="销售详情"><button type="button" :class="{ active: activeTab === 'profile' }" @click="activeTab = 'profile'">账号资料</button><button type="button" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">登录记录 <span>{{ logs.length }}</span></button><button type="button" :class="{ active: activeTab === 'customers' }" @click="activeTab = 'customers'">名下客户 <span>{{ customerTotal }}</span></button></nav>
+        <nav class="detail-tabs" aria-label="销售详情"><button type="button" :class="{ active: activeTab === 'profile' }" @click="activeTab = 'profile'">账号资料</button><button type="button" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">登录记录 <span>{{ logs.length }}</span></button><button type="button" :class="{ active: activeTab === 'customers' }" @click="activeTab = 'customers'">名下客户 <span>{{ customerTotal }}</span></button><button type="button" :class="{ active: activeTab === 'invites' }" @click="activeTab = 'invites'">邀请码 <span>{{ inviteCodes.length }}</span></button></nav>
 
         <section v-if="activeTab === 'profile'" class="detail-content">
           <div class="section-title"><div><h3>基本资料</h3><p>账号名固定，姓名及联系电话可编辑</p></div><button v-if="!editing" class="outline-button" type="button" @click="editing = true"><Pencil :size="14" />编辑资料</button></div>
@@ -250,6 +281,12 @@ function refresh() {
           <div class="section-title"><div><h3>登录记录</h3><p>记录成功登录与失败尝试，最多显示最近 50 条</p></div><button class="icon-button" type="button" aria-label="刷新登录记录" @click="loadDetail"><RefreshCw :size="15" /></button></div>
           <div v-if="!logs.length" class="empty-state">暂无登录记录；新记录会从本次更新后开始保存。</div>
           <div v-else class="event-list"><div v-for="item in logs" :key="item.id" class="event-row"><span class="event-mark" :data-outcome="item.outcome"><Check v-if="item.outcome === 'success'" :size="14" /><CircleAlert v-else :size="14" /></span><span class="event-main"><b>{{ outcomeLabel(item) }}</b><small>{{ item.source_ip }}<template v-if="item.user_agent"> · {{ item.user_agent }}</template></small></span><time>{{ dateLabel(item.created_at) }}</time></div></div>
+        </section>
+
+        <section v-else-if="activeTab === 'invites'" class="detail-content">
+          <div class="section-title"><div><h3>邀请码</h3><p>客户走该销售的邀请码注册即自动归属；停用销售账号时其邀请码会级联停用</p></div><span class="count-label">{{ inviteCodes.length }} 个</span></div>
+          <div v-if="!inviteCodes.length" class="empty-state">该销售还没有生成过邀请码。</div>
+          <div v-else class="invite-admin-table"><div class="invite-admin-row invite-admin-head"><span>邀请码</span><span>状态</span><span>带来客户</span><span>备注</span><span>创建时间</span><span></span></div><div v-for="item in inviteCodes" :key="item.id" class="invite-admin-row"><span class="invite-admin-code">{{ item.code }}</span><span><b :class="item.status === 'active' ? 'invite-on' : 'invite-off'">{{ item.status === 'active' ? '有效' : '已停用' }}</b><small v-if="item.expires_at"> · {{ String(item.expires_at).slice(0, 10) }} 到期</small></span><span>{{ item.used_count }}<template v-if="item.max_uses"> / {{ item.max_uses }}</template></span><span>{{ item.note || '—' }}</span><span>{{ dateLabel(item.created_at) }}</span><span class="invite-admin-actions"><button type="button" class="outline-button" @click="copyInviteLink(item)">复制链接</button><button v-if="item.status === 'active'" type="button" class="danger-button" :disabled="busy" @click="forceDisableInviteCode(item)">强制停用</button></span></div></div>
         </section>
 
         <section v-else class="detail-content">
@@ -271,6 +308,16 @@ function refresh() {
 .sales-workspace{display:grid;grid-template-columns:minmax(280px,360px) minmax(0,1fr);align-items:start;gap:14px}.sales-list-panel{overflow:hidden}.list-toolbar{display:grid;grid-template-columns:minmax(0,1fr) 104px;gap:8px;padding:12px;border-bottom:1px solid #e4ebe7}.search-field{height:35px;display:flex;align-items:center;gap:7px;padding:0 9px;border:1px solid #d2ddd7;border-radius:4px;color:#788982}.search-field input{width:100%;min-width:0;border:0;outline:0;background:none;color:#344b41;font-size:10px}.list-toolbar select{min-width:0;height:35px;padding:0 7px;border:1px solid #d2ddd7;border-radius:4px;background:#fff;color:#536860;font-size:10px}.list-caption{height:37px;display:flex;align-items:center;gap:7px;padding:0 13px;color:#6c7e76;font-size:10px}.list-caption b,.count-label{color:#27755e;font-size:10px;font-variant-numeric:tabular-nums}.sales-user-list{max-height:calc(100vh - 270px);min-height:220px;overflow:auto}.sales-user-row{width:100%;min-height:68px;display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid #edf1ef;text-align:left;transition:background .16s}.sales-user-row:hover{background:#f7faf8}.sales-user-row.selected{background:#edf6f1}.sales-user-row:focus-visible,.detail-tabs button:focus-visible,button:focus-visible{outline:2px solid #438a74;outline-offset:-2px}.avatar{width:34px;height:34px;flex:0 0 34px;display:grid;place-items:center;border-radius:50%;background:#e6f1eb;color:#2b765c;font-size:13px;font-weight:750}.avatar.large{width:42px;height:42px;flex-basis:42px;font-size:16px}.user-main{min-width:0;display:grid;gap:4px}.user-main b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.user-main small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#788980;font-size:9px}.user-side{display:grid;grid-template-columns:7px auto;align-items:center;column-gap:5px;margin-left:auto;color:#71827a}.user-side i,.account-state:before{width:7px;height:7px;border-radius:50%;background:#388866}.user-side i[data-state="disabled"],.account-state[data-state="disabled"]:before{background:#b65b50}.user-side small{font-size:9px}.user-side em{grid-column:1/-1;margin-top:3px;color:#7e8e86;font-size:9px;font-style:normal;white-space:nowrap}.list-pagination,.customer-pagination{min-height:42px;display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:6px 11px;border-top:1px solid #e3eae6;color:#788981;font-size:9px}.list-pagination span,.customer-pagination span{margin-right:auto}.list-pagination button,.customer-pagination button{width:28px;height:28px;display:grid;place-items:center;border:1px solid #d3ded8;border-radius:4px;background:#fff;color:#48645a}.list-pagination button:disabled,.customer-pagination button:disabled{opacity:.35;cursor:not-allowed}.list-state{min-height:200px;display:flex;align-items:center;justify-content:center;gap:8px;color:#7a8b83;font-size:11px}.spin{animation:spin .8s linear infinite}
 .sales-detail-panel{min-width:0}.detail-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 18px 13px}.detail-identity{display:flex;align-items:center;gap:11px;min-width:0}.detail-identity h2{margin:0;font-size:17px}.detail-identity p{margin:4px 0 0;color:#71827a;font-size:10px}.account-state{display:inline-flex;align-items:center;gap:6px;color:#317455;font-size:10px}.account-state[data-state="disabled"]{color:#a64f44}.account-state:before{content:""}.account-state[data-state="disabled"]:before{background:#b65b50}.detail-meta{display:flex;flex-wrap:wrap;gap:9px 18px;padding:0 18px 14px;color:#75867e;font-size:9px}.detail-meta span{display:inline-flex;align-items:center;gap:5px}.detail-tabs{display:flex;gap:4px;padding:0 16px;border-bottom:1px solid #e1e9e5}.detail-tabs button{min-height:40px;padding:0 10px;border-bottom:2px solid transparent;color:#71827a;font-size:10px}.detail-tabs button.active{border-color:#2b8268;color:#216b55;font-weight:750}.detail-tabs span{margin-left:4px;color:#7a8a83;font-variant-numeric:tabular-nums}.detail-content{padding:17px 18px}.section-title h3{font-size:13px}.edit-form{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:16px}.form-actions{grid-column:1/-1;display:flex;gap:7px}.profile-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px 12px;margin:17px 0 19px}.profile-grid div{min-width:0}.profile-grid dt{margin-bottom:5px;color:#829189;font-size:9px}.profile-grid dd{margin:0;overflow-wrap:anywhere;color:#324a3f;font-size:11px;font-weight:600}.password-reset{padding:15px 0;border-top:1px solid #e6ece9;border-bottom:1px solid #e6ece9}.password-reset .section-title>svg{color:#568b76}.reset-form{display:grid;grid-template-columns:1fr 1fr auto;align-items:end;gap:8px;margin-top:12px}.reset-form .outline-button{white-space:nowrap}.access-row{display:flex;align-items:center;justify-content:space-between;gap:15px;padding-top:15px}.access-row span{display:grid;gap:4px}.access-row b{font-size:10px}.access-row small{color:#7c8c84;font-size:9px}.empty-state{min-height:150px;display:grid;place-items:center;align-content:center;color:#7d8c85;font-size:11px}.event-list{margin-top:13px}.event-row{min-height:62px;display:flex;align-items:center;gap:10px;border-top:1px solid #e8eeeb}.event-mark{width:27px;height:27px;flex:0 0 27px;display:grid;place-items:center;border-radius:50%;background:#e7f4ec;color:#32805e}.event-mark[data-outcome="failed"]{background:#fbebe8;color:#b75a4e}.event-main{min-width:0;display:grid;gap:4px}.event-main b{font-size:10px}.event-main small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7a8a83;font-size:9px}.event-row time{margin-left:auto;color:#71827b;font-size:9px;white-space:nowrap;font-variant-numeric:tabular-nums}.customer-table{margin-top:13px;overflow-x:auto}.customer-head,.customer-row{min-width:650px;display:grid;grid-template-columns:1.05fr 1fr .8fr 1.05fr auto;align-items:center;gap:10px;padding:0 9px}.customer-head{min-height:34px;background:#f1f5f3;color:#77877f;font-size:9px}.customer-row{min-height:51px;border-bottom:1px solid #e7edea;color:#52665d;font-size:9px}.customer-row>span:first-child{display:grid;gap:3px}.customer-row b{color:#324b3f;font-size:10px}.customer-row small{color:#839189;font-size:8px}.customer-row button{display:flex;align-items:center;gap:2px;color:#267359;font-size:9px;white-space:nowrap}.sales-detail-empty{min-height:380px;display:grid;place-content:center;justify-items:center;color:#8a9891}.sales-detail-empty h2{margin:12px 0 4px;color:#435b50;font-size:14px}.sales-detail-empty p{margin:0;font-size:10px}
 @keyframes spin{to{transform:rotate(360deg)}}
+.invite-admin-table{margin-top:13px;overflow-x:auto}
+.invite-admin-row{min-width:640px;display:grid;grid-template-columns:.7fr .9fr .6fr 1.2fr 1.1fr auto;align-items:center;gap:10px;padding:0 9px}
+.invite-admin-row.invite-admin-head{min-height:34px;background:#f1f5f3;color:#77877f;font-size:9px}
+.invite-admin-row:not(.invite-admin-head){min-height:50px;border-bottom:1px solid #e7edea;color:#52665d;font-size:9px}
+.invite-admin-code{font:12px ui-monospace,monospace;letter-spacing:.16em;color:#1f5c50}
+.invite-on{color:#2b8268;font-size:10px}
+.invite-off{color:#a64f44;font-size:10px}
+.invite-admin-row small{color:#839189;font-size:8px}
+.invite-admin-actions{display:flex;gap:6px;justify-content:flex-end}
+.invite-admin-actions .outline-button,.invite-admin-actions .danger-button{min-height:30px;padding:0 9px;font-size:9px}
 @media(max-width:1000px){.sales-workspace{grid-template-columns:minmax(250px,310px) minmax(0,1fr)}.create-form{grid-template-columns:repeat(3,minmax(120px,1fr))}.reset-form{grid-template-columns:1fr 1fr}.reset-form .outline-button{grid-column:1/-1;justify-self:start}}
 @media(max-width:760px){.sales-console{padding:68px 14px 24px}.sales-workspace{grid-template-columns:1fr}.sales-user-list{max-height:360px}.sales-detail-empty{min-height:210px}}
 @media(max-width:520px){.sales-console-head h1{font-size:21px}.sales-console-head p{max-width:240px;line-height:1.5}.create-form{grid-template-columns:1fr 1fr}.create-form>label:nth-child(4),.create-form>label:nth-child(5),.create-form>button{grid-column:1/-1}.profile-grid{grid-template-columns:1fr 1fr}.reset-form{grid-template-columns:1fr}.reset-form .outline-button{grid-column:auto}.detail-content{padding:14px}.detail-heading{padding:14px}.detail-meta{padding:0 14px 12px}.detail-tabs{padding:0 8px}.detail-tabs button{padding:0 7px;font-size:9px}.event-row{align-items:flex-start;padding:10px 0}.event-row time{max-width:104px;text-align:right;white-space:normal;line-height:1.4}.access-row{align-items:flex-start}.customer-row{min-width:590px}}

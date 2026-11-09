@@ -3,7 +3,7 @@ from app.models.entities import (
     Order, Product, ProductSupplyRule, Region, ResourcePool, ResourcePoolSupplier, RetailPriceRule, Supplier,
     SupplierInventorySnapshot, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
     PaymentChannelAcceptance, PaymentChannelConfig, PaymentOrder, PaymentRefund, SalesCommissionEntry, ScheduledTaskRun,
-    RenewalOutreach, WalletAccount, WalletTransaction,
+    RenewalOutreach, WalletAccount, WalletTransaction, SalesInviteCode,
 )
 
 __all__ = [
@@ -12,5 +12,5 @@ __all__ = [
     "ResourcePoolSupplier", "Supplier", "SupplierInventorySnapshot", "SupplierIpSegmentSnapshot", "SupplierProduct", "SupplierQuote",
     "SupplierRegion", "SupplierSyncRun", "User",
     "PaymentChannelAcceptance", "PaymentChannelConfig", "PaymentOrder", "PaymentRefund", "SalesCommissionEntry",
-    "RenewalOutreach", "ScheduledTaskRun", "WalletAccount", "WalletTransaction",
+    "RenewalOutreach", "ScheduledTaskRun", "WalletAccount", "WalletTransaction", "SalesInviteCode",
 ]

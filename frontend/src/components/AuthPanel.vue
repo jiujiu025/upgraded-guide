@@ -1,9 +1,9 @@
 <script setup>
-import { computed, reactive, ref } from 'vue'
-import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Phone, UserRound } from 'lucide-vue-next'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Phone, Ticket, UserRound } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { clearSession, session } from '../api/session'
-import { getAuthMe, getCustomerMe, login, logout as endSession, register } from '../api'
+import { getAuthMe, getCustomerMe, getInviteCodeCheck, login, logout as endSession, register } from '../api'
 import BrandLogo from './BrandLogo.vue'
 
 const props = defineProps({ portal: { type: String, default: 'customer' } })
@@ -13,6 +13,20 @@ const isRegister = ref(route.meta.section === 'register')
 const account = ref('')
 const password = ref('')
 const registerForm = reactive({ username: '', password: '', confirmPassword: '', name: '', email: '', phone: '' })
+// 销售邀请码：走谁的码注册，客户就归谁。URL 带 ?invite= 自动填入。
+const inviteCode = ref(typeof route.query.invite === 'string' ? route.query.invite.trim().toUpperCase() : '')
+const inviterName = ref('')
+const inviteChecked = ref(false)
+onMounted(async () => {
+  if (!isRegister.value || !inviteCode.value) return
+  try {
+    const { data } = await getInviteCodeCheck(inviteCode.value)
+    inviteChecked.value = true
+    if (data.valid) inviterName.value = data.inviter_name || ''
+  } catch {
+    // 校验接口失败不阻塞注册：后端会在注册事务里再判一次。
+  }
+})
 const show = ref(false)
 const busy = ref(false)
 const error = ref('')
@@ -65,6 +79,8 @@ function validateRegister() {
   if (!registerForm.name.trim() || registerForm.name.trim().length > 120) return '请输入 1-120 个字符的客户名称'
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registerForm.email.trim()) || registerForm.email.trim().length > 160) return '请输入有效的邮箱地址'
   if (registerForm.phone.trim().length > 40) return '联系电话不能超过 40 个字符'
+  const code = inviteCode.value.trim().toUpperCase()
+  if (code && !/^[0-9A-Z]{4,12}$/.test(code)) return '邀请码格式不正确（4-12 位数字或大写字母）'
   return ''
 }
 
@@ -80,6 +96,7 @@ async function submitRegister() {
       name: registerForm.name.trim(),
       email: registerForm.email.trim().toLowerCase(),
       phone: registerForm.phone.trim() || null,
+      invite_code: inviteCode.value.trim().toUpperCase() || null,
     })
     await establishCustomerSession()
   } catch (requestError) {
@@ -110,6 +127,9 @@ async function submitRegister() {
           <label class="field"><span>客户名称</span><div class="input-wrap"><UserRound :size="17" /><input v-model="registerForm.name" autocomplete="organization" maxlength="120" placeholder="企业或个人名称" required /></div></label>
           <label class="field"><span>邮箱</span><div class="input-wrap"><Mail :size="17" /><input v-model="registerForm.email" type="email" autocomplete="email" maxlength="160" placeholder="name@example.com" required /></div></label>
           <label class="field"><span>联系电话（可选）</span><div class="input-wrap"><Phone :size="17" /><input v-model="registerForm.phone" autocomplete="tel" maxlength="40" placeholder="手机号或座机" /></div></label>
+          <label class="field full-field"><span>邀请码（可选）</span><div class="input-wrap"><Ticket :size="17" /><input v-model="inviteCode" maxlength="12" placeholder="销售提供的邀请码，如从专属链接进入则自动填写" /></div></label>
+          <p v-if="inviterName" class="invite-hint">邀请人：{{ inviterName }}，注册后由 TA 为您服务。</p>
+          <p v-else-if="inviteChecked && inviteCode" class="invite-hint invite-hint-muted">邀请码已失效，仍可正常注册，稍后由管理员为您分配服务人员。</p>
           <label class="field full-field"><span>密码</span><div class="input-wrap"><LockKeyhole :size="17" /><input v-model="registerForm.password" :type="show ? 'text' : 'password'" autocomplete="new-password" maxlength="128" placeholder="至少 10 位，包含四类字符" required /><button type="button" class="input-action" :aria-label="show ? '隐藏密码' : '显示密码'" @click="show = !show"><EyeOff v-if="show" :size="16" /><Eye v-else :size="16" /></button></div></label>
           <label class="field full-field"><span>确认密码</span><div class="input-wrap"><LockKeyhole :size="17" /><input v-model="registerForm.confirmPassword" :type="show ? 'text' : 'password'" autocomplete="new-password" maxlength="128" placeholder="再次输入密码" required /></div></label>
         </div>
@@ -135,4 +155,6 @@ async function submitRegister() {
 .register-grid .field, .input-wrap { min-width: 0; }
 .input-wrap input { min-height: 0; padding: 0; }
 .recovery-link { justify-self: end; color: #397e73; font-size: 12px; }
+.invite-hint { margin: 10px 0 0; font-size: 12px; color: #2f7a6d; }
+.invite-hint-muted { color: #8a7355; }
 </style>

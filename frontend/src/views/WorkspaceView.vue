@@ -45,6 +45,9 @@ import {
   getNotifications,
   getSalesCustomers,
   getSalesDashboard,
+  getSalesInviteCodes,
+  createSalesInviteCode,
+  disableSalesInviteCode,
   getSalesExpiringLines,
   getSalesOrders,
   getSalesOutreach,
@@ -83,6 +86,11 @@ const outreach = ref(null);
 const outreachOpen = ref(false);
 const outreachBusy = ref(0);
 const touchForm = reactive({ lineId: null, channel: "wechat", outcome: "sent", note: "" });
+// 我的邀请码：走谁的码注册，客户就归谁。
+const inviteCodes = ref([]);
+const inviteForm = reactive({ note: "" });
+const inviteBusy = ref(false);
+const inviteError = ref("");
 const salesUserForm = reactive({ username: "", display_name: "", phone: "", password: "", confirmPassword: "" });
 const securityQuestions = ref({ configured: false, question_1: null, question_2: null });
 const securityQuestionForm = reactive({ current_password: "", question_1: "", answer_1: "", question_2: "", answer_2: "" });
@@ -334,6 +342,52 @@ async function copyOutreach(item) {
     showSuccess("复制失败，请手动选中文案复制");
   }
 }
+async function loadInviteCodes() {
+  try {
+    inviteCodes.value = (await getSalesInviteCodes()).data;
+  } catch {
+    inviteCodes.value = [];
+  }
+}
+async function createInviteCode() {
+  inviteBusy.value = true;
+  inviteError.value = "";
+  try {
+    await createSalesInviteCode({
+      note: inviteForm.note.trim() || null,
+    });
+    inviteForm.note = "";
+    showSuccess("邀请码已生成，复制注册链接发给客户吧");
+    await loadInviteCodes();
+  } catch (requestError) {
+    inviteError.value = requestError.userMessage || requestError.message || "生成邀请码失败，请稍后重试";
+  } finally {
+    inviteBusy.value = false;
+  }
+}
+async function disableInviteCode(item) {
+  inviteBusy.value = true;
+  inviteError.value = "";
+  try {
+    await disableSalesInviteCode(item.id);
+    showSuccess(`邀请码 ${item.code} 已停用`);
+    await loadInviteCodes();
+  } catch (requestError) {
+    inviteError.value = requestError.userMessage || requestError.message || "停用失败，请稍后重试";
+  } finally {
+    inviteBusy.value = false;
+  }
+}
+async function copyInviteLink(item) {
+  const link = item.register_url || `${window.location.origin}/register?invite=${item.code}`;
+  try {
+    await navigator.clipboard.writeText(link);
+    showSuccess("注册链接已复制，粘贴到微信即可");
+  } catch {
+    // 非 HTTPS 下 clipboard 不可用：直接展示链接让销售手动复制。
+    inviteError.value = `复制失败，请手动复制：${link}`;
+  }
+}
 function startTouch(item) {
   touchForm.lineId = item.line_id;
   touchForm.channel = "wechat";
@@ -477,6 +531,7 @@ async function load() {
         orderResponse,
         expiringResponse,
         healthFixture,
+        inviteResponse,
       ] = await Promise.all([
         getSalesDashboard(),
         getSalesCustomers(),
@@ -488,11 +543,13 @@ async function load() {
           role: "sales",
           username: storedUser.value.username,
         }),
+        getSalesInviteCodes().catch(() => ({ data: [] })),
       ]);
       dashboard.value = dashboardResponse.data;
       salesCustomers.value = customerResponse.data;
       applySalesOrderPage(orderResponse.data);
       expiringLines.value = expiringResponse.data;
+      inviteCodes.value = inviteResponse.data;
       healthImpacts.value = healthFixture.incidents.map((item) => ({
         incident_id: item.id,
         line_name: item.line,
@@ -1568,6 +1625,67 @@ onMounted(load);
                 ><strong>{{ money(dashboard.monthly_renewals) }}</strong>
               </article>
             </section>
+            <section class="workspace-panel invite-panel">
+              <div class="panel-head">
+                <h2>我的邀请码</h2>
+                <span>客户走你的码注册，自动归属到你名下</span>
+              </div>
+              <div v-if="!inviteCodes.length" class="inline-empty">
+                还没有邀请码，生成一个发到微信吧
+              </div>
+              <div
+                v-for="item in inviteCodes"
+                :key="item.id"
+                class="invite-row"
+              >
+                <div class="invite-main">
+                  <b class="invite-code">{{ item.code }}</b>
+                  <small
+                    >{{ item.note || "未备注" }} · 已带来
+                    {{ item.used_count }} 位客户<template v-if="item.max_uses"
+                      >（上限 {{ item.max_uses }}）</template
+                    ><template v-if="item.expires_at"
+                      > · {{ String(item.expires_at).slice(0, 10) }} 到期</template
+                    ></small
+                  >
+                </div>
+                <div class="invite-actions">
+                  <button
+                    class="outline-action"
+                    :disabled="inviteBusy"
+                    @click="copyInviteLink(item)"
+                  >
+                    复制注册链接
+                  </button>
+                  <button
+                    v-if="item.status === 'active'"
+                    class="outline-action"
+                    :disabled="inviteBusy"
+                    @click="disableInviteCode(item)"
+                  >
+                    停用
+                  </button>
+                  <em v-else class="invite-disabled-tag">已停用</em>
+                </div>
+              </div>
+              <form class="invite-form" @submit.prevent="createInviteCode">
+                <input
+                  v-model="inviteForm.note"
+                  maxlength="120"
+                  placeholder="备注（可选）：如 抖音地推 / 官网轮播 / 朋友圈"
+                />
+                <button
+                  class="outline-action"
+                  type="submit"
+                  :disabled="inviteBusy"
+                >
+                  {{ inviteBusy ? "处理中…" : "生成新邀请码" }}
+                </button>
+              </form>
+              <p v-if="inviteError" class="form-error" role="alert">
+                {{ inviteError }}
+              </p>
+            </section>
             <section class="workspace-panel outreach-panel">
               <div class="panel-head">
                 <h2>到期触达</h2>
@@ -2624,4 +2742,16 @@ onMounted(load);
 .order-pager>div{display:flex;gap:6px}
 .order-pager button{width:30px;height:30px;display:grid;place-items:center;border:1px solid #d3ded8;border-radius:5px;background:#fff;color:#4e685d}
 .order-pager button:disabled{opacity:.4;cursor:not-allowed}
+.invite-panel .panel-head{margin-bottom:10px}
+.invite-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 16px;align-items:center;padding:12px 2px;border-bottom:1px solid #e4e9e7}
+.invite-row:last-of-type{border-bottom:0}
+.invite-main{display:grid;gap:3px;min-width:0}
+.invite-code{font:15px ui-monospace,monospace;letter-spacing:.18em;color:#1f5c50}
+.invite-main small{font-size:11px;color:#788a85}
+.invite-actions{display:flex;align-items:center;gap:8px}
+.invite-actions .outline-action{min-height:32px;padding:5px 10px;font-size:12px}
+.invite-disabled-tag{font-style:normal;font-size:11px;padding:2px 7px;border-radius:4px;background:#f0f2f1;color:#7c8b86}
+.invite-form{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;padding-top:12px;border-top:1px solid #e4e9e7}
+.invite-form input{flex:1;min-width:200px;height:36px;padding:0 10px;border:1px solid #cfdad7;border-radius:5px;background:#fff;font-size:12px}
+@media(max-width:760px){.invite-row{grid-template-columns:1fr}.invite-actions{justify-content:flex-start}}
 </style>

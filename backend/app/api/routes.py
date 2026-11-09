@@ -15,11 +15,11 @@ from app.core.timeutil import local_date_of, local_day_range_utc
 from app.db import get_db
 from app.models import (
     AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, PaymentOrder, PaymentRefund, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
-    SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
+    SalesInviteCode, SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
 )
 from app.schemas.common import (
     AssignCustomerIn, CompleteRenewalIn, CreateSalesUserIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
-    DeliverOrderIn, LineIn, LineOut, LoginIn, NotificationOut, OrderIn, RegisterIn,
+    DeliverOrderIn, InviteCodeCreateIn, InviteCodeOut, InviteCodePublicOut, LineIn, LineOut, LoginIn, NotificationOut, OrderIn, RegisterIn,
     OrderOut, OrderPageOut, OrderPreviewIn, OrderPreviewOut, PasswordRecoveryIn, ProductOut, PublicProductOut,
     RegionOut, RenewalIn, TokenOut, UpdateSalesUserIn, UserOut,
     SecurityQuestionsUpdateIn,
@@ -37,11 +37,15 @@ from app.services.order_service import (
 from app.services.pricing_service import (
     SELLABLE_PERIODS, PricingError, monthly_price_for, periods_of, unit_price_for,
 )
+from app.services.invite_code_service import (
+    create_invite_code, disable_codes_of_sales, disable_invite_code, lookup_active_code, normalize_code,
+)
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
-from app.services.registration_service import (enforce_login_rate_limit, enforce_password_recovery_rate_limit,
+from app.services.registration_service import (enforce_invite_check_rate_limit, enforce_login_rate_limit, enforce_password_recovery_rate_limit,
     enforce_registration_rate_limit)
 from app.services.session_service import (SessionError, create_session, csrf_token, find_refresh,
     revoke_session, revoke_user_sessions, rotate_session, validate_session)
+from app.tasks.notify import notify_admins
 from app.core.config import get_settings
 import hmac
 import hashlib
@@ -619,12 +623,18 @@ def public_register(
     db: Session = Depends(get_db),
     _: None = Depends(enforce_registration_rate_limit),
 ):
-    """创建客户账号及绑定档案，不接受角色或销售归属字段。"""
+    """创建客户账号及绑定档案，不接受角色或销售归属字段。
+
+    邀请码是唯一例外：客户走销售的码注册，归属写进 customers.sales_id。
+    失效码不拒绝注册——归属是商家的内部状态，不是客户的错（设计见
+    docs/销售邀请码客户归属设计.md §3.1）。
+    """
     if request.headers.get("origin") and request.headers["origin"] != get_settings().frontend_origin:
         raise HTTPException(status_code=403, detail="请求来源无效")
     password_hash = hash_password(payload.password)
     if db.scalar(select(User.id).where(User.username == payload.username)):
         raise HTTPException(status_code=400, detail="无法完成注册，请检查提交信息")
+    invite = lookup_active_code(db, payload.invite_code) if payload.invite_code else None
     try:
         user = User(
             username=payload.username,
@@ -635,13 +645,29 @@ def public_register(
         )
         db.add(user)
         db.flush()
-        db.add(Customer(
+        customer = Customer(
             name=payload.name,
             email=payload.email,
             phone=payload.phone,
             user_id=user.id,
-            sales_id=None,
-        ))
+            sales_id=invite[1].id if invite else None,
+        )
+        db.add(customer)
+        db.flush()
+        attempted_code = normalize_code(payload.invite_code)
+        if invite:
+            code, holder = invite
+            code.used_count += 1
+            write_audit(db, user, "invite_code_bind", "sales_invite_code", code.id,
+                        f"码={code.code}; 客户={customer.id}; 销售={holder.id}")
+            add_notification(db, holder.id, "新客户通过邀请码注册",
+                             f"客户 {payload.name} 通过你的邀请码 {code.code} 注册，请在工作台跟进。", "customer")
+        elif attempted_code:
+            write_audit(db, user, "invite_code_rejected", "sales_invite_code", None,
+                        f"尝试码={attempted_code}; 客户={customer.id}; 原因=失效或不存在，归公海")
+            notify_admins(db, "公海新增客户（邀请码失效）",
+                          f"新注册客户 {payload.name} 使用了失效邀请码 {attempted_code}，已进入公海待分配。",
+                          "customer", marker=f"invite:{attempted_code}")
         session, raw = create_session(db, user)
         db.commit()
         db.refresh(user)
@@ -939,6 +965,91 @@ def sales_expiring_lines(days: int = Query(default=30, ge=1, le=365), db: Sessio
 def sales_health_impacts(db: Session = Depends(get_db), user: User = Depends(require_roles("sales"))):
     rows = db.execute(select(HealthIncident, Node).join(Node, HealthIncident.node_id == Node.id).where(HealthIncident.node_id.in_(visible_node_ids(db, user)), HealthIncident.status == "open").order_by(HealthIncident.started_at.desc())).all()
     return [{"incident_id": incident.id, "line_name": node.name, "status": node.health_status, "started_at": incident.started_at, "reason": incident.reason} for incident, node in rows]
+
+
+# ---- 销售邀请码：走谁的码注册，客户就归谁（docs/销售邀请码客户归属设计.md）----
+
+def _invite_code_view(code: SalesInviteCode, sales_name: str | None) -> InviteCodeOut:
+    """码 → 输出视图。注册链接由前端域名拼接，方便销售直接贴进微信。"""
+    origin = get_settings().frontend_origin.rstrip("/")
+    return InviteCodeOut(
+        id=code.id, code=code.code, sales_user_id=code.sales_user_id, sales_name=sales_name,
+        status=code.status, max_uses=code.max_uses, used_count=code.used_count,
+        expires_at=code.expires_at, note=code.note,
+        register_url=f"{origin}/register?invite={code.code}",
+        created_at=code.created_at, disabled_at=code.disabled_at,
+    )
+
+
+@router.get("/public/invite-codes/{code}", response_model=InviteCodePublicOut)
+def public_invite_code_check(code: str, db: Session = Depends(get_db),
+                             _: None = Depends(enforce_invite_check_rate_limit)):
+    """注册页展示"邀请人：某某"用。有效/失效响应同构，不回原因细节，防枚举探测。"""
+    found = lookup_active_code(db, code)
+    if not found:
+        return {"valid": False, "inviter_name": None}
+    return {"valid": True, "inviter_name": found[1].display_name}
+
+
+@router.get("/sales/invite-codes", response_model=list[InviteCodeOut])
+def sales_invite_codes(db: Session = Depends(get_db), user: User = Depends(require_roles("sales"))):
+    codes = db.scalars(select(SalesInviteCode).where(SalesInviteCode.sales_user_id == user.id)
+                       .order_by(SalesInviteCode.created_at.desc(), SalesInviteCode.id.desc())).all()
+    return [_invite_code_view(code, user.display_name) for code in codes]
+
+
+@router.post("/sales/invite-codes", response_model=InviteCodeOut, status_code=201)
+def sales_create_invite_code(payload: InviteCodeCreateIn, db: Session = Depends(get_db),
+                             user: User = Depends(require_roles("sales"))):
+    code = create_invite_code(db, user, note=payload.note, max_uses=payload.max_uses, expires_at=payload.expires_at)
+    write_audit(db, user, "create", "sales_invite_code", code.id, f"码={code.code}; 备注={payload.note or '-'}")
+    db.commit()
+    db.refresh(code)
+    return _invite_code_view(code, user.display_name)
+
+
+@router.post("/sales/invite-codes/{code_id}/disable", response_model=InviteCodeOut)
+def sales_disable_invite_code(code_id: int, db: Session = Depends(get_db),
+                              user: User = Depends(require_roles("sales"))):
+    # 只查自己的码：别人的码 ID 直接 404，不区分存在性。
+    code = db.scalar(select(SalesInviteCode).where(SalesInviteCode.id == code_id, SalesInviteCode.sales_user_id == user.id))
+    if not code:
+        raise HTTPException(status_code=404, detail="邀请码不存在")
+    disable_invite_code(db, code, user)
+    write_audit(db, user, "disable", "sales_invite_code", code.id, f"码={code.code}")
+    db.commit()
+    db.refresh(code)
+    return _invite_code_view(code, user.display_name)
+
+
+@router.get("/admin/invite-codes", response_model=list[InviteCodeOut])
+def admin_invite_codes(sales_id: int | None = Query(default=None), status: str | None = Query(default=None, max_length=20),
+                       db: Session = Depends(get_db), _: User = Depends(require_roles("super_admin", "admin"))):
+    query = select(SalesInviteCode, User).join(User, SalesInviteCode.sales_user_id == User.id)
+    if sales_id is not None:
+        query = query.where(SalesInviteCode.sales_user_id == sales_id)
+    if status:
+        query = query.where(SalesInviteCode.status == status)
+    rows = db.execute(query.order_by(SalesInviteCode.created_at.desc(), SalesInviteCode.id.desc())).all()
+    return [_invite_code_view(code, holder.display_name) for code, holder in rows]
+
+
+@router.post("/admin/invite-codes/{code_id}/disable", response_model=InviteCodeOut)
+def admin_disable_invite_code(code_id: int, db: Session = Depends(get_db),
+                              actor: User = Depends(require_roles("super_admin", "admin"))):
+    row = db.execute(select(SalesInviteCode, User).join(User, SalesInviteCode.sales_user_id == User.id)
+                     .where(SalesInviteCode.id == code_id)).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="邀请码不存在")
+    code, holder = row
+    disable_invite_code(db, code, actor)
+    write_audit(db, actor, "disable", "sales_invite_code", code.id,
+                f"码={code.code}; 强制停用; 持有人={holder.display_name}")
+    add_notification(db, holder.id, "邀请码已被停用",
+                     f"你的邀请码 {code.code} 已被管理员停用。", "customer")
+    db.commit()
+    db.refresh(code)
+    return _invite_code_view(code, holder.display_name)
 
 
 # 管理员订单处理接口：状态变化、审计与通知在同一事务提交。
@@ -1566,6 +1677,7 @@ def admin_reset_password(user_id: int, payload: ResetPasswordIn, db: Session = D
 def admin_change_access(user_id: int, payload: UserAccessIn, db: Session = Depends(get_db),
                         actor: User = Depends(require_roles("super_admin", "admin"))):
     target = _manageable_user(db, actor, user_id)
+    was_sales = target.role == "sales"
     if payload.role is not None:
         if actor.role != "super_admin" or payload.role not in {"customer", "sales", "admin", "super_admin"}:
             raise HTTPException(status_code=403, detail="无权变更角色")
@@ -1576,5 +1688,13 @@ def admin_change_access(user_id: int, payload: UserAccessIn, db: Session = Depen
         revoke_user_sessions(db, target, "access_changed")
         write_audit(db, actor, "change_access", "user", target.id,
                     f"角色={target.role}; 启用={target.is_active}")
+        # 销售被停用或改角色后，其邀请码必须跟着失效，否则新客户还会绑到
+        # 一个不再服务的人头上（注册时 lookup_active_code 也会按持有人过滤，
+        # 这里是双保险 + 让码列表状态正确）。
+        if was_sales and (not target.is_active or target.role != "sales"):
+            disabled_count = disable_codes_of_sales(db, target.id, actor)
+            if disabled_count:
+                write_audit(db, actor, "disable_invite_codes", "user", target.id,
+                            f"级联停用邀请码 {disabled_count} 个")
         db.commit()
     return target

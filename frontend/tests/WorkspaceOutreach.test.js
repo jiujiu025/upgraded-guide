@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   getCustomerMe: vi.fn(), getCustomerOrder: vi.fn(), getCustomerOrders: vi.fn(),
   getCustomerRenewals: vi.fn(), getManagedLine: vi.fn(), getNotifications: vi.fn(),
   getSalesCustomers: vi.fn(), getSalesDashboard: vi.fn(), getSalesExpiringLines: vi.fn(),
+  getSalesInviteCodes: vi.fn().mockResolvedValue({ data: [] }),
   getSalesOrders: vi.fn(), getSalesOutreach: vi.fn(), getSecurityQuestions: vi.fn(),
   markAllNotificationsRead: vi.fn(), markNotificationRead: vi.fn(), recordRenewalTouch: vi.fn(),
   renewCustomerLine: vi.fn(), updateSecurityQuestions: vi.fn(), updateCustomerLineNote: vi.fn(),
@@ -71,6 +72,7 @@ beforeEach(() => {
   api.getSalesCustomers.mockImplementation(() => ok([{ id: 1, name: '客户甲', email: 'a@example.com', phone: null, status: '正常' }]))
   api.getSalesOrders.mockImplementation(() => ok({ items: [], total: 0, page: 1, page_size: 20, status_counts: {} }))
   api.getSalesExpiringLines.mockImplementation(() => ok([]))
+  api.getSalesInviteCodes.mockImplementation(() => ok([]))
   api.getSalesOutreach.mockImplementation(() => ok(outreach))
   api.recordRenewalTouch.mockImplementation(() => ok({ id: 9 }))
   healthMock.loadHealthFixture.mockImplementation(() => Promise.resolve({ incidents: [] }))
