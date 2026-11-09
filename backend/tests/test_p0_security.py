@@ -220,7 +220,7 @@ def test_sales_workbench_isolation(api):
     assert {item["id"] for item in customers.json()} == {api.customers["a"].id, api.customers["unbound"].id}
     orders = api.get("/api/sales/orders", headers=auth(sales_token))
     assert orders.status_code == 200
-    assert all(item["customer_id"] in {api.customers["a"].id, api.customers["unbound"].id} for item in orders.json())
+    assert all(item["customer_id"] in {api.customers["a"].id, api.customers["unbound"].id} for item in orders.json()["items"])
     expiring = api.get("/api/sales/expiring-lines?days=60", headers=auth(sales_token))
     assert expiring.status_code == 200
     assert len(expiring.json()) == 1

@@ -375,6 +375,20 @@ class OrderOut(BaseModel):
     created_at: datetime
 
 
+class OrderPageOut(BaseModel):
+    """订单列表的一页。
+
+    ``status_counts`` 是**全量**（同一角色范围内、未按状态筛选）的状态分布：
+    分页后前端手里只有 25 条，不能再用"当页出现过哪些状态"拼筛选下拉框。
+    """
+
+    items: list[OrderOut]
+    total: int
+    page: int
+    page_size: int
+    status_counts: dict[str, int] = Field(default_factory=dict)
+
+
 class DeliverOrderIn(BaseModel):
     node_id: int
     static_ip: str | None = None

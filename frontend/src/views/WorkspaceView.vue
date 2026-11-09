@@ -5,6 +5,7 @@ import {
   Activity,
   Bell,
   Box,
+  ChevronLeft,
   ChevronRight,
   CircleDollarSign,
   Database,
@@ -96,6 +97,19 @@ const securityQuestionOptions = [
   ["favorite_movie", "您最喜欢的一部电影是什么？"],
 ];
 const orderStatus = ref("");
+// 订单列表改成服务端分页后，这三样必须来自接口而不是"当页数据"：
+// total 用来显示总数/页数，statusCounts 用来拼状态下拉框（当页只有 25 条，
+// 用当页出现过的状态会让用户翻页后选不到老状态）。
+const orderPage = ref(1);
+const orderPageSize = 25;
+const orderTotal = ref(0);
+const orderStatusCounts = ref({});
+const salesOrderTotal = ref(0);
+const salesOrderStatusCounts = ref({});
+const salesOrderPage = ref(1);
+const salesOrderPageSize = 20;
+const orderPages = computed(() => Math.max(1, Math.ceil(orderTotal.value / orderPageSize)));
+const salesOrderPages = computed(() => Math.max(1, Math.ceil(salesOrderTotal.value / salesOrderPageSize)));
 const filters = reactive({ product: "", region: "", status: "", note: "" });
 const editingLineId = ref(null);
 const noteDraft = ref("");
@@ -175,10 +189,11 @@ const securityQuestionLabel = (id) => securityQuestionOptions.find(([key]) => ke
 const unreadCount = computed(
   () => notifications.value.filter((item) => !item.is_read).length,
 );
-const filteredOrders = computed(() =>
-  orderStatus.value
-    ? orders.value.filter((item) => item.status === orderStatus.value)
-    : orders.value,
+const orderStatusOptions = computed(() =>
+  Object.keys(orderStatusCounts.value).sort(),
+);
+const salesOrderStatusOptions = computed(() =>
+  Object.keys(salesOrderStatusCounts.value).sort(),
 );
 const filteredLines = computed(() =>
   lines.value.filter(
@@ -211,14 +226,15 @@ const expiringCount = computed(
         daysLeft(item.expires_at) >= 0 && daysLeft(item.expires_at) <= 7,
     ).length,
 );
-const pendingOrders = computed(
-  () =>
-    orders.value.filter(
-      (item) =>
-        !["delivered", "completed", "cancelled", "refunded"].includes(
-          item.status,
-        ),
-    ).length,
+// 看板徽标必须用全量状态分布算：分页后 orders 只有当页，按当页统计会漏掉
+// 第 2 页上的待处理订单。
+const pendingOrders = computed(() =>
+  Object.entries(orderStatusCounts.value)
+    .filter(
+      ([status]) =>
+        !["delivered", "completed", "cancelled", "refunded"].includes(status),
+    )
+    .reduce((total, [, count]) => total + count, 0),
 );
 
 const statusText = {
@@ -330,18 +346,88 @@ async function loadClientBase() {
     renewalResponse,
     profileResponse,
   ] = await Promise.all([
-    getCustomerOrders(),
+    getCustomerOrders({
+      page: orderPage.value,
+      page_size: orderPageSize,
+      status: orderStatus.value || undefined,
+    }),
     getCustomerLines(),
     getNotifications(),
     getCustomerRenewals(),
     getCustomerMe(),
   ]);
-  orders.value = orderResponse.data;
+  applyOrderPage(orderResponse.data);
   lines.value = lineResponse.data;
   notifications.value = notificationResponse.data;
   renewals.value = renewalResponse.data;
   profile.value = profileResponse.data;
 }
+
+// 三个角色共用一套分页状态：同一时刻只渲染一个工作台，所以订单状态筛选
+// 不需要按角色拆成三份。
+function applyOrderPage(payload) {
+  orders.value = payload.items || [];
+  orderTotal.value = payload.total || 0;
+  orderStatusCounts.value = payload.status_counts || {};
+}
+
+function applySalesOrderPage(payload) {
+  salesOrders.value = payload.items || [];
+  salesOrderTotal.value = payload.total || 0;
+  salesOrderStatusCounts.value = payload.status_counts || {};
+}
+
+const orderPageParams = (page, pageSize) => ({
+  page,
+  page_size: pageSize,
+  status: orderStatus.value || undefined,
+});
+
+// 翻页和切状态只重拉订单，不重拉线路/通知——那些请求跟订单页没关系。
+async function loadOrders() {
+  try {
+    if (workspace.value === "sales") {
+      const { data } = await getSalesOrders(
+        orderPageParams(salesOrderPage.value, salesOrderPageSize),
+      );
+      applySalesOrderPage(data);
+    } else if (workspace.value === "admin") {
+      const { data } = await getAdminOrders(
+        orderPageParams(orderPage.value, orderPageSize),
+      );
+      applyOrderPage(data);
+    } else {
+      const { data } = await getCustomerOrders(
+        orderPageParams(orderPage.value, orderPageSize),
+      );
+      applyOrderPage(data);
+    }
+  } catch (requestError) {
+    error.value = requestError.userMessage || "订单加载失败，请稍后重试";
+  }
+}
+
+function changeOrderPage(next) {
+  orderPage.value = next;
+  loadOrders();
+}
+
+function changeSalesOrderPage(next) {
+  salesOrderPage.value = next;
+  loadOrders();
+}
+
+watch(orderStatus, () => {
+  orderPage.value = 1;
+  salesOrderPage.value = 1;
+  loadOrders();
+});
+
+// 切换页面时回到第 1 页：否则从"我的订单第 3 页"点回看板，"最近订单"会渲染第 3 页的头 5 条。
+watch(page, () => {
+  orderPage.value = 1;
+  salesOrderPage.value = 1;
+});
 
 async function load() {
   loading.value = true;
@@ -366,7 +452,9 @@ async function load() {
       ] = await Promise.all([
         getSalesDashboard(),
         getSalesCustomers(),
-        getSalesOrders(),
+        getSalesOrders(
+          orderPageParams(salesOrderPage.value, salesOrderPageSize),
+        ),
         getSalesExpiringLines(),
         loadHealthFixture({
           role: "sales",
@@ -375,7 +463,7 @@ async function load() {
       ]);
       dashboard.value = dashboardResponse.data;
       salesCustomers.value = customerResponse.data;
-      salesOrders.value = orderResponse.data;
+      applySalesOrderPage(orderResponse.data);
       expiringLines.value = expiringResponse.data;
       healthImpacts.value = healthFixture.incidents.map((item) => ({
         incident_id: item.id,
@@ -387,7 +475,7 @@ async function load() {
     } else if (page.value === "admin-sales-users") {
       orders.value = [];
     } else {
-      orders.value = (await getAdminOrders()).data;
+      applyOrderPage((await getAdminOrders(orderPageParams(orderPage.value, orderPageSize))).data);
     }
   } catch (requestError) {
     error.value = requestError.userMessage || "数据加载失败，请稍后重试";
@@ -544,10 +632,10 @@ async function submitRenewalCompletion() {
     renewalConfirmation.value = null;
     try {
       const [orderResponse, lineResponse] = await Promise.all([
-        getAdminOrders(),
+        getAdminOrders(orderPageParams(orderPage.value, orderPageSize)),
         getManagedLine(order.renewal_line_id),
       ]);
-      orders.value = orderResponse.data;
+      applyOrderPage(orderResponse.data);
       showSuccess(
         `续费已人工完成，线路到期时间已更新至 ${dateTime(lineResponse.data.expires_at)}`,
       );
@@ -679,10 +767,10 @@ async function confirmDelivery() {
     deliveryOrderId.value = null;
     try {
       const [orderResponse, lineResponse] = await Promise.all([
-        getAdminOrders(),
+        getAdminOrders(orderPageParams(orderPage.value, orderPageSize)),
         getManagedLine(deliveredLine.id),
       ]);
-      orders.value = orderResponse.data;
+      applyOrderPage(orderResponse.data);
       showSuccess(
         `线路已交付，到期时间为 ${dateTime(lineResponse.data.expires_at)}`,
       );
@@ -870,7 +958,7 @@ onMounted(load);
                 <option value="">全部状态</option>
                 <option
                   v-for="status in [
-                    ...new Set(orders.map((item) => item.status)),
+                    ...orderStatusOptions,
                   ]"
                   :key="status"
                   :value="status"
@@ -881,7 +969,7 @@ onMounted(load);
                 <RefreshCw :size="15" />刷新
               </button>
             </div>
-            <div v-if="!filteredOrders.length" class="workspace-state compact">
+            <div v-if="!orders.length" class="workspace-state compact">
               <PackageSearch :size="28" />
               <p>暂无符合条件的订单</p>
             </div>
@@ -892,7 +980,7 @@ onMounted(load);
                 ><span>创建时间</span><span></span>
               </div>
               <button
-                v-for="order in filteredOrders"
+                v-for="order in orders"
                 :key="order.id"
                 class="table-row"
                 @click="router.push(`/client/orders/${order.id}`)"
@@ -912,7 +1000,30 @@ onMounted(load);
                   dateTime(order.created_at)
                 }}</span
                 ><span><ChevronRight :size="16" /></span>
-              </button></div
+              </button>
+              <footer v-if="orderTotal" class="order-pager">
+                <span
+                  >共 {{ orderTotal }} 笔 · 第 {{ orderPage }} /
+                  {{ orderPages }} 页</span
+                >
+                <div>
+                  <button
+                    type="button"
+                    aria-label="上一页订单"
+                    :disabled="orderPage <= 1 || loading"
+                    @click="changeOrderPage(orderPage - 1)"
+                  >
+                    <ChevronLeft :size="16" /></button
+                  ><button
+                    type="button"
+                    aria-label="下一页订单"
+                    :disabled="orderPage >= orderPages || loading"
+                    @click="changeOrderPage(orderPage + 1)"
+                  >
+                    <ChevronRight :size="16" />
+                  </button>
+                </div>
+              </footer></div
           ></template>
           <template v-else-if="page === 'order'"
             ><div
@@ -1531,13 +1642,13 @@ onMounted(load);
               <section class="workspace-panel">
                 <div class="panel-head">
                   <h2>客户订单</h2>
-                  <span>{{ salesOrders.length }} 笔</span>
+                  <span>{{ salesOrderTotal }} 笔</span>
                 </div>
                 <div v-if="!salesOrders.length" class="inline-empty">
                   暂无客户订单
                 </div>
                 <div
-                  v-for="order in salesOrders.slice(0, 20)"
+                  v-for="order in salesOrders"
                   :key="order.id"
                   class="compact-row static-row"
                 >
@@ -1551,6 +1662,29 @@ onMounted(load);
                     statusText[order.status] || order.status
                   }}</em>
                 </div>
+                <footer v-if="salesOrderTotal > salesOrderPageSize" class="order-pager">
+                  <span
+                    >共 {{ salesOrderTotal }} 笔 · 第 {{ salesOrderPage }} /
+                    {{ salesOrderPages }} 页</span
+                  >
+                  <div>
+                    <button
+                      type="button"
+                      aria-label="上一页客户订单"
+                      :disabled="salesOrderPage <= 1"
+                      @click="changeSalesOrderPage(salesOrderPage - 1)"
+                    >
+                      <ChevronLeft :size="16" /></button
+                    ><button
+                      type="button"
+                      aria-label="下一页客户订单"
+                      :disabled="salesOrderPage >= salesOrderPages"
+                      @click="changeSalesOrderPage(salesOrderPage + 1)"
+                    >
+                      <ChevronRight :size="16" />
+                    </button>
+                  </div>
+                </footer>
               </section>
               <section class="workspace-panel">
                 <div class="panel-head"><h2>即将到期线路</h2></div>
@@ -1596,7 +1730,7 @@ onMounted(load);
                 <option value="">全部状态</option>
                 <option
                   v-for="status in [
-                    ...new Set(orders.map((item) => item.status)),
+                    ...orderStatusOptions,
                   ]"
                   :key="status"
                   :value="status"
@@ -1607,12 +1741,12 @@ onMounted(load);
                 <RefreshCw :size="15" />刷新
               </button>
             </div>
-            <div v-if="!filteredOrders.length" class="workspace-state compact">
+            <div v-if="!orders.length" class="workspace-state compact">
               <Box :size="28" />
               <p>暂无符合条件的订单</p>
             </div>
             <section
-              v-for="order in filteredOrders"
+              v-for="order in orders"
               :key="order.id"
               class="workspace-panel admin-order"
             >
@@ -1765,7 +1899,30 @@ onMounted(load);
                   </button>
                 </div>
               </form>
-            </section></template
+            </section>
+            <footer v-if="orderTotal" class="order-pager">
+              <span
+                >共 {{ orderTotal }} 笔 · 第 {{ orderPage }} /
+                {{ orderPages }} 页</span
+              >
+              <div>
+                <button
+                  type="button"
+                  aria-label="上一页订单"
+                  :disabled="orderPage <= 1 || loading"
+                  @click="changeOrderPage(orderPage - 1)"
+                >
+                  <ChevronLeft :size="16" /></button
+                ><button
+                  type="button"
+                  aria-label="下一页订单"
+                  :disabled="orderPage >= orderPages || loading"
+                  @click="changeOrderPage(orderPage + 1)"
+                >
+                  <ChevronRight :size="16" />
+                </button>
+              </div>
+            </footer></template
           >
           <template v-else-if="page === 'admin-sales-users'">
             <section class="workspace-panel sales-user-panel">
@@ -2377,4 +2534,8 @@ onMounted(load);
 .outreach-form .outreach-note input{width:100%}
 .outreach-more{margin-top:10px;font-size:12px;color:#3c7f74;font-weight:650}
 @media(max-width:760px){.outreach-row{grid-template-columns:1fr}.outreach-actions{justify-content:flex-start}}
+.order-pager{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;padding:8px 10px;border-top:1px solid #e3ebe7;color:#788a85;font-size:12px}
+.order-pager>div{display:flex;gap:6px}
+.order-pager button{width:30px;height:30px;display:grid;place-items:center;border:1px solid #d3ded8;border-radius:5px;background:#fff;color:#4e685d}
+.order-pager button:disabled{opacity:.4;cursor:not-allowed}
 </style>

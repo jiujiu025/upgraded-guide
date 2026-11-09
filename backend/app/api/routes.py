@@ -19,10 +19,11 @@ from app.models import (
 from app.schemas.common import (
     AssignCustomerIn, CompleteRenewalIn, CreateSalesUserIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
     DeliverOrderIn, LineIn, LineOut, LoginIn, NotificationOut, OrderIn, RegisterIn,
-    OrderOut, OrderPreviewIn, OrderPreviewOut, PasswordRecoveryIn, ProductOut, PublicProductOut,
+    OrderOut, OrderPageOut, OrderPreviewIn, OrderPreviewOut, PasswordRecoveryIn, ProductOut, PublicProductOut,
     RegionOut, RenewalIn, TokenOut, UpdateSalesUserIn, UserOut,
     SecurityQuestionsUpdateIn,
 )
+from app.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, counts_by, like_pattern, page_payload, paginate
 from app.services.audit_service import write_audit
 from app.services.customer_scope import get_customer_profile, scoped_customer_ids
 from app.services.customer_view import balance_cents_of, customer_view, customer_views
@@ -474,14 +475,28 @@ def create_line(payload: LineIn, db: Session = Depends(get_db), user: User = Dep
         raise
 
 
-@router.get("/orders", response_model=list[OrderOut])
-def list_orders(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    query = select(Order)
+@router.get("/orders", response_model=OrderPageOut)
+def list_orders(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    status: str | None = Query(default=None, max_length=32),
+    keyword: str | None = Query(default=None, max_length=64),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    base = select(Order)
     if user.role == "customer":
-        query = query.where(Order.customer_id == get_customer_profile(db, user).id)
+        base = base.where(Order.customer_id == get_customer_profile(db, user).id)
     elif user.role == "sales":
-        query = query.where(Order.customer_id.in_(scoped_customer_ids(db, user)))
-    return list(db.scalars(query.order_by(Order.created_at.desc())).all())
+        base = base.where(Order.customer_id.in_(scoped_customer_ids(db, user)))
+    status_counts = counts_by(db, base, "status")
+    query = base
+    if status:
+        query = query.where(Order.status == status)
+    if keyword and keyword.strip():
+        query = query.where(Order.order_no.ilike(like_pattern(keyword.strip()), escape="\\"))
+    items, total = paginate(db, query.order_by(Order.created_at.desc(), Order.id.desc()), page, page_size)
+    return page_payload(items, total, page, page_size, status_counts=status_counts)
 
 
 @router.post("/orders", response_model=OrderOut)
@@ -663,10 +678,26 @@ def customer_me(db: Session = Depends(get_db), user: User = Depends(require_role
     return customer_view(customer, balance_cents_of(db, customer.user_id))
 
 
-@router.get("/customer/orders", response_model=list[OrderOut])
-def customer_orders(db: Session = Depends(get_db), user: User = Depends(require_roles("customer"))):
+@router.get("/customer/orders", response_model=OrderPageOut)
+def customer_orders(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    status: str | None = Query(default=None, max_length=32),
+    keyword: str | None = Query(default=None, max_length=64),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("customer")),
+):
     customer = get_customer_profile(db, user)
-    return list(db.scalars(select(Order).where(Order.customer_id == customer.id).order_by(Order.created_at.desc())).all())
+    base = select(Order).where(Order.customer_id == customer.id)
+    # 分布要在加状态筛选之前算，否则选中"已完成"后下拉框里只剩"已完成"。
+    status_counts = counts_by(db, base, "status")
+    query = base
+    if status:
+        query = query.where(Order.status == status)
+    if keyword and keyword.strip():
+        query = query.where(Order.order_no.ilike(like_pattern(keyword.strip()), escape="\\"))
+    items, total = paginate(db, query.order_by(Order.created_at.desc(), Order.id.desc()), page, page_size)
+    return page_payload(items, total, page, page_size, status_counts=status_counts)
 
 
 @router.get("/customer/orders/{order_id}", response_model=OrderOut)
@@ -818,9 +849,24 @@ def sales_customers(db: Session = Depends(get_db), user: User = Depends(require_
     return customer_views(db, db.scalars(select(Customer).where(Customer.sales_id == user.id, Customer.is_deleted.is_(False)).order_by(Customer.created_at.desc())).all())
 
 
-@router.get("/sales/orders", response_model=list[OrderOut])
-def sales_orders(db: Session = Depends(get_db), user: User = Depends(require_roles("sales"))):
-    return list(db.scalars(select(Order).where(Order.customer_id.in_(scoped_customer_ids(db, user))).order_by(Order.created_at.desc())).all())
+@router.get("/sales/orders", response_model=OrderPageOut)
+def sales_orders(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    status: str | None = Query(default=None, max_length=32),
+    keyword: str | None = Query(default=None, max_length=64),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("sales")),
+):
+    base = select(Order).where(Order.customer_id.in_(scoped_customer_ids(db, user)))
+    status_counts = counts_by(db, base, "status")
+    query = base
+    if status:
+        query = query.where(Order.status == status)
+    if keyword and keyword.strip():
+        query = query.where(Order.order_no.ilike(like_pattern(keyword.strip()), escape="\\"))
+    items, total = paginate(db, query.order_by(Order.created_at.desc(), Order.id.desc()), page, page_size)
+    return page_payload(items, total, page, page_size, status_counts=status_counts)
 
 
 @router.get("/sales/expiring-lines", response_model=list[CustomerLineOut])
@@ -837,9 +883,27 @@ def sales_health_impacts(db: Session = Depends(get_db), user: User = Depends(req
 
 
 # 管理员订单处理接口：状态变化、审计与通知在同一事务提交。
-@router.get("/admin/orders", response_model=list[OrderOut])
-def admin_orders(db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
-    return list(db.scalars(select(Order).order_by(Order.created_at.desc())).all())
+@router.get("/admin/orders", response_model=OrderPageOut)
+def admin_orders(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    status: str | None = Query(default=None, max_length=32),
+    keyword: str | None = Query(default=None, max_length=64),
+    customer_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    base = select(Order)
+    if customer_id:
+        base = base.where(Order.customer_id == customer_id)
+    status_counts = counts_by(db, base, "status")
+    query = base
+    if status:
+        query = query.where(Order.status == status)
+    if keyword and keyword.strip():
+        query = query.where(Order.order_no.ilike(like_pattern(keyword.strip()), escape="\\"))
+    items, total = paginate(db, query.order_by(Order.created_at.desc(), Order.id.desc()), page, page_size)
+    return page_payload(items, total, page, page_size, status_counts=status_counts)
 
 
 @router.get("/admin/order-center/options")

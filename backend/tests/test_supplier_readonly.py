@@ -600,7 +600,7 @@ def test_withdraw_restores_original_stock_and_customer_reads_internal_catalog(su
         "quantity": 1, "billing_days": 30,
     }, headers=auth(supplier_api.customer_token))
     assert order.status_code == 200, order.text
-    customer_order = supplier_api.get("/api/customer/orders", headers=auth(supplier_api.customer_token)).json()[0]
+    customer_order = supplier_api.get("/api/customer/orders", headers=auth(supplier_api.customer_token)).json()["items"][0]
     assert customer_order["product_name"] == supplier_api.product.name
     assert customer_order["unit_price"] == 229
     for response_data in (public, order.json(), customer_order):

@@ -93,9 +93,13 @@ function listParams() {
 
 async function loadRelatedOptions() {
   if (!isCustomer.value) { relatedOptions.value = []; return }
-  const [orderResponse, lineResponse] = await Promise.all([getCustomerOrders(), getCustomerLines()])
+  // 订单接口已改成分页，这里只要最近 50 单做关联选项，不需要翻页控件
+  const [orderResponse, lineResponse] = await Promise.all([
+    getCustomerOrders({ page: 1, page_size: 50 }),
+    getCustomerLines(),
+  ])
   relatedOptions.value = [
-    ...orderResponse.data.map((item) => ({ type: 'order', id: item.id, label: `${item.product_name || '订单'} · ${item.order_no || `#${item.id}`}` })),
+    ...(orderResponse.data.items || []).map((item) => ({ type: 'order', id: item.id, label: `${item.product_name || '订单'} · ${item.order_no || `#${item.id}`}` })),
     ...lineResponse.data.map((item) => ({ type: 'line', id: item.id, label: item.line_name || item.name || `线路 #${item.id}` })),
   ]
 }
