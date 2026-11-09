@@ -90,6 +90,19 @@ CATEGORY_TO_LINE = {
     "live_stream_pc": "live",
 }
 
+# 当前**在售**的分类：官网只对这些分类报价与下单。
+# 其余映射到产品线的分类（本土原生 / 运营商原生 / 机房）是并入住宅线之前的
+# 历史分类，保留映射是为了让旧商品仍能在后台被找到，但它们不再对外售卖——
+# 判断"官网缺不缺价"要看 ACTIVE_CATEGORIES，否则会把一堆历史价则算成缺口。
+ACTIVE_CATEGORIES = frozenset({
+    "static_residential",
+    "social_media",
+    "live_stream_mobile",
+    "live_stream_pc",
+})
+
+LEGACY_CATEGORIES = frozenset(CATEGORY_TO_LINE) - ACTIVE_CATEGORIES
+
 LINE_LABELS = {
     "residential": "静态住宅IP",
     "social": "社媒运营专线",

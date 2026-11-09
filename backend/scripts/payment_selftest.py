@@ -40,7 +40,7 @@ from app.core.config import get_settings
 from app.db import SessionLocal, get_db
 from app.main import app
 from app.models import (
-    Customer, PaymentChannelAcceptance, PaymentChannelConfig, PaymentOrder, User, WalletAccount, WalletTransaction,
+    Customer, PaymentChannelConfig, PaymentOrder, User, WalletAccount, WalletTransaction,
 )
 from app.models.base import Base, utcnow
 from app.services.payment_acceptance_service import (
