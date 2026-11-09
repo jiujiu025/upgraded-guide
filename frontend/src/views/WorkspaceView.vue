@@ -1,6 +1,7 @@
 <script setup>
 import BrandLogo from "../components/BrandLogo.vue";
 import OrderOnBehalfDialog from "../components/OrderOnBehalfDialog.vue";
+import ClientBuyPanel from "../components/ClientBuyPanel.vue";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
   Activity,
@@ -182,7 +183,7 @@ const storedUser = computed(() => {
 const clientNav = [
   ["首页", "/client", Gauge],
   ["账户余额", "/client/wallet", CircleDollarSign],
-  ["购买线路", "/buy", ShoppingCart],
+  ["购买线路", "/client/buy", ShoppingCart],
   ["我的订单", "/client/orders", PackageSearch],
   ["我的线路", "/client/lines", Server],
   ["续费管理", "/client/renewals", RotateCw],
@@ -208,6 +209,7 @@ const nav = computed(() =>
 );
 const titles = {
   dashboard: "客户首页",
+  "client-buy": "购买线路",
   "client-wallet": "账户余额",
   "sales-wallet": "我的钱包",
   "admin-finance": "财务中心",
@@ -1069,7 +1071,7 @@ onMounted(load);
                     查看全部 <ChevronRight :size="15" />
                   </button>
                 </div>
-                <div v-if="!orders.length" class="inline-empty">暂无订单</div>
+                <div v-if="!orders.length" class="inline-empty">暂无订单，<button type="button" class="link-action" @click="router.push('/client/buy')">去购买线路</button></div>
                 <button
                   v-for="order in orders.slice(0, 5)"
                   :key="order.id"
@@ -1452,6 +1454,7 @@ onMounted(load);
               </div>
             </section></template
           >
+          <template v-else-if="page === 'client-buy'"><ClientBuyPanel /></template>
           <template v-else-if="page === 'renewals'"
             ><div class="workspace-alert">
               续费订单不会自动扣款；选择余额或在线支付后到账户余额完成付款，付款成功即延长到期时间，选择“联系经理确认”则由管理员人工完成。

@@ -45,7 +45,7 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.v
 const hasFilters = computed(() => Object.values(filters).some((value) => String(value).trim()))
 
 const nav = computed(() => isCustomer.value
-  ? [['首页', '/client', Gauge], ['账户余额', '/client/wallet', CircleDollarSign], ['购买线路', '/buy', ShoppingCart], ['我的订单', '/client/orders', PackageSearch], ['我的线路', '/client/lines', Server], ['续费管理', '/client/renewals', RotateCw], ['服务收件箱', '/client/inbox', MessageSquare], ['通知中心', '/client/notifications', Inbox], ['账户资料', '/client/profile', Settings], ['安全中心', '/client/security', ShieldCheck]]
+  ? [['首页', '/client', Gauge], ['账户余额', '/client/wallet', CircleDollarSign], ['购买线路', '/client/buy', ShoppingCart], ['我的订单', '/client/orders', PackageSearch], ['我的线路', '/client/lines', Server], ['续费管理', '/client/renewals', RotateCw], ['服务收件箱', '/client/inbox', MessageSquare], ['通知中心', '/client/notifications', Inbox], ['账户资料', '/client/profile', Settings], ['安全中心', '/client/security', ShieldCheck]]
   : isSales.value
     ? [['销售概览', '/sales', Gauge], ['我的钱包', '/sales/wallet', CircleDollarSign], ['我的客户影响', '/sales/health', Activity], ['客户会话', '/sales/inbox', MessageSquare], ['安全中心', '/sales/security', ShieldCheck]]
     : getAdminNavigation(storedUser.value.role))

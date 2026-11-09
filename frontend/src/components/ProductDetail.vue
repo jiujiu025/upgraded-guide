@@ -53,10 +53,15 @@ function goLogin() {
   router.push({ path: '/login', query: { redirect: route.fullPath } })
 }
 
+function buyTarget(productId) {
+  // 已登录客户直接进客户中心内的选购页，不再跳官网，避免"回不去"。
+  return session.user?.role === 'customer' ? `/client/buy?product=${productId}` : `/buy?product=${productId}`
+}
+
 function startOrder() {
   if (!priceVisible.value) { goLogin(); return }
   if (!lowestOffer.value) return
-  router.push(`/buy?product=${lowestOffer.value.product_id}`)
+  router.push(buyTarget(lowestOffer.value.product_id))
 }
 
 function formatPrice(value) {
@@ -158,7 +163,7 @@ watch(() => props.code, load, { immediate: true })
                   <td><b>{{ formatPrice(cell.price) }}</b></td>
                   <td :class="{ muted: !cell.inStock }">{{ cell.inStock ? '可下单' : '暂时无货' }}</td>
                   <td>
-                    <button v-if="cell.inStock" class="table-cta" @click="router.push(`/buy?product=${cell.productId}`)">选购</button>
+                    <button v-if="cell.inStock" class="table-cta" @click="router.push(buyTarget(cell.productId))">选购</button>
                     <span v-else class="muted">—</span>
                   </td>
                 </tr>

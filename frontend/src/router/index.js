@@ -35,6 +35,7 @@ const routes = [
   workspaceRoute('/client/orders/:id', 'client', 'order'),
   workspaceRoute('/client/lines', 'client', 'lines'),
   workspaceRoute('/client/lines/:id', 'client', 'line'),
+  workspaceRoute('/client/buy', 'client', 'client-buy'),
   workspaceRoute('/client/renewals', 'client', 'renewals'),
   workspaceRoute('/client/notifications', 'client', 'notifications'),
   { path: '/client/inbox', component: InboxView, meta: { auth: true, workspace: 'client', page: 'inbox' } },
