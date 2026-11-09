@@ -85,9 +85,9 @@ router.beforeEach(async (to) => {
     try { user = await ensureSession() }
     catch { return { path: loginPath(to.meta.workspace), query: { redirect: to.fullPath } } }
   }
-  if (to.path === '/change-password') return roleWorkspace(user.role) ? `/${roleWorkspace(user.role)}` : '/login'
+  // 改密页是三端共用页面（meta 里不带 workspace），不能按工作区重定向回去。
   const allowedWorkspace = roleWorkspace(user.role)
-  if (to.meta.workspace !== allowedWorkspace) return allowedWorkspace ? `/${allowedWorkspace}` : '/login'
+  if (to.meta.workspace && to.meta.workspace !== allowedWorkspace) return allowedWorkspace ? `/${allowedWorkspace}` : '/login'
   if (to.path.startsWith('/admin/sales-management') && user.role !== 'super_admin') return '/admin'
   return true
 })

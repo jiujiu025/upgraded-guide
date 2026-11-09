@@ -26,6 +26,8 @@ from app.services.payment_gateway import (
     PAYMENT_API_URL, PaymentGatewayError, config_for_update, create_provider_payment,
     decrypt_secret, encrypt_secret, new_payment_order_values, verify_signature,
 )
+from app.services.order_service import is_payable_order, rollback_renewal_extension, settle_renewal
+from app.tasks.notify import notify_admins
 from app.services.wallet_service import (
     accrue_sales_commission, apply_wallet_delta, ensure_wallet, money_to_cents,
     reverse_sales_commission,
@@ -111,6 +113,9 @@ def _require_scoped_order(db: Session, user: User, order_id: int) -> tuple[Order
     return order, customer
 
 
+CLOSED_ORDER_STATUSES = {"cancelled", "refunding", "refunded"}
+
+
 def _record_paid_order(db: Session, payment_order: PaymentOrder, customer: Customer, actor: User | None) -> None:
     if not payment_order.order_id:
         return
@@ -121,8 +126,28 @@ def _record_paid_order(db: Session, payment_order: PaymentOrder, customer: Custo
     if order.source_type == "resource_pool":
         payment_order.status = "manual_review"
         return
-    order.status = "paid"
-    order.payment_status = "paid"
+    if order.status in CLOSED_ORDER_STATUSES:
+        # 迟到回调：订单已被取消或已退款，钱却到了。不能把订单改回已付款（会出现
+        # "取消了又变成已付"），也不能给续费单延线路，一律转人工退款。
+        payment_order.status = "manual_review"
+        notify_admins(
+            db,
+            "已收到付款但订单已关闭",
+            (
+                f"支付单 {payment_order.out_trade_no}（{payment_order.amount_cents / 100:.2f} 元）"
+                f"回调成功，但订单 {order.order_no} 当前状态为 {order.status}。"
+                "订单未推进，请到财务页面核对并退款或人工确认。"
+            ),
+            "finance",
+            marker=f"PAY-CLOSED-ORDER:{payment_order.out_trade_no}",
+        )
+        return
+    if order.order_type == "renewal":
+        # 续费单收款即视为条件已满足：延长线路并结单，不再等管理员二次确认。
+        settle_renewal(db, order, "paid")
+    else:
+        order.status = "paid"
+        order.payment_status = "paid"
     accrue_sales_commission(db, payment_order, customer, actor.id if actor else None)
 
 
@@ -419,7 +444,7 @@ def wallet_home(db: Session = Depends(get_db), user: User = Depends(require_role
         pending_query = select(Order).where(Order.customer_id == customer_id)
     else:
         pending_query = select(Order).where(Order.assigned_sales_id == user.id)
-    pending_orders = db.scalars(pending_query.where(Order.status == "pending_payment", Order.source_type != "resource_pool")
+    pending_orders = db.scalars(pending_query.where(Order.status.in_({"pending_payment", "renewal"}), Order.source_type != "resource_pool")
                                 .order_by(Order.created_at.desc()).limit(100)).all()
     config = db.get(PaymentChannelConfig, 1)
     return {
@@ -436,7 +461,8 @@ def wallet_home(db: Session = Depends(get_db), user: User = Depends(require_role
         "payments": [_payment_order_view(item) for item in payments],
         "pending_orders": [{"id": item.id, "order_no": item.order_no, "product_name": item.product_name,
                             "total_cents": money_to_cents(item.total_amount), "created_at": item.created_at,
-                            "can_pay_online": item.payment_method == "online"} for item in pending_orders],
+                            "order_type": item.order_type,
+                            "can_pay_online": item.payment_method == "online" or item.order_type == "renewal"} for item in pending_orders],
     }
 
 
@@ -484,7 +510,7 @@ def pay_order_with_balance(order_id: int, payload: IdempotencyIn, db: Session = 
     ))
     if online_pending:
         raise HTTPException(status_code=409, detail="订单已有在线支付请求待确认，请先核对支付状态")
-    if order.status != "pending_payment":
+    if not is_payable_order(order):
         raise HTTPException(status_code=409, detail="订单当前状态不能进行余额支付")
     amount_cents = money_to_cents(order.total_amount)
     payment = PaymentOrder(**new_payment_order_values(user.id, "order_payment", amount_cents, "balance", order.id, customer.sales_id))
@@ -496,12 +522,16 @@ def pay_order_with_balance(order_id: int, payload: IdempotencyIn, db: Session = 
         db.flush()
         apply_wallet_delta(db, user.id, -amount_cents, "order_payment", f"balance-order:{order.id}",
                            user.id, payment.id, order.id, f"订单 {order.order_no} 余额支付")
-        order.status = "paid"
-        order.payment_status = "paid"
-        accrue_sales_commission(db, payment, customer, user)
-        write_audit(db, user, "wallet_order_payment", "order", order.id, f"金额分={amount_cents}; 佣金比例=15%")
+        if order.order_type == "renewal":
+            settle_renewal(db, order, "paid")
+        else:
+            order.status = "paid"
+            order.payment_status = "paid"
+        accrue_sales_commission(db, payment, customer, user.id)
+        write_audit(db, user, "wallet_order_payment", "order", order.id,
+                    f"金额分={amount_cents}; 类型={order.order_type}; 佣金比例=15%")
         db.commit()
-        return {"status": "paid", "order_id": order.id, "amount_cents": amount_cents}
+        return {"status": order.status, "order_id": order.id, "amount_cents": amount_cents}
     except IntegrityError:
         db.rollback()
         prior = db.scalar(select(PaymentOrder).where(PaymentOrder.order_id == order.id, PaymentOrder.status == "paid"))
@@ -521,7 +551,7 @@ def pay_order_online(order_id: int, payload: OnlinePaymentIn, db: Session = Depe
     order, customer = _require_scoped_order(db, user, order_id)
     if order.source_type == "resource_pool":
         raise HTTPException(status_code=409, detail="资源池订单支付功能尚未启用")
-    if order.status != "pending_payment":
+    if not is_payable_order(order):
         raise HTTPException(status_code=409, detail="订单当前状态不能进行在线支付")
     existing = db.scalar(select(PaymentOrder).where(
         PaymentOrder.order_id == order.id, PaymentOrder.status.in_({"pending", "manual_review"}),
@@ -601,7 +631,7 @@ async def suisui_payment_notify(request: Request, response: Response, db: Sessio
                            f"payment:{item.idempotency_key}", None, item.id, remark="在线充值到账")
     elif item.purpose == "order_payment":
         customer = db.get(Customer, order.customer_id) if order else None
-        if not customer or order.status != "pending_payment" or order.source_type == "resource_pool":
+        if not customer or not is_payable_order(order) or order.source_type == "resource_pool":
             item.status = "manual_review"
         else:
             _record_paid_order(db, item, customer, None)
@@ -616,7 +646,7 @@ def record_offline_order_payment(order_id: int, payload: OfflineOrderPaymentIn, 
     order = db.scalar(select(Order).where(Order.id == order_id).with_for_update())
     if not order or order.source_type == "resource_pool":
         raise HTTPException(status_code=404, detail="订单不存在或来源不支持线下收款登记")
-    if order.status != "pending_payment":
+    if not is_payable_order(order):
         raise HTTPException(status_code=409, detail="订单当前状态不能登记收款")
     customer = db.get(Customer, order.customer_id)
     if not customer or not customer.user_id:
@@ -629,8 +659,11 @@ def record_offline_order_payment(order_id: int, payload: OfflineOrderPaymentIn, 
     db.add(item)
     try:
         db.flush()
-        order.status = "paid"
-        order.payment_status = "manually_confirmed"
+        if order.order_type == "renewal":
+            settle_renewal(db, order, "manually_confirmed")
+        else:
+            order.status = "paid"
+            order.payment_status = "manually_confirmed"
         accrue_sales_commission(db, item, customer, actor.id)
         write_audit(db, actor, "offline_order_payment", "order", order.id,
                     f"线下收款金额分={amount}; 凭证={payload.external_reference}; 备注={payload.remark}")
@@ -674,9 +707,13 @@ def record_completed_refund(order_id: int, payload: RefundIn, db: Session = Depe
         payment.status = "refunded"
         order.status = "refunded"
         order.payment_status = "refunded"
+        rollback_note = ""
+        if order.order_type == "renewal":
+            line = rollback_renewal_extension(db, order)
+            rollback_note = f"; 已回退线路天数={order.billing_days}" if line else "; 线路存在后续续费记录，天数需人工核对"
         reverse_sales_commission(db, payment, actor.id, f"订单退款冲销佣金：{payload.reason}")
         write_audit(db, actor, "order_refund_completed", "order", order.id,
-                    f"退款金额分={payment.amount_cents}; 渠道={payment.channel}; 外部凭证={payload.external_reference or '余额退回'}; 原因={payload.reason}")
+                    f"退款金额分={payment.amount_cents}; 渠道={payment.channel}; 外部凭证={payload.external_reference or '余额退回'}; 原因={payload.reason}{rollback_note}")
         db.commit()
         return {"status": "refunded", "order_id": order.id, "amount_cents": payment.amount_cents}
     except Exception:

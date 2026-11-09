@@ -28,6 +28,11 @@ def _line_expiry_reminders(db: Session, now: datetime) -> dict:
     return lines.line_expiry_reminders(db, now=now, reminder_days=settings.line_reminder_day_list)
 
 
+def _expire_lines(db: Session, now: datetime) -> dict:
+    settings = get_settings()
+    return lines.expire_lines(db, now=now, grace_hours=settings.line_expiry_grace_hours)
+
+
 def _payment_reconcile(db: Session, now: datetime) -> dict:
     settings = get_settings()
     return payments.reconcile_payments(db, now=now, grace_minutes=settings.payment_reconcile_grace_minutes)
@@ -63,6 +68,9 @@ SPECS = (
     # 每天一次：账的变化以天为单位，跑太勤除了多写流水没有收益。
     TaskSpec("wallet_audit", "钱包账本巡检", 1440, _wallet_audit),
     TaskSpec("close_expired_orders", "关闭超时未支付订单", 30, _close_expired_orders),
+    # 到期标记必须排在提醒之前：同一轮里先把已到期的线路落成 expired，再算即将到期，
+    # 避免刚过期的线路被"提醒"了一遍却没从正常列表里消失。
+    TaskSpec("expire_lines", "线路到期标记", 60, _expire_lines),
     TaskSpec("line_expiry_reminders", "线路到期提醒", 360, _line_expiry_reminders),
     TaskSpec("supplier_catalog_refresh", "供应商目录刷新", 360, _supplier_catalog_refresh),
     TaskSpec("supplier_quotes_refresh", "供应商报价刷新", 360, _supplier_quotes_refresh),

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"
     login_rate_limit: int = 10
+    # 登录限流的 IP 总量上限：与 login_rate_limit（IP+用户名粒度）配合，
+    # 见 registration_service.enforce_login_rate_limit 的说明。
+    login_ip_rate_limit: int = 30
     registration_rate_limit: int = 5
     rate_limit_window_seconds: int = 60
     global_proxy_api_key: SecretStr | None = None
@@ -50,6 +53,9 @@ class Settings(BaseSettings):
     task_lock_ttl_seconds: int = 900
     order_payment_timeout_minutes: int = 1440
     line_reminder_days: str = "7,3,1"
+    # 到期后仍按 "active" 记账的宽限小时数：上游节点真正断线和本地账面之间常有时间差，
+    # 这里留出缓冲，避免账面先标到期、客户其实还能用。默认 0 表示到期即置 expired。
+    line_expiry_grace_hours: int = 0
     payment_reconcile_grace_minutes: int = 5
     # 只通过"本地模拟闭环"验收时，线上单笔金额被压到这个上限，避免没跑过真实
     # 回调就先放开大额收款；跑通一笔真实支付并登记 live 验收后自动解除。
@@ -61,6 +67,8 @@ class Settings(BaseSettings):
         self._parse_trusted_proxy_networks()
         if self.login_rate_limit < 1 or self.registration_rate_limit < 1 or self.rate_limit_window_seconds < 1:
             raise ValueError("限流次数和时间窗口必须为正整数")
+        if self.login_ip_rate_limit < self.login_rate_limit:
+            raise ValueError("登录 IP 总量上限不得小于单账号登录限流次数")
         if self.jwt_expire_minutes != 10 or self.refresh_session_days != 7:
             raise ValueError("访问令牌与刷新会话有效期必须分别为 10 分钟和 7 天")
         if self.supplier_http_timeout_seconds <= 0:
@@ -92,6 +100,8 @@ class Settings(BaseSettings):
         if not 1 <= self.db_connect_timeout_seconds <= 60:
             raise ValueError("数据库连接超时必须在 1 到 60 秒之间")
         self._parse_line_reminder_days()
+        if not 0 <= self.line_expiry_grace_hours <= 720:
+            raise ValueError("线路到期宽限小时数必须在 0 到 720 之间")
         if self.global_proxy_base_url.rstrip("/") != "https://admin.quanqiudaili.com":
             raise ValueError("全球代理 API 地址必须使用官方 HTTPS 地址")
         if self.environment != "production":

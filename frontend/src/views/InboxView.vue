@@ -20,6 +20,8 @@ const salesOptions = ref([])
 const activeId = ref('')
 const detail = ref(null)
 const messages = ref([])
+// 会话消息总数：超过一屏（100 条）时提示"更早的消息未显示"，避免用户以为对方没回。
+const messageTotal = ref(0)
 const detailLoading = ref(false)
 const detailError = ref('')
 const mobileThread = ref(false)
@@ -119,7 +121,7 @@ async function loadThreads({ keepSelection = false } = {}) {
     const selected = keepSelection && conversations.value.some((item) => item.id === activeId.value) ? activeId.value : conversations.value[0]?.id
     activeId.value = selected || ''
     if (activeId.value) await loadThread(activeId.value)
-    else { detail.value = null; messages.value = [] }
+    else { detail.value = null; messages.value = []; messageTotal.value = 0 }
   } catch (requestError) {
     conversations.value = []
     total.value = 0
@@ -147,12 +149,16 @@ async function loadThread(id) {
   try {
     const [threadResponse, messageResponse, salesResponse] = await Promise.all([
       getInboxThread(id),
-      getInboxMessages(id, { page: 1, page_size: 100 }),
+      // 取最新 100 条后再翻回时间正序：否则长会话只会显示最早的 100 条，
+      // 客户看到的是几个月前的对话，以为对方没回复。
+      getInboxMessages(id, { page: 1, page_size: 100, order: "desc" }),
       workspace.value === 'admin' ? getInboxSalesOptions(id) : Promise.resolve({ data: [] }),
     ])
     if (activeId.value !== id) return
     detail.value = mapThread(threadResponse.data)
-    messages.value = messageResponse.data.items.map(mapMessage)
+    const loaded = messageResponse.data.items.map(mapMessage)
+    messageTotal.value = messageResponse.data.total ?? loaded.length
+    messages.value = loaded.slice().reverse()
     salesOptions.value = salesResponse.data
     ownerDraft.value = detail.value.assignedSalesId == null ? '' : String(detail.value.assignedSalesId)
     const unread = isCustomer.value ? detail.value.unreadCustomer : detail.value.unreadStaff
@@ -183,6 +189,7 @@ function openConversation(item) {
   mobileThread.value = true
   detail.value = null
   messages.value = []
+  messageTotal.value = 0
   salesOptions.value = []
   loadThread(item.id)
 }
@@ -360,6 +367,9 @@ onMounted(load)
               <span><small>客户</small>{{ active.customer }}</span><span><small>负责人</small>{{ active.owner }}</span><span><small>关联对象</small>{{ active.relatedLabel }}</span><span><small>最后消息</small>{{ dateTime(active.lastMessageAt) }}</span>
             </div>
             <div class="message-stream">
+              <div v-if="!detailLoading && messageTotal > messages.length" class="thread-detail-state">
+                更早的 {{ messageTotal - messages.length }} 条消息未显示，仅展示最近 {{ messages.length }} 条
+              </div>
               <div v-if="detailLoading" class="thread-detail-state">正在加载消息…</div>
               <div v-else-if="detailError" class="thread-detail-state error-state"><span>{{ detailError }}</span><button class="outline-action" @click="loadThread(activeId)"><RefreshCw :size="14" />重试</button></div>
               <div v-else-if="!messages.length" class="thread-detail-state">暂无消息</div>

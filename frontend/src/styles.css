@@ -20,3 +20,6 @@
 .brand-logo{display:block;width:118px;height:auto;object-fit:contain}.site-header .brand{min-width:118px;padding:4px 0}.boot-logo{width:190px}.drawer-head .brand-logo{width:126px}.footer-brand .brand-logo{width:148px}.auth-brand-logo{width:210px;max-width:62%;margin:0 0 22px}.workspace-brand .brand-logo{width:105px}.workspace-brand button{flex:0 0 auto}
 @media(max-width:1180px) and (min-width:769px){.site-header .brand{min-width:96px}.site-header .brand-logo{width:96px}.desktop-nav{gap:11px;margin-right:14px}.header-actions{gap:12px}}
 @media(max-width:768px){.site-header .brand{min-width:106px}.site-header .brand-logo{width:106px}.boot-logo{width:160px}.footer-brand .brand-logo{width:132px}.auth-brand-logo{width:180px;max-width:70%;margin-bottom:18px}}
+
+.renewal-hint{flex:1 0 100%;margin:2px 0 0;color:#6f817c;font-size:11px;line-height:1.65}
+.wallet-pending-note{margin:8px 0 0;color:#6f817c;font-size:11px}

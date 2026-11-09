@@ -51,6 +51,9 @@ class RegisterIn(BaseModel):
         checks = (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]")
         if not all(re.search(pattern, value) for pattern in checks):
             raise ValueError("密码必须包含大小写字母、数字和特殊字符")
+        # bcrypt 静默截断 72 字节：超长密码实际只生效前 72 字节，必须显式拒绝。
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("密码 UTF-8 长度不能超过 72 字节")
         return value
 
     @field_validator("name", "email", "phone")
@@ -306,11 +309,19 @@ class LineOut(LineIn):
     status: str
 
 
+class LinePeriodOut(BaseModel):
+    billing_days: int
+    unit_price: float
+
+
 class CustomerLineOut(BaseModel):
     id: int
     region: str
     ip: str | None
+    product_id: int
     product_type: str
+    billing_days: int
+    periods: list[LinePeriodOut] = []
     line_name: str
     status: str
     started_at: datetime

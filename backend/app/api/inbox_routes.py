@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select, update
@@ -204,15 +205,25 @@ def list_messages(
     thread_id: int,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=100),
+    order: Literal["asc", "desc"] = Query(default="asc"),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
+    """会话消息分页。
+
+    ``order=desc`` 时第一页就是**最新**的 N 条，客户端据此倒序展示，避免长会话
+    只看到最早的 100 条、以为对方没回。默认 ``asc`` 保持旧客户端行为不变。
+    """
     get_scoped_thread(db, user, thread_id)
     total = db.scalar(select(func.count()).select_from(InboxMessage).where(InboxMessage.thread_id == thread_id)) or 0
+    if order == "desc":
+        ordering = (InboxMessage.created_at.desc(), InboxMessage.id.desc())
+    else:
+        ordering = (InboxMessage.created_at, InboxMessage.id)
     messages = db.scalars(
         select(InboxMessage)
         .where(InboxMessage.thread_id == thread_id)
-        .order_by(InboxMessage.created_at, InboxMessage.id)
+        .order_by(*ordering)
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()

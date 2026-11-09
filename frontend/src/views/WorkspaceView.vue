@@ -118,6 +118,24 @@ const renewDraft = reactive({
   billing_days: 30,
   payment_method: "contact_manager",
 });
+// 续费档位由后端按商品实际可售周期返回，避免 90 天线路只能选 30/180/360。
+const renewLine = computed(
+  () => lines.value.find((item) => item.id === renewDraft.lineId) || null,
+);
+const renewPeriods = computed(() => {
+  const periods = renewLine.value?.periods || [];
+  if (periods.length) return periods;
+  return [{ billing_days: renewLine.value?.billing_days || 30, unit_price: null }];
+});
+const renewUnitPrice = computed(() => {
+  const period = renewPeriods.value.find(
+    (item) => Number(item.billing_days) === Number(renewDraft.billing_days),
+  );
+  return period?.unit_price ?? null;
+});
+const walletPath = computed(() =>
+  workspace.value === "sales" ? "/sales/wallet" : "/client/wallet",
+);
 const deliveryOrderId = ref(null);
 const customerOrderCancellation = ref(null);
 const orderActionConfirmation = ref(null);
@@ -267,6 +285,16 @@ const dateTime = (value) =>
   value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
 function daysLeft(value) {
   return Math.ceil((new Date(value).getTime() - Date.now()) / 86400000);
+}
+// 订单出参里没有支付单明细，只能用"未付款 + 走在线/余额通道"做近似判断：
+// 这类订单可能已经在支付通道里，取消会被后端拒绝并提示先确认支付结果。
+function paymentMayBeInFlight(order) {
+  return (
+    Boolean(order) &&
+    order.status === "pending_payment" &&
+    order.payment_status === "unpaid" &&
+    ["online", "balance"].includes(order.payment_method)
+  );
 }
 function showSuccess(message) {
   success.value = message;
@@ -608,9 +636,16 @@ async function submitAdminOrderAction() {
 }
 const canCompleteRenewal = (order) =>
   order.order_type === "renewal" &&
-  order.status === "renewal" &&
+  ["renewal", "pending_payment"].includes(order.status) &&
   Boolean(order.renewal_line_id) &&
   !order.renewal_completed_at;
+
+const detailPayable = computed(
+  () =>
+    workspace.value !== "admin" &&
+    Boolean(detail.value) &&
+    ["pending_payment", "renewal"].includes(detail.value.status),
+);
 
 function openRenewalConfirmation(order) {
   if (!canCompleteRenewal(order) || workspace.value !== "admin") return;
@@ -666,7 +701,10 @@ async function saveNote(line) {
 }
 function beginRenew(line) {
   renewDraft.lineId = line.id;
-  renewDraft.billing_days = 30;
+  const periods = line.periods?.length ? line.periods : [];
+  renewDraft.billing_days = periods.length
+    ? Number(periods[0].billing_days)
+    : line.billing_days || 30;
   renewDraft.payment_method = "contact_manager";
 }
 async function submitRenew() {
@@ -677,23 +715,28 @@ async function submitRenew() {
     line,
     billing_days: Number(renewDraft.billing_days),
     payment_method: renewDraft.payment_method,
+    unit_price: renewUnitPrice.value,
   };
 }
 
 async function confirmCustomerRenewal() {
   const pending = customerRenewalConfirmation.value;
   if (!pending || busy.value) return;
+  const needsPayment = pending.payment_method !== "contact_manager";
   const succeeded = await runAction(
     () =>
       renewCustomerLine(pending.line.id, {
         billing_days: pending.billing_days,
         payment_method: pending.payment_method,
       }),
-    "续费订单已创建，线路和续费数据已刷新",
+    needsPayment
+      ? "续费订单已创建，正在前往账户余额完成支付"
+      : "续费订单已创建，等待管理员确认完成",
   );
   if (succeeded) {
     customerRenewalConfirmation.value = null;
     renewDraft.lineId = null;
+    if (needsPayment) router.push(walletPath.value);
   }
 }
 async function readNotification(item) {
@@ -1096,9 +1139,11 @@ onMounted(load);
                 </div>
               </dl>
               <div class="demo-alert">
-                <CircleDollarSign
-                  :size="18"
-                />支付尚未接通，订单状态以后端记录为准。
+                <CircleDollarSign :size="18" />
+                <template v-if="detailPayable"
+                  >该订单待支付，可在账户余额页用余额或在线支付完成付款。</template
+                >
+                <template v-else>订单状态以后端记录为准。</template>
               </div>
               <div class="detail-actions">
                 <button
@@ -1107,6 +1152,13 @@ onMounted(load);
                 >
                   <ChevronRight class="back-icon" :size="15" />返回订单</button
                 ><button
+                  v-if="detailPayable"
+                  class="outline-action"
+                  @click="router.push(walletPath)"
+                >
+                  去支付
+                </button>
+                <button
                   v-if="
                     ['pending_payment', 'pending_confirm', 'renewal'].includes(
                       detail.status,
@@ -1290,7 +1342,7 @@ onMounted(load);
           >
           <template v-else-if="page === 'renewals'"
             ><div class="workspace-alert">
-              续费当前只创建待处理订单，不会自动扣款，也不会立即修改原线路到期时间。
+              续费订单不会自动扣款；选择余额或在线支付后到账户余额完成付款，付款成功即延长到期时间，选择“联系经理确认”则由管理员人工完成。
             </div>
             <section class="workspace-panel">
               <div class="panel-head"><h2>可续费线路</h2></div>
@@ -1319,17 +1371,29 @@ onMounted(load);
               <h2>创建续费订单</h2>
               <label
                 >续费周期<select v-model="renewDraft.billing_days">
-                  <option :value="30">30 天</option>
-                  <option :value="180">180 天</option>
-                  <option :value="360">360 天</option>
+                  <option
+                    v-for="item in renewPeriods"
+                    :key="item.billing_days"
+                    :value="item.billing_days"
+                  >
+                    {{ item.billing_days }} 天{{
+                      item.unit_price != null ? ` · ${money(item.unit_price)}` : ""
+                    }}
+                  </option>
                 </select></label
               ><label
                 >支付方式<select v-model="renewDraft.payment_method">
-                  <option value="contact_manager">联系经理确认</option>
-                  <option value="balance">余额支付（尚未扣款）</option>
-                  <option value="online">在线支付（尚未接通）</option>
+                  <option value="contact_manager">联系经理确认（人工完成）</option>
+                  <option value="balance">余额支付</option>
+                  <option value="online">在线支付</option>
                 </select></label
               >
+              <p class="renewal-hint">
+                余额或在线支付会在账户余额页完成付款，付款成功后线路到期时间自动延长；选择“联系经理确认”则由管理员人工完成。
+                <template v-if="renewUnitPrice != null"
+                  >本档单价 {{ money(renewUnitPrice) }}。</template
+                >
+              </p>
               <div>
                 <button
                   class="button button-small"
@@ -1404,6 +1468,15 @@ onMounted(load);
             </section></template
           >
           <template v-else-if="page === 'security-center'">
+            <section class="workspace-panel security-panel">
+              <div class="panel-head">
+                <div><h2>登录密码</h2><p>建议定期更换；修改后所有设备都需要重新登录。</p></div>
+                <button class="outline-action" type="button" @click="router.push('/change-password')">
+                  修改密码
+                </button>
+              </div>
+              <p class="security-warning">新密码需要至少 10 位，并同时包含大写、小写、数字和符号。</p>
+            </section>
             <section class="workspace-panel security-panel">
               <div class="panel-head">
                 <div><h2>账号密保</h2><p>{{ securityQuestions.configured ? "已设置两项密保问题" : "尚未设置密保问题" }}</p></div>
@@ -1487,11 +1560,11 @@ onMounted(load);
                 ><strong>{{ dashboard.unread_notifications }}</strong>
               </article>
               <article>
-                <span>本月销售额</span
+                <span>本月回款</span
                 ><strong>{{ money(dashboard.monthly_sales) }}</strong>
               </article>
               <article>
-                <span>本月续费金额</span
+                <span>本月续费回款</span
                 ><strong>{{ money(dashboard.monthly_renewals) }}</strong>
               </article>
             </section>
@@ -1994,7 +2067,12 @@ onMounted(load);
           </div>
         </dl>
         <div class="renewal-confirm-warning">
-          当前支付功能尚未接通。确认后只会取消这张待处理订单，不会产生退款。
+          <template v-if="paymentMayBeInFlight(customerOrderCancellation)">
+            该订单可能已在支付通道处理中。若刚完成付款，取消失败属正常，请先到钱包页确认支付结果。
+          </template>
+          <template v-else>
+            确认后订单将终止处理；已到账的款项不会自动退回，需联系管理员走退款。
+          </template>
         </div>
         <p v-if="error" class="renewal-confirm-error" role="alert">
           {{ error }}
@@ -2033,7 +2111,7 @@ onMounted(load);
         <header>
           <div>
             <h2 id="customer-renewal-confirm-title">确认创建续费订单</h2>
-            <p>本步骤只提交续费申请，不会自动扣款或立即延长线路。</p>
+            <p>本步骤只创建续费订单；未完成付款或人工确认前不会扣款，也不会延长线路。</p>
           </div>
           <button
             type="button"
@@ -2063,9 +2141,17 @@ onMounted(load);
               {{ paymentText[customerRenewalConfirmation.payment_method] }}
             </dd>
           </div>
+          <div v-if="customerRenewalConfirmation.unit_price != null">
+            <dt>应付金额</dt>
+            <dd>{{ money(customerRenewalConfirmation.unit_price) }}</dd>
+          </div>
         </dl>
         <div class="renewal-confirm-warning">
-          管理员人工完成续费前，线路到期时间保持不变；余额和在线支付尚未接通。
+          {{
+            customerRenewalConfirmation.payment_method === "contact_manager"
+              ? "提交后由管理员人工确认完成，确认前线路到期时间保持不变。"
+              : "创建后需在账户余额页完成付款，付款成功后线路到期时间自动延长。"
+          }}
         </div>
         <p v-if="error" class="renewal-confirm-error" role="alert">
           {{ error }}
@@ -2149,7 +2235,7 @@ onMounted(load);
           {{
             orderActionConfirmation.action === "confirm"
               ? "此操作只确认订单并进入交付环节，不代表客户已完成在线支付。"
-              : "取消操作会改变订单状态且无法通过当前页面恢复，请再次核对订单与客户。"
+              : "取消操作会改变订单状态且无法通过当前页面恢复；已收款、支付中的订单会被系统拒绝，请走退款或等支付结果。"
           }}
         </div>
         <p v-if="error" class="renewal-confirm-error" role="alert">

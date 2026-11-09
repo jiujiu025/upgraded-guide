@@ -11,9 +11,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_user, require_roles
 from app.core.security import create_access_token, hash_password, verify_password
 from app.core.client_ip import get_client_ip
+from app.core.timeutil import local_date_of, local_day_range_utc
 from app.db import get_db
 from app.models import (
-    AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
+    AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, PaymentOrder, PaymentRefund, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
     SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
 )
 from app.schemas.common import (
@@ -30,7 +31,8 @@ from app.services.customer_view import balance_cents_of, customer_view, customer
 from app.services.health_service import check_node
 from app.services.order_service import (
     TERMINAL_ORDER_STATUSES, add_notification, calculate_order_price, claim_delivery_slot,
-    ensure_sales_user, initial_order_status, notify_order_parties,
+    ensure_order_cancellable, ensure_payment_settled, ensure_sales_user, initial_order_status,
+    notify_order_parties, settle_renewal,
 )
 from app.services.pricing_service import (
     SELLABLE_PERIODS, PricingError, monthly_price_for, periods_of, unit_price_for,
@@ -86,6 +88,18 @@ class AdminResourceOrderIn(BaseModel):
 def _strong_password(value: str) -> bool:
     import re
     return all(re.search(pattern, value) for pattern in (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]"))
+
+
+def _password_byte_length_error(value: str) -> str | None:
+    """bcrypt 静默截断 72 字节之后的输入：100 位密码用前 72 位就能登录。
+
+    与字符数校验分开报错，用户才知道是"太长"而不是"不够复杂"。
+    中文等 UTF-8 多字节密码尤其容易踩：24 个汉字就超 72 字节。
+    """
+    byte_length = len(value.encode("utf-8"))
+    if byte_length > 72:
+        return f"密码 UTF-8 长度不能超过 72 字节（当前 {byte_length} 字节）"
+    return None
 
 
 def _normalize_security_answer(value: str) -> str:
@@ -169,7 +183,11 @@ def customer_line_payload(db: Session, line: CustomerLine) -> dict:
         "id": line.id,
         "region": region.name if region else "未知地区",
         "ip": line.static_ip,
+        "product_id": line.product_id,
         "product_type": product.product_type if product else "未知产品",
+        "billing_days": product.billing_days if product else 0,
+        # 续费表单按这里给出的档位渲染，避免前端写死 30/180/360 导致 90 天线路无法续费。
+        "periods": periods_of(db, product) if product else [],
         "line_name": node.name if node else "线路数据待接入",
         "status": line.status,
         "started_at": line.started_at,
@@ -231,8 +249,9 @@ def login(
     response: Response,
     request: Request,
     db: Session = Depends(get_db),
-    _: None = Depends(enforce_login_rate_limit),
 ):
+    # 限流要按用户名分桶，必须在拿到 payload 之后做，不能挂在依赖里。
+    enforce_login_rate_limit(request, payload.username)
     if request.headers.get("origin") and request.headers["origin"] != get_settings().frontend_origin:
         raise HTTPException(status_code=403, detail="请求来源无效")
     user = db.scalar(select(User).where(User.username == payload.username))
@@ -313,6 +332,9 @@ def change_password(payload: ChangePasswordIn, response: Response, db: Session =
                     user: User = Depends(current_user)):
     if not _strong_password(payload.new_password):
         raise HTTPException(status_code=422, detail="新密码必须包含大小写字母、数字和特殊字符")
+    length_error = _password_byte_length_error(payload.new_password)
+    if length_error:
+        raise HTTPException(status_code=422, detail=length_error)
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(status_code=401, detail="当前密码错误")
     user.password_hash = hash_password(payload.new_password)
@@ -730,6 +752,7 @@ def customer_cancel_order(order_id: int, db: Session = Depends(get_db), user: Us
         raise HTTPException(status_code=404, detail="订单不存在或无权访问")
     if order.status not in {"pending_payment", "pending_confirm", "renewal"}:
         raise HTTPException(status_code=409, detail="当前订单状态不允许取消")
+    ensure_order_cancellable(db, order)
     try:
         order.status = "cancelled"
         order.cancelled_at = utcnow()
@@ -826,21 +849,57 @@ def customer_renew_line(line_id: int, payload: RenewalIn, db: Session = Depends(
         raise
 
 
+def received_revenue_cents(db: Session, customer_ids, order_type: str, start_utc: datetime, end_utc: datetime) -> int:
+    """区间内某类订单的实际回款（分）：已收款减去同期已完成的退款。
+
+    口径与财务概览一致——按 ``paid_at`` 落在区间内的收款统计，退款按退款发生时间冲减，
+    因此退款不会追溯改写上个月的业绩。含续费单。
+    """
+    paid = db.scalar(
+        select(func.coalesce(func.sum(PaymentOrder.amount_cents), 0))
+        .join(Order, Order.id == PaymentOrder.order_id)
+        .where(
+            Order.customer_id.in_(customer_ids),
+            Order.order_type == order_type,
+            PaymentOrder.purpose == "order_payment",
+            PaymentOrder.status.in_({"paid", "refunded"}),
+            PaymentOrder.paid_at.is_not(None),
+            PaymentOrder.paid_at >= start_utc,
+            PaymentOrder.paid_at < end_utc,
+        )
+    ) or 0
+    refunded = db.scalar(
+        select(func.coalesce(func.sum(PaymentRefund.amount_cents), 0))
+        .join(PaymentOrder, PaymentOrder.id == PaymentRefund.payment_order_id)
+        .join(Order, Order.id == PaymentOrder.order_id)
+        .where(
+            Order.customer_id.in_(customer_ids),
+            Order.order_type == order_type,
+            PaymentRefund.status == "completed",
+            PaymentRefund.created_at >= start_utc,
+            PaymentRefund.created_at < end_utc,
+        )
+    ) or 0
+    return int(paid) - int(refunded)
+
+
 # 销售接口：始终限定到当前销售负责的客户。
 @router.get("/sales/dashboard")
 def sales_dashboard(db: Session = Depends(get_db), user: User = Depends(require_roles("sales"))):
     customer_ids = scoped_customer_ids(db, user)
     now = utcnow()
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # 业绩按下单转成按回款：区间取上海时区的「本月 1 日 00:00 至今」，与财务口径一致。
+    today_local = local_date_of(now)
+    start_utc, end_utc = local_day_range_utc(today_local.replace(day=1), today_local)
     return {
         "customers": db.scalar(select(func.count()).select_from(Customer).where(Customer.id.in_(customer_ids))) or 0,
         "active_lines": db.scalar(select(func.count()).select_from(CustomerLine).where(CustomerLine.customer_id.in_(customer_ids), CustomerLine.status == "active")) or 0,
-        "expiring_in_7_days": db.scalar(select(func.count()).select_from(CustomerLine).where(CustomerLine.customer_id.in_(customer_ids), CustomerLine.expires_at >= now, CustomerLine.expires_at <= now + timedelta(days=7))) or 0,
+        "expiring_in_7_days": db.scalar(select(func.count()).select_from(CustomerLine).where(CustomerLine.customer_id.in_(customer_ids), CustomerLine.status == "active", CustomerLine.expires_at >= now, CustomerLine.expires_at <= now + timedelta(days=7))) or 0,
         "pending_confirm_orders": db.scalar(select(func.count()).select_from(Order).where(Order.customer_id.in_(customer_ids), Order.status == "pending_confirm")) or 0,
         "pending_delivery_orders": db.scalar(select(func.count()).select_from(Order).where(Order.customer_id.in_(customer_ids), Order.status.in_({"pending_delivery", "partially_delivered"}))) or 0,
         "unread_notifications": db.scalar(select(func.count()).select_from(Notification).where(Notification.user_id == user.id, Notification.is_read.is_(False))) or 0,
-        "monthly_sales": db.scalar(select(func.coalesce(func.sum(Order.total_amount), 0)).where(Order.customer_id.in_(customer_ids), Order.created_at >= month_start, Order.order_type == "purchase", Order.status.not_in({"cancelled", "refunding", "refunded"}))) or 0,
-        "monthly_renewals": db.scalar(select(func.coalesce(func.sum(Order.total_amount), 0)).where(Order.customer_id.in_(customer_ids), Order.created_at >= month_start, Order.order_type == "renewal", Order.status.not_in({"cancelled", "refunding", "refunded"}))) or 0,
+        "monthly_sales": received_revenue_cents(db, customer_ids, "purchase", start_utc, end_utc) / 100,
+        "monthly_renewals": received_revenue_cents(db, customer_ids, "renewal", start_utc, end_utc) / 100,
     }
 
 
@@ -1085,6 +1144,12 @@ def admin_create_resource_order(
         unit_price = unit_price_for(monthly_price_for(db, payload.resource_category, supplier_region.country_code), billing_days)
     except PricingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # 审计里要写清售价取自哪一版价目表；月价只认 30 天档，长周期价是派生的。
+    retail_rule = db.scalar(select(RetailPriceRule).where(
+        RetailPriceRule.resource_category == payload.resource_category,
+        RetailPriceRule.country_code == supplier_region.country_code.strip().upper(),
+        RetailPriceRule.billing_days == 30,
+    ))
     total = (unit_price * payload.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     cost_total = (Decimal(str(quote.unit_cost)) * payload.quantity).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     order = Order(
@@ -1105,7 +1170,7 @@ def admin_create_resource_order(
         db.flush()
         notify_order_parties(db, customer, order, "资源池订单已创建", f"订单 {order.order_no} 已创建，当前待付款和人工采购审核；系统不会自动下单或开通线路。", "order")
         write_audit(db, user, "create", "order", order.id,
-                    f"来源=resource_pool; 分类={payload.resource_category}; 国家={supplier_region.country_code}; 周期={billing_days}; 数量={payload.quantity}; 售价来源={retail_rule.source_version}; 售价={total}; 成本快照={cost_total}")
+                    f"来源=resource_pool; 分类={payload.resource_category}; 国家={supplier_region.country_code}; 周期={billing_days}; 数量={payload.quantity}; 售价来源={retail_rule.source_version if retail_rule else '零售价目表'}; 售价={total}; 成本快照={cost_total}")
         db.commit()
         db.refresh(order)
         return {**{column.name: getattr(order, column.name) for column in Order.__table__.columns},
@@ -1134,6 +1199,7 @@ def admin_confirm_order(order_id: int, db: Session = Depends(get_db), user: User
         raise HTTPException(status_code=409, detail="仅普通购买订单可以确认交付")
     if order.status not in {"pending_confirm", "pending_payment", "paid", "processing"}:
         raise HTTPException(status_code=409, detail="订单状态不允许确认")
+    ensure_payment_settled(order)
     customer = db.scalar(select(Customer).where(Customer.id == order.customer_id, Customer.is_deleted.is_(False)))
     product = db.scalar(select(Product).where(Product.id == order.product_id, Product.is_active.is_(True)))
     if not customer or not customer.user_id:
@@ -1146,7 +1212,7 @@ def admin_confirm_order(order_id: int, db: Session = Depends(get_db), user: User
             order.region_name = db.get(Region, product.region_id).name
         order.status = "pending_delivery"
         order.confirmed_at = utcnow()
-        write_audit(db, user, "confirm", "order", order.id)
+        write_audit(db, user, "confirm", "order", order.id, f"收款状态={order.payment_status}; 收款方式={order.payment_method}")
         notify_order_parties(db, customer, order, "订单已确认", f"订单 {order.order_no} 已确认，等待线路交付。", "order")
         db.commit()
         db.refresh(order)
@@ -1167,6 +1233,7 @@ def admin_deliver_order(order_id: int, payload: DeliverOrderIn, db: Session = De
         raise HTTPException(status_code=409, detail="续费订单不能创建新线路")
     if order.status not in {"pending_delivery", "partially_delivered"}:
         raise HTTPException(status_code=409, detail="订单状态不允许交付")
+    ensure_payment_settled(order)
     customer = db.scalar(select(Customer).where(Customer.id == order.customer_id, Customer.is_deleted.is_(False)))
     product = db.scalar(select(Product).where(Product.id == order.product_id, Product.is_active.is_(True)))
     node = db.scalar(select(Node).where(Node.id == payload.node_id, Node.is_enabled.is_(True)))
@@ -1193,7 +1260,7 @@ def admin_deliver_order(order_id: int, payload: DeliverOrderIn, db: Session = De
         if order.delivered_line_id is None:
             order.delivered_line_id = line.id
         progress = f"{order.delivered_quantity}/{order.quantity}"
-        write_audit(db, user, "deliver", "order", order.id, f"线路={line.id}; 进度={progress}")
+        write_audit(db, user, "deliver", "order", order.id, f"线路={line.id}; 进度={progress}; 收款状态={order.payment_status}")
         if order.status == "delivered":
             notify_order_parties(db, customer, order, "订单已全部交付", f"订单已完成全部 {order.quantity} 条线路交付，请进入我的线路查看。", "delivery")
         else:
@@ -1232,13 +1299,16 @@ def admin_complete_renewal(
         raise HTTPException(status_code=409, detail="续费线路与订单客户不匹配或客户不可用")
     if order.status == "completed" and order.renewal_completed_at:
         return order
-    if order.status != "renewal":
+    if order.status not in {"renewal", "pending_payment"}:
         raise HTTPException(status_code=409, detail="当前续费订单状态不允许完成")
-    now = utcnow()
     try:
         claimed = db.execute(
             update(Order)
-            .where(Order.id == order.id, Order.status == "renewal", Order.renewal_completed_at.is_(None))
+            .where(
+                Order.id == order.id,
+                Order.status.in_({"renewal", "pending_payment"}),
+                Order.renewal_completed_at.is_(None),
+            )
             .values(status="processing")
             .execution_options(synchronize_session=False)
         )
@@ -1250,13 +1320,9 @@ def admin_complete_renewal(
             raise HTTPException(status_code=409, detail="续费订单正在处理或状态已变化")
         db.expire(order)
         db.refresh(order)
-        renewal_base = max(line.expires_at, now)
-        line.expires_at = renewal_base + timedelta(days=order.billing_days)
-        order.status = "completed"
-        order.payment_status = "manually_confirmed"
-        order.renewal_completed_at = now
-        write_audit(db, user, "complete_renewal", "order", order.id, f"线路={line.id}; 延长天数={order.billing_days}")
-        add_notification(db, customer.user_id, "线路续费已完成", f"续费订单 {order.order_no} 已人工确认完成，线路到期时间已更新。", "renewal")
+        line = settle_renewal(db, order, "manually_confirmed")
+        write_audit(db, user, "complete_renewal", "order", order.id,
+                    f"线路={line.id}; 延长天数={order.billing_days}; 收款口径=人工确认")
         db.commit()
         db.refresh(order)
         return order
@@ -1270,8 +1336,9 @@ def admin_cancel_order(order_id: int, db: Session = Depends(get_db), user: User 
     order = db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
-    if order.status in {"partially_delivered", "delivered", "completed", "cancelled", "refunding", "refunded"}:
-        raise HTTPException(status_code=409, detail="当前订单状态不允许取消")
+    if order.status in {"partially_delivered", "delivered", "completed", "cancelled", "refunding", "refunded", "paid", "processing"}:
+        raise HTTPException(status_code=409, detail="当前订单状态不允许取消，已收款订单请走退款")
+    ensure_order_cancellable(db, order)
     customer = db.get(Customer, order.customer_id)
     try:
         order.status = "cancelled"
@@ -1484,6 +1551,9 @@ def admin_reset_password(user_id: int, payload: ResetPasswordIn, db: Session = D
         raise HTTPException(status_code=422, detail="必须二次确认密码重置")
     if not _strong_password(payload.new_password):
         raise HTTPException(status_code=422, detail="新密码必须包含大小写字母、数字和特殊字符")
+    length_error = _password_byte_length_error(payload.new_password)
+    if length_error:
+        raise HTTPException(status_code=422, detail=length_error)
     target = _manageable_user(db, actor, user_id)
     target.password_hash = hash_password(payload.new_password)
     target.must_change_password = False

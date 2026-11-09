@@ -155,7 +155,9 @@ def outreach_queue(
         .outerjoin(Node, CustomerLine.node_id == Node.id)
         .where(
             CustomerLine.customer_id.in_(scoped_customer_ids(db, user)),
-            CustomerLine.status == "active",
+            # 必须含 expired：过期任务会把到期线路从 active 翻成 expired，只查 active 的
+            # 话"昨天刚断"的客户会直接从外呼名单里消失，而这正是最该打电话的一批。
+            CustomerLine.status.in_({"active", "expired"}),
             CustomerLine.expires_at <= horizon,
             CustomerLine.expires_at >= floor,
         )

@@ -130,8 +130,19 @@ def enforce_registration_rate_limit(request: Request) -> None:
     _enforce(request, "register", settings.registration_rate_limit)
 
 
-def enforce_login_rate_limit(request: Request) -> None:
-    _enforce(request, "login", settings.login_rate_limit)
+def enforce_login_rate_limit(request: Request, username: str) -> None:
+    """登录限流双键。
+
+    只按 IP 限 10 次/分钟时，整个办公室共用 NAT 出口，早上集中登录的第 11 个人
+    就会撞 429。改成两把钥匙：
+    - ``login_ip``：IP 总量上限（默认 30 次/分钟），防换用户名轰炸；
+    - ``login_account``：IP + 用户名（默认 10 次/分钟），防单账号爆破。
+    两把钥匙独立计数，办公场景按账号走，攻击场景按 IP 兜底。
+    """
+    client_ip = get_client_ip(request)
+    account_key = sha256(username.strip().lower().encode("utf-8")).hexdigest()
+    _check_rate_limit("login_ip", client_ip, settings.login_ip_rate_limit, settings.rate_limit_window_seconds)
+    _check_rate_limit("login_account", f"{client_ip}:{account_key}", settings.login_rate_limit, settings.rate_limit_window_seconds)
 
 
 def enforce_password_recovery_rate_limit(request: Request, username: str) -> None:
