@@ -36,7 +36,10 @@ const portalCopy = computed(() => ({
   sales: { eyebrow: 'SALES WORKSPACE', headline: '客户服务，', highlight: '从专属入口开始。', description: '销售账号请通过此入口进入销售工作台。', title: '销售登录', hint: '仅销售账号可进入销售工作台。' },
 })[props.portal] || {})
 const roleHome = (role) => role === 'customer' ? '/client' : role === 'sales' ? '/sales' : ['admin', 'super_admin'].includes(role) ? '/admin' : '/'
-const canOpen = (role, path) => (role === 'customer' && path.startsWith('/client')) || (role === 'sales' && path.startsWith('/sales')) || (['admin', 'super_admin'].includes(role) && path.startsWith('/admin')) || path === '/checkout'
+// 登录后允许回到官网页面：客户从「登录查看价格」进来时带着 /products/... 的 redirect，
+// 如果这里不放行，登录完会被扔到客户中心，等于白点一次。
+const isSitePath = (path) => path.startsWith('/') && !path.startsWith('//') && !path.startsWith('/admin') && !path.startsWith('/sales') && !path.startsWith('/client')
+const canOpen = (role, path) => (role === 'customer' && (path.startsWith('/client') || isSitePath(path))) || (role === 'sales' && path.startsWith('/sales')) || (['admin', 'super_admin'].includes(role) && path.startsWith('/admin')) || path === '/checkout'
 const roleMatchesPortal = (role) => props.portal === 'customer' ? role === 'customer' : props.portal === 'sales' ? role === 'sales' : ['admin', 'super_admin'].includes(role)
 
 async function submit() {

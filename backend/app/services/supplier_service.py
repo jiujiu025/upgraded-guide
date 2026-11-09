@@ -25,6 +25,12 @@ RESOURCE_CATEGORY_CODES = {
     "static_residential_native": "独享静态住宅（本土原生）",
     "static_residential_isp": "独享静态住宅（运营商原生）",
     "static_datacenter": "独享静态数据中心",
+    # 以下三类是自有产品线（不打供应商库存），但共用同一张零售价表，
+    # 所以也放进这个映射里，后台「商品与价格」的分类下拉才能选到它们。
+    # 供应商采购下单只认上面四种静态住宅细分，不会误用这几个。
+    "social_media": "社媒运营专线",
+    "live_stream_mobile": "直播专线（手机）",
+    "live_stream_pc": "直播专线（电脑）",
 }
 PUBLISHABLE_PRODUCT_CATEGORIES = {
     "2": "static_residential",

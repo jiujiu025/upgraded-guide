@@ -26,3 +26,7 @@
 
 .catalog-state{padding:56px 0;color:#5f7b75;font-size:14px;text-align:center}
 .article-intro{font-size:17px;line-height:1.85;color:#415b56;border-left:3px solid #49c0ab;padding-left:14px;margin:0 0 26px}
+
+.price-muted{font-size:14px;font-weight:650;color:#6f827d}
+.price-gate{margin:10px 0 0;font-size:12px;color:#6f827d}
+.price-gate button{color:#2c6f60;font-weight:650;text-decoration:underline}

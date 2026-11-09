@@ -1,22 +1,32 @@
-"""官网产品目录接口（docs/官网接真数据设计.md）。
+"""官网目录接口：三条产品线、统一国家清单、未登录不含价格（2026-11-09 口径）。
 
-约束：
-- 按分类聚合，不把供应商同步出来的每条 SKU 平铺到官网；
-- 列表只给起价与覆盖地区，详情才给逐地区逐周期的价格表；
-- 价格全部来自数据库，前端不算价；
-- 未知分类 404，停用/停售商品不出现。
+产品线：静态住宅IP / 社媒运营专线 / 直播专线。
+- 三条线的国家列表完全一致（全部启用地区），缺报价的国家显示为 null 而不是消失；
+- 未登录（/public/catalog）不返回任何金额与 offer；
+- 登录后（/catalog）返回起价、逐地区逐规格报价，价格全部来自数据库；
+- 直播按规格（手机/电脑）拆分类，官网上合并到一条线里用 spec 区分。
 """
+from decimal import Decimal
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.security import create_access_token, hash_password
 from app.db import get_db
 from app.main import app
-from app.models import Product, Region
+from app.models import Customer, Product, Region, RetailPriceRule, User
 from app.models.base import Base
 from app.services.registration_service import rate_limiter
+from app.services.session_service import create_session
+
+
+def add_product(db, region, category, label, price, billing_days=30, in_stock=True):
+    db.add(Product(name=f"{region.name} {label} {billing_days}天", product_type=label, price=price,
+                   billing_days=billing_days, region_id=region.id,
+                   resource_category=category, is_in_stock=in_stock, is_active=True))
 
 
 @pytest.fixture()
@@ -29,26 +39,39 @@ def api():
 
     us = Region(name="美国", country_code="US")
     jp = Region(name="日本", country_code="JP")
-    db.add_all([us, jp])
+    de = Region(name="德国", country_code="DE")
+    fr = Region(name="法国", country_code="FR")   # 一点报价都没有的国家
+    db.add_all([us, jp, de, fr])
     db.flush()
-    db.add_all([
-        # 同一分类 + 同一国家 + 不同周期 = 三条 SKU，官网应合成一个分类/一个地区
-        Product(name="美国 独享静态住宅 30天", product_type="独享静态住宅（普通）", price=60,
-                billing_days=30, region_id=us.id, resource_category="static_residential"),
-        Product(name="美国 独享静态住宅 90天", product_type="独享静态住宅（普通）", price=180,
-                billing_days=90, region_id=us.id, resource_category="static_residential"),
-        Product(name="日本 独享静态住宅 30天", product_type="独享静态住宅（普通）", price=80,
-                billing_days=30, region_id=jp.id, resource_category="static_residential"),
-        Product(name="日本 独享静态住宅 90天", product_type="独享静态住宅（普通）", price=240,
-                billing_days=90, region_id=jp.id, resource_category="static_residential", is_in_stock=False),
-        # 固定价商品（resource_category 为空）单独成组
-        Product(name="香港直播专线", product_type="直播线路", price=199,
-                billing_days=30, region_id=us.id),
-        # 停用商品不应出现
-        Product(name="下架商品", product_type="独享静态住宅（普通）", price=10,
-                billing_days=30, region_id=us.id, resource_category="static_residential", is_active=False),
-    ])
+    for category, country_code, price in (
+        ("static_residential", "US", 60), ("static_residential", "JP", 85),
+        ("social_media", "US", 95), ("social_media", "JP", 123),
+        ("live_stream_mobile", "US", 600), ("live_stream_pc", "US", 1100),
+    ):
+        db.add(RetailPriceRule(resource_category=category, country_code=country_code,
+                               billing_days=30, unit_price=Decimal(price), source_version="test"))
+    # 美国、日本有住宅价；德国故意没有 → 仍应出现在列表里，价格为 null
+    add_product(db, us, "static_residential", "静态住宅IP", 60)
+    add_product(db, jp, "static_residential", "静态住宅IP", 85)
+    add_product(db, us, "social_media", "社媒运营专线", 95)
+    add_product(db, jp, "social_media", "社媒运营专线", 123)
+    add_product(db, us, "live_stream_mobile", "直播专线（手机）", 600)
+    add_product(db, us, "live_stream_pc", "直播专线（电脑）", 1100)
+    # 固定价老商品不应出现在官网三条线里
+    db.add(Product(name="香港直播专线", product_type="直播线路", price=199, billing_days=30,
+                   region_id=us.id, is_active=True, is_in_stock=True))
+    # 停用商品不出现
+    add_product(db, de, "static_residential", "静态住宅IP", 85, in_stock=False)
+
+    customer_user = User(username="cust", password_hash=hash_password("Customer_123456"),
+                         role="customer", display_name="客户")
+    db.add(customer_user)
+    db.flush()
+    db.add(Customer(name="客户一", email="c@test.com", user_id=customer_user.id))
     db.commit()
+    session_row, _ = create_session(db, customer_user)
+    db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(customer_user.id, customer_user.role, session_row.id, customer_user.auth_version)}"}
 
     def override_db():
         session = Session()
@@ -58,64 +81,67 @@ def api():
             session.close()
 
     app.dependency_overrides[get_db] = override_db
-    yield {"client": TestClient(app), "db": db}
+    yield {"client": TestClient(app), "headers": headers, "db": db}
     app.dependency_overrides.clear()
     rate_limiter.clear()
 
 
-def test_catalog_groups_skus_by_category(api):
+def test_public_catalog_has_three_lines_and_no_prices(api):
     response = api["client"].get("/api/public/catalog")
     assert response.status_code == 200, response.text
     body = response.json()
-    codes = [item["code"] for item in body["categories"]]
-    assert "static_residential" in codes
-    assert any(code.startswith("fixed-") for code in codes)
-    assert body["product_count"] == 5          # 停用商品不计
-    assert body["region_count"] == 2
+    assert body["price_visible"] is False
+    codes = [line["code"] for line in body["lines"]]
+    assert codes == ["residential", "social", "live"]
+    for line in body["lines"]:
+        # 三条线的国家列表必须一致，且包含没有报价的国家（德国）
+        assert line["region_count"] == 4
+        assert {region["name"] for region in line["regions"]} == {"美国", "日本", "德国", "法国"}
+        assert line["min_price"] is None
+        for region in line["regions"]:
+            assert region["min_price"] is None
+            assert region["offers"] == []
 
-    residential = next(item for item in body["categories"] if item["code"] == "static_residential")
-    assert residential["region_count"] == 2     # 美国 + 日本，而不是 4 条 SKU
-    assert residential["min_price"] == 60.0     # 起价取最低周期价
-    assert residential["periods"] == [30, 90]
-    assert residential["in_stock"] is True
-    assert "offers" not in residential["regions"][0]   # 列表不返回价格明细
+
+def test_public_catalog_detail_hides_price_too(api):
+    response = api["client"].get("/api/public/catalog/residential")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["min_price"] is None
+    assert all(not region["offers"] for region in body["regions"])
+    assert body["periods"] == [30, 90, 180, 360]
 
 
-def test_catalog_detail_returns_price_ladder(api):
-    response = api["client"].get("/api/public/catalog/static_residential")
+def test_signed_in_catalog_exposes_prices(api):
+    response = api["client"].get("/api/catalog", headers=api["headers"])
     assert response.status_code == 200, response.text
     body = response.json()
-    regions = {item["name"]: item for item in body["regions"]}
-    assert set(regions) == {"美国", "日本"}
-
-    us_offers = sorted(regions["美国"]["offers"], key=lambda item: item["billing_days"])
-    assert [offer["billing_days"] for offer in us_offers] == [30, 90]
-    assert [offer["unit_price"] for offer in us_offers] == [60.0, 180.0]
-    assert all(offer["in_stock"] for offer in us_offers)
-
-    jp_offers = sorted(regions["日本"]["offers"], key=lambda item: item["billing_days"])
-    # 日本 30 天有货、90 天停售：地区级 in_stock 取"任一有货"，档位级如实反映各自库存
-    assert [offer["in_stock"] for offer in jp_offers] == [True, False]
-    assert regions["日本"]["in_stock"] is True
-
-
-def test_fixed_price_product_is_its_own_group(api):
-    listing = api["client"].get("/api/public/catalog").json()
-    fixed = next(item for item in listing["categories"] if item["kind"] == "fixed")
-    detail = api["client"].get(f"/api/public/catalog/{fixed['code']}")
-    assert detail.status_code == 200
-    body = detail.json()
-    assert body["name"] == "直播线路"
-    assert body["periods"] == [30]
-    assert body["regions"][0]["offers"][0]["unit_price"] == 199.0
+    assert body["price_visible"] is True
+    lines = {line["code"]: line for line in body["lines"]}
+    assert lines["residential"]["min_price"] == 60.0
+    residential_regions = {region["name"]: region for region in lines["residential"]["regions"]}
+    assert residential_regions["美国"]["min_price"] == 60.0
+    assert residential_regions["日本"]["min_price"] == 85.0
+    # 一点报价都没有的国家仍在列表里，价格为 null
+    assert residential_regions["法国"]["min_price"] is None
+    assert residential_regions["法国"]["offers"] == []
+    # 有商品但停售：价格仍然展示，国家标记为不可下单
+    assert residential_regions["德国"]["min_price"] == 85.0
+    assert residential_regions["德国"]["in_stock"] is False
 
 
-def test_unknown_category_is_404(api):
+def test_live_line_merges_two_specs(api):
+    line = api["client"].get("/api/catalog/live", headers=api["headers"]).json()
+    assert line["min_price"] == 600.0
+    us = next(region for region in line["regions"] if region["name"] == "美国")
+    offers = {offer["spec"]: offer["unit_price"] for offer in us["offers"]}
+    assert offers == {"手机": 600.0, "电脑": 1100.0}
+
+
+def test_unknown_line_is_404(api):
     assert api["client"].get("/api/public/catalog/not-exist").status_code == 404
 
 
-def test_catalog_is_rate_limited(api):
-    limit = __import__("app.core.config", fromlist=["Settings"]).Settings().public_rate_limit
-    for _ in range(limit):
-        assert api["client"].get("/api/public/catalog").status_code == 200
-    assert api["client"].get("/api/public/catalog").status_code == 429
+def test_catalog_requires_auth_for_prices(api):
+    # 未登录访问登录版接口必须 401，不能靠前端藏
+    assert api["client"].get("/api/catalog").status_code == 401

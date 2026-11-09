@@ -101,13 +101,10 @@ def test_public_read_endpoints_are_rate_limited(public_client):
     assert blocked.json()["detail"] == "请求过于频繁，请稍后再试"
 
 
-def test_public_rate_limit_covers_preview_endpoint(public_client):
-    limit = Settings().public_rate_limit
+def test_preview_requires_login_because_it_returns_prices(public_client):
+    """算价接口是价格的一手来源，未登录必须 401（价格登录可见）。"""
     payload = {"product_id": 1, "region_id": 1, "quantity": 1, "billing_days": 30}
-    for _ in range(limit):
-        # 产品不存在会返回 404，但限流计数发生在业务之前，同样占额度。
-        assert public_client.post("/api/public/orders/preview", json=payload).status_code == 404
-    assert public_client.post("/api/public/orders/preview", json=payload).status_code == 429
+    assert public_client.post("/api/public/orders/preview", json=payload).status_code == 401
 
 
 def test_authenticated_endpoints_are_not_affected_by_public_limit(public_client):

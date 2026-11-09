@@ -42,6 +42,7 @@ from app.services.pricing_service import (
 from app.services.invite_code_service import (
     create_invite_code, disable_codes_of_sales, disable_invite_code, lookup_active_code, normalize_code,
 )
+from app.data.site_catalog import CATEGORY_TO_LINE, LINE_LABELS, LINE_ORDER, LIVE_SPEC_LABELS
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
 from app.services.registration_service import (enforce_invite_check_rate_limit, enforce_login_rate_limit, enforce_password_recovery_rate_limit,
     enforce_public_rate_limit, enforce_registration_rate_limit)
@@ -763,7 +764,10 @@ def public_regions(db: Session = Depends(get_db), _: None = Depends(enforce_publ
 
 
 @router.post("/public/orders/preview", response_model=OrderPreviewOut)
-def public_order_preview(payload: OrderPreviewIn, db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
+def public_order_preview(payload: OrderPreviewIn, db: Session = Depends(get_db),
+                         _: None = Depends(enforce_public_rate_limit),
+                         user: User = Depends(current_user)):
+    """算价预览。**必须登录**：它是价格的一手来源，免登录就等于绕过"登录可见价"。"""
     product = db.scalar(select(Product).where(Product.id == payload.product_id, Product.is_active.is_(True)))
     region = db.scalar(select(Region).where(Region.id == payload.region_id, Region.is_active.is_(True)))
     if not product or not product.is_in_stock:
@@ -776,114 +780,141 @@ def public_order_preview(payload: OrderPreviewIn, db: Session = Depends(get_db),
             "periods": periods_of(db, product), "total_amount": total}
 
 
-def _catalog_code(product: Product) -> str:
-    """官网展示用的分类编码。
+def _site_line_of(product: Product) -> str | None:
+    """商品归属的官网产品线；不属于三条线之一的商品不上官网。
 
-    有资源分类的商品按分类聚合（同一个国家 × 分类 × 周期会生成多条 Product，
-    官网不该把它们当成多个产品平铺）；固定价商品（resource_category 为空，
-    如直播专线）各自成组，用 ``fixed-<id>`` 保证 URL 是 ASCII。
+    三条线：静态住宅IP / 社媒运营专线 / 直播专线。旧的原生、ISP、机房分类都归到
+    住宅线（它们本来就是静态住宅的细分）；没有资源分类的固定价商品不上官网。
     """
-    return product.resource_category or f"fixed-{product.id}"
+    return CATEGORY_TO_LINE.get(product.resource_category or "")
 
 
-def _public_catalog_rows(db: Session):
+def _active_regions(db: Session) -> list[Region]:
+    return list(db.scalars(select(Region).where(Region.is_active.is_(True)).order_by(Region.name)).all())
+
+
+def _catalog_rows(db: Session):
     return db.execute(
         select(Product, Region)
         .join(Region, Product.region_id == Region.id)
-        .where(Product.is_active.is_(True), Region.is_active.is_(True))
-        .order_by(Region.id, Product.billing_days, Product.id)
+        .where(
+            Product.is_active.is_(True),
+            Region.is_active.is_(True),
+            Product.resource_category.is_not(None),
+        )
+        .order_by(Region.name, Product.billing_days, Product.id)
     ).all()
 
 
-def _build_catalog(rows, with_offers: bool) -> list[dict]:
-    """把商品行聚合成"分类 → 地区 → 价格档位"三层结构。
+def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
+    """按三条产品线聚合。地区列表是**全部启用国家**，三条线完全一致。
 
-    官网首页与产品列表只需要"起价 / 覆盖多少地区 / 有哪些周期"，
-    详情页才需要逐地区的价格表；用 ``with_offers`` 区分，避免列表接口返回整库。
+    没有报价的国家照样出现（``min_price`` 为 null），官网显示"暂无报价"，
+    而不是从列表里消失——不然客户会以为这个国家不支持。
+    ``with_price=False`` 时不返回任何金额与 offer，未登录用户拿不到价格。
     """
+    regions = _active_regions(db)
     groups: dict[str, dict] = {}
-    for product, region in rows:
-        code = _catalog_code(product)
-        group = groups.get(code)
+    for line in sorted(LINE_ORDER, key=lambda code: LINE_ORDER[code]):
+        groups[line] = {
+            "code": line,
+            "name": LINE_LABELS[line],
+            "min_price": None,
+            "periods": set(),
+            "in_stock": False,
+            "regions": {
+                region.id: {
+                    "id": region.id,
+                    "name": region.name,
+                    "country_code": region.country_code,
+                    "min_price": None,
+                    "in_stock": False,
+                    "offers": [],
+                }
+                for region in regions
+            },
+        }
+    for product, region in _catalog_rows(db):
+        line = _site_line_of(product)
+        group = groups.get(line) if line else None
         if group is None:
-            group = groups[code] = {
-                "code": code,
-                "name": product.product_type or product.name,
-                "kind": "catalog" if product.resource_category else "fixed",
-                "min_price": None,
-                "periods": set(),
-                "in_stock": False,
-                "regions": {},
-            }
+            continue
+        entry = group["regions"].get(region.id)
+        if entry is None:
+            continue
+        # 周期档位按商品的 30 天基础价线性派生，与定价服务口径一致。
+        for days in (SELLABLE_PERIODS if product.billing_days == 30 else (product.billing_days,)):
+            group["periods"].add(days)
+        group["in_stock"] = group["in_stock"] or bool(product.is_in_stock)
+        entry["in_stock"] = entry["in_stock"] or bool(product.is_in_stock)
+        if not with_price:
+            continue
         price = float(product.price)
         group["min_price"] = price if group["min_price"] is None else min(group["min_price"], price)
-        group["periods"].add(product.billing_days)
-        group["in_stock"] = group["in_stock"] or bool(product.is_in_stock)
-        region_entry = group["regions"].get(region.id)
-        if region_entry is None:
-            region_entry = group["regions"][region.id] = {
-                "id": region.id,
-                "name": region.name,
-                "country_code": region.country_code,
-                "min_price": price,
-                "in_stock": bool(product.is_in_stock),
-            }
-            if with_offers:
-                region_entry["offers"] = []
-        else:
-            region_entry["min_price"] = min(region_entry["min_price"], price)
-            region_entry["in_stock"] = region_entry["in_stock"] or bool(product.is_in_stock)
-        if with_offers:
-            region_entry["offers"].append({
-                "product_id": product.id,
-                "billing_days": product.billing_days,
-                "unit_price": price,
-                "in_stock": bool(product.is_in_stock),
-            })
+        entry["min_price"] = price if entry["min_price"] is None else min(entry["min_price"], price)
+        entry["offers"].append({
+            "product_id": product.id,
+            "billing_days": product.billing_days,
+            "unit_price": price,
+            "in_stock": bool(product.is_in_stock),
+            "spec": LIVE_SPEC_LABELS.get(product.resource_category or ""),
+        })
     result = []
-    for group in groups.values():
-        regions = sorted(group["regions"].values(), key=lambda item: item["name"])
+    for line in sorted(groups, key=lambda code: LINE_ORDER[code]):
+        group = groups[line]
         result.append({
             "code": group["code"],
             "name": group["name"],
-            "kind": group["kind"],
             "min_price": group["min_price"],
             "periods": sorted(group["periods"]),
-            "region_count": len(regions),
+            "region_count": len(group["regions"]),
             "in_stock": group["in_stock"],
-            "regions": regions,
+            "regions": list(group["regions"].values()),
         })
-    result.sort(key=lambda item: (item["kind"] != "catalog", item["min_price"] or 0, item["name"]))
     return result
+
+
+def _catalog_payload(db: Session, *, with_price: bool) -> dict:
+    lines = _build_catalog(db, with_price=with_price)
+    return {
+        "lines": lines,
+        "price_visible": with_price,
+        "product_count": len(_catalog_rows(db)),
+        "region_count": len(_active_regions(db)),
+    }
+
+
+def _catalog_line(db: Session, code: str, *, with_price: bool) -> dict:
+    for line in _build_catalog(db, with_price=with_price):
+        if line["code"] == code:
+            return line
+    raise HTTPException(status_code=404, detail="产品线不存在")
 
 
 @router.get("/public/catalog")
 def public_catalog(db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
-    """官网用的产品目录：按分类聚合，带起价、地区覆盖与周期档位。
+    """未登录可见的目录：产品线、国家、周期，**不含任何价格**。
 
-    比 ``/public/products`` 更适合官网：后者是逐 SKU 展开，供应商同步之后一个分类
-    可能对应上百条商品，直接铺到首页会变成一堵墙。
+    价格属于登录后可见的信息，公开接口一律脱敏，避免"前端藏起来、接口照给"。
     """
-    rows = _public_catalog_rows(db)
-    categories = _build_catalog(rows, with_offers=False)
-    return {
-        "categories": categories,
-        "product_count": len(rows),
-        "region_count": len({region.id for _, region in rows}),
-    }
+    return _catalog_payload(db, with_price=False)
 
 
 @router.get("/public/catalog/{code}")
 def public_catalog_detail(code: str, db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
-    """单个分类的真实价格表：每个地区 × 每个周期的单价与库存。
+    """未登录可见的产品线详情：地区与周期，不含价格与 offer。"""
+    return _catalog_line(db, code, with_price=False)
 
-    详情页据此渲染"选地区看价"，价格全部来自业务库，前端不参与计算。
-    """
-    rows = _public_catalog_rows(db)
-    for category in _build_catalog(rows, with_offers=True):
-        if category["code"] == code:
-            return category
-    raise HTTPException(status_code=404, detail="产品分类不存在或已下架")
+
+@router.get("/catalog")
+def catalog_for_signed_in_user(db: Session = Depends(get_db), _: User = Depends(current_user)):
+    """登录后可见的目录：与公开接口同结构，多出价格与可下单的 offer。"""
+    return _catalog_payload(db, with_price=True)
+
+
+@router.get("/catalog/{code}")
+def catalog_line_for_signed_in_user(code: str, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    return _catalog_line(db, code, with_price=True)
 
 
 # 客户接口：客户身份和数据范围全部从 Token 解析。

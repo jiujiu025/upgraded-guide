@@ -202,6 +202,8 @@ def list_retail_prices(
     countries = db.scalars(
         select(RetailPriceRule.country_code).distinct().order_by(RetailPriceRule.country_code)
     ).all()
+    # 国家中文名以 Region 为准（"中国台湾 / 中国香港"这类口径不能靠前端 Intl 猜）。
+    region_names = dict(db.execute(select(Region.country_code, Region.name)).all())
     billing_days_options = db.scalars(
         select(RetailPriceRule.billing_days).distinct().order_by(RetailPriceRule.billing_days)
     ).all()
@@ -211,6 +213,7 @@ def list_retail_prices(
             "resource_category": item.resource_category,
             "category_label": RESOURCE_CATEGORY_CODES.get(item.resource_category, item.resource_category),
             "country_code": item.country_code,
+            "country_name": region_names.get(item.country_code, item.country_code),
             "billing_days": item.billing_days,
             "unit_price": str(item.unit_price),
             "currency": item.currency,
@@ -221,7 +224,7 @@ def list_retail_prices(
         "page": page,
         "page_size": page_size,
         "categories": [{"code": code, "label": label} for code, label in RESOURCE_CATEGORY_CODES.items()],
-        "countries": [{"code": code} for code in countries],
+        "countries": [{"code": code, "name": region_names.get(code, code)} for code in countries],
         "billing_days_options": billing_days_options,
     }
 

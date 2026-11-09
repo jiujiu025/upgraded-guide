@@ -141,10 +141,15 @@ def test_missing_monthly_rule_means_not_sellable(pricing_env):
 
 def test_preview_api_is_self_consistent_and_has_no_discount(pricing_env):
     client, product = pricing_env["client"], pricing_env["monthly"]
+    # 算价需要登录（价格登录可见）
+    assert client.post("/api/public/orders/preview", json={
+        "product_id": product.id, "region_id": product.region_id,
+        "quantity": 2, "billing_days": 180,
+    }).status_code == 401
     response = client.post("/api/public/orders/preview", json={
         "product_id": product.id, "region_id": product.region_id,
         "quantity": 2, "billing_days": 180,
-    })
+    }, headers=pricing_env["admin_header"])
     assert response.status_code == 200, response.text
     body = response.json()
     assert "discount" not in body

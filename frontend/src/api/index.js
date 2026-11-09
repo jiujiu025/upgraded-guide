@@ -61,6 +61,9 @@ client.interceptors.response.use((response) => response, async (error) => {
 export const getPublicProducts = () => client.get('/public/products')
 export const getPublicCatalog = () => client.get('/public/catalog')
 export const getPublicCatalogDetail = (code) => client.get(`/public/catalog/${encodeURIComponent(code)}`)
+// 登录后才带价格：未登录调 /public/* 一律拿不到金额，前端不做"藏起来"这种假保护。
+export const getCatalog = () => client.get('/catalog')
+export const getCatalogDetail = (code) => client.get(`/catalog/${encodeURIComponent(code)}`)
 export const getPublicProduct = (id) => client.get(`/public/products/${id}`)
 export const getPublicRegions = () => client.get('/public/regions')
 export const previewOrder = (payload) => client.post('/public/orders/preview', payload)

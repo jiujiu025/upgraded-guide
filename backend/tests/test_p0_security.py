@@ -188,10 +188,14 @@ def test_public_catalog_and_backend_price_calculation(api):
     detail = api.get(f"/api/public/products/{product.id}")
     assert detail.status_code == 200
     assert "server" not in detail.json()
-    preview = api.post("/api/public/orders/preview", json={"product_id": product.id, "region_id": region_id, "quantity": 2, "billing_days": 30})
+    # 算价必须登录（价格登录可见），未登录直接 401
+    anonymous = api.post("/api/public/orders/preview", json={"product_id": product.id, "region_id": region_id, "quantity": 2, "billing_days": 30})
+    assert anonymous.status_code == 401
+    headers = auth(token(api, "customer_a", "Customer_123456"))
+    preview = api.post("/api/public/orders/preview", json={"product_id": product.id, "region_id": region_id, "quantity": 2, "billing_days": 30}, headers=headers)
     assert preview.status_code == 200
     assert preview.json()["total_amount"] == 200
-    tampered = api.post("/api/public/orders/preview", json={"product_id": product.id, "region_id": region_id, "quantity": 2, "billing_days": 30, "total_amount": 0.01})
+    tampered = api.post("/api/public/orders/preview", json={"product_id": product.id, "region_id": region_id, "quantity": 2, "billing_days": 30, "total_amount": 0.01}, headers=headers)
     assert tampered.status_code == 200
     assert tampered.json()["total_amount"] == 200
 
