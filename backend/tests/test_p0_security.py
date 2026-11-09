@@ -178,7 +178,7 @@ def test_login_failure_messages_do_not_reveal_account_state(api):
 
 def test_production_default_jwt_secret_rejected():
     with pytest.raises(ValueError, match="默认 JWT_SECRET_KEY"):
-        Settings(environment="production", jwt_secret_key="change-this-in-production")
+        Settings(environment="production", jwt_secret_key="change-this-in-production", _env_file=None)
 
 
 def test_public_catalog_and_backend_price_calculation(api):

@@ -59,6 +59,18 @@ DUMMY_PASSWORD_HASH = hash_password("rate-limit-timing-placeholder")
 REFRESH_COOKIE = "__Host-ops_refresh"
 
 
+def _origin_allowed(request: Request) -> bool:
+    """来源白名单校验：与 CORS 用同一份列表，支持多个前端来源（官网 + 控制台）。
+
+    以前只比对 FRONTEND_ORIGIN 单个值，本地从 127.0.0.1:5174 访问时浏览器带着
+    这个 Origin，登录会被判"请求来源无效"——白名单明明配了，登录却过不去。
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    return origin.rstrip("/") in get_settings().cors_origins
+
+
 def cap_rows(response: Response, rows: list, limit: int) -> list:
     """硬上限列表的统一收尾：多查一条判断有没有被截断，并回标记头。
 
@@ -310,7 +322,7 @@ def login(
 ):
     # 限流要按用户名分桶，必须在拿到 payload 之后做，不能挂在依赖里。
     enforce_login_rate_limit(request, payload.username)
-    if request.headers.get("origin") and request.headers["origin"] != get_settings().frontend_origin:
+    if not _origin_allowed(request):
         raise HTTPException(status_code=403, detail="请求来源无效")
     user = db.scalar(select(User).where(User.username == payload.username))
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -431,7 +443,7 @@ def update_security_questions(payload: SecurityQuestionsUpdateIn, response: Resp
 
 @router.post("/auth/password-recovery", status_code=200)
 def recover_password(payload: PasswordRecoveryIn, request: Request, response: Response, db: Session = Depends(get_db)):
-    if request.headers.get("origin") and request.headers["origin"] != get_settings().frontend_origin:
+    if not _origin_allowed(request):
         raise HTTPException(status_code=403, detail="请求来源无效")
     response.headers["Cache-Control"] = "no-store"
     enforce_password_recovery_rate_limit(request, payload.username)
@@ -686,7 +698,7 @@ def public_register(
     失效码不拒绝注册——归属是商家的内部状态，不是客户的错（设计见
     docs/销售邀请码客户归属设计.md §3.1）。
     """
-    if request.headers.get("origin") and request.headers["origin"] != get_settings().frontend_origin:
+    if not _origin_allowed(request):
         raise HTTPException(status_code=403, detail="请求来源无效")
     password_hash = hash_password(payload.password)
     if db.scalar(select(User.id).where(User.username == payload.username)):
