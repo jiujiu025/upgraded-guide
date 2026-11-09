@@ -83,6 +83,7 @@ watch(() => props.code, load, { immediate: true })
         <div>
           <p class="eyebrow">PRODUCT / {{ detail.code.toUpperCase() }}</p>
           <h1>{{ detail.name }}</h1>
+          <p v-if="detail.subtitle" class="line-subtitle">{{ detail.subtitle }}</p>
           <p>
             覆盖 {{ detail.region_count }} 个国家/地区，可选周期 {{ periods.join(' / ') }} 天<template v-if="priceVisible && minPrice !== null">，¥{{ minPrice }} / 30 天起</template>。
             所有价格由业务系统实时计算。

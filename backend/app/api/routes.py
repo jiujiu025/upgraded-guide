@@ -42,7 +42,7 @@ from app.services.pricing_service import (
 from app.services.invite_code_service import (
     create_invite_code, disable_codes_of_sales, disable_invite_code, lookup_active_code, normalize_code,
 )
-from app.data.site_catalog import CATEGORY_TO_LINE, LINE_LABELS, LINE_ORDER, LIVE_SPEC_LABELS
+from app.data.site_catalog import CATEGORY_TO_LINE, LINE_LABELS, LINE_ORDER, LINE_SUBTITLES, LIVE_SPEC_LABELS
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
 from app.services.registration_service import (enforce_invite_check_rate_limit, enforce_login_rate_limit, enforce_password_recovery_rate_limit,
     enforce_public_rate_limit, enforce_registration_rate_limit)
@@ -877,6 +877,7 @@ def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
         result.append({
             "code": group["code"],
             "name": group["name"],
+            "subtitle": LINE_SUBTITLES.get(group["code"]),
             "min_price": group["min_price"],
             "periods": sorted(group["periods"]),
             "region_count": len(group["regions"]),

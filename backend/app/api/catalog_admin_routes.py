@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
 from app.db import get_db
+from app.data.site_catalog import ACTIVE_CATEGORIES
 from app.models import Product, Region, RetailPriceRule, User
 from app.services.audit_service import write_audit
 from app.services.pricing_service import BASE_PERIOD_DAYS, sync_display_price
@@ -223,7 +224,16 @@ def list_retail_prices(
         "total": total,
         "page": page,
         "page_size": page_size,
-        "categories": [{"code": code, "label": label} for code, label in RESOURCE_CATEGORY_CODES.items()],
+        "categories": [
+            {
+                "code": code,
+                # 已停售的分类照样列出（历史价则还要能查、能改），但加后缀提醒：
+                # 往这些分类写新价不会出现在官网上，避免运营白填一遍。
+                "label": label if code in ACTIVE_CATEGORIES else f"{label}（已停售，不上官网）",
+                "active": code in ACTIVE_CATEGORIES,
+            }
+            for code, label in RESOURCE_CATEGORY_CODES.items()
+        ],
         "countries": [{"code": code, "name": region_names.get(code, code)} for code in countries],
         "billing_days_options": billing_days_options,
     }

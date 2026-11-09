@@ -111,6 +111,13 @@ LINE_LABELS = {
 
 LINE_ORDER = {"residential": 1, "social": 2, "live": 3}
 
+# 产品线的一句话说明。只在能如实说清的地方写，不写"低延迟""高可用"这类
+# 产品库里没有依据的话。住宅线写这个，是因为业务确认过它卖的是运营商原生 IP，
+# 客户最常问的就是"这是不是机房伪装住宅"。
+LINE_SUBTITLES = {
+    "residential": "运营商原生 IP（ISP 原生），非机房伪装住宅",
+}
+
 # 直播规格标签（官网展示用）
 LIVE_SPEC_LABELS = {"live_stream_mobile": "手机", "live_stream_pc": "电脑"}
 

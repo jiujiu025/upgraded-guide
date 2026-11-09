@@ -5,6 +5,7 @@ from ipaddress import ip_network
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.data.site_catalog import CATEGORY_LABELS
 from app.models import (
     Product, ProductSupplyRule, Region, ResourcePool, ResourcePoolSupplier, RetailPriceRule, Supplier,
     SupplierInventorySnapshot, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
@@ -21,7 +22,9 @@ INVENTORY_ENDPOINT = "/externalapi/inventory/getBuyProductSku"
 INVENTORY_CHECK_ENDPOINT = "/externalapi/product_order/checkInventory"
 QUOTES_ENDPOINT = "/externalapi/product_price/getProductUnitPrice"
 RESOURCE_CATEGORY_CODES = {
-    "static_residential": "独享静态住宅（普通）",
+    # 官网在售的那条住宅线。业务口径：我们卖的静态住宅就是运营商原生 IP（ISP 原生），
+    # 不是机房伪装住宅，所以分类名直接写清楚，避免后台看到"普通"以为是数据中心改的。
+    "static_residential": "静态住宅原生IP",
     "static_residential_native": "独享静态住宅（本土原生）",
     "static_residential_isp": "独享静态住宅（运营商原生）",
     "static_datacenter": "独享静态数据中心",
@@ -264,8 +267,10 @@ def sync_supplier_catalog(db: Session) -> dict[str, int]:
                 if rule:
                     continue
                 product = Product(
-                    name=f"{local_region.name} {RESOURCE_CATEGORY_CODES[category]} {retail_price.billing_days}天",
-                    product_type=RESOURCE_CATEGORY_CODES[category],
+                    # 商品名用客户端短名（"静态住宅IP"），分类下拉用技术名（"静态住宅原生IP"）。
+                    # 两者分开：客户看的是买什么，运营看的是这条线到底是什么资源。
+                    name=f"{local_region.name} {CATEGORY_LABELS.get(category, RESOURCE_CATEGORY_CODES[category])} {retail_price.billing_days}天",
+                    product_type=CATEGORY_LABELS.get(category, RESOURCE_CATEGORY_CODES[category]),
                     price=float(retail_price.unit_price),
                     billing_days=retail_price.billing_days,
                     region_id=local_region.id,

@@ -145,3 +145,33 @@ def test_unknown_line_is_404(api):
 def test_catalog_requires_auth_for_prices(api):
     # 未登录访问登录版接口必须 401，不能靠前端藏
     assert api["client"].get("/api/catalog").status_code == 401
+
+
+def test_residential_line_is_the_native_ip_one(api):
+    """业务口径：官网那条住宅线卖的是运营商原生 IP（ISP 原生），不是机房伪装住宅。
+
+    分类的中文名必须能说清这件事——后台运营看到"普通"会以为它是机房改的，
+    于是不敢卖或卖错；客户侧看到的仍是短名"静态住宅IP"。
+    """
+    from app.data.site_catalog import CATEGORY_LABELS
+    from app.services.supplier_service import RESOURCE_CATEGORY_CODES
+
+    assert RESOURCE_CATEGORY_CODES["static_residential"] == "静态住宅原生IP"
+    # 客户端短名不变，商品名与官网标题都用它
+    assert CATEGORY_LABELS["static_residential"] == "静态住宅IP"
+
+    line = api["client"].get("/api/catalog/residential", headers=api["headers"]).json()
+    assert line["name"] == "静态住宅IP"
+    assert line["subtitle"] == "运营商原生 IP（ISP 原生），非机房伪装住宅"
+
+
+def test_only_the_residential_native_category_is_sold(api):
+    """官网只上架静态住宅原生 IP 这一条：历史分类（本土原生/ISP/机房）不进目录。"""
+    from app.data.site_catalog import ACTIVE_CATEGORIES
+
+    assert ACTIVE_CATEGORIES == {
+        "static_residential", "social_media", "live_stream_mobile", "live_stream_pc",
+    }
+    catalog = api["client"].get("/api/catalog", headers=api["headers"]).json()
+    # 三条线，不多不少
+    assert [line["code"] for line in catalog["lines"]] == ["residential", "social", "live"]
