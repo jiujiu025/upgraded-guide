@@ -95,11 +95,6 @@ watch(() => props.code, load, { immediate: true })
             <button v-if="!priceVisible" class="text-button" @click="goLogin"><LockKeyhole :size="15" />价格仅登录可见</button>
           </div>
         </div>
-        <div class="detail-signal">
-          <span>LIVE CATALOG</span>
-          <strong>{{ priceVisible ? '价格已解锁' : '价格对未登录用户隐藏' }}</strong><i></i>
-          <small>{{ priceVisible ? '报价实时读取，下单前再次校验' : '登录后可见各国报价与可下单规格' }}</small>
-        </div>
       </section>
 
       <section class="section light country-section">
