@@ -98,6 +98,7 @@ export const updateInboxThread = (id, payload) => client.patch(`/inbox/threads/$
 export const getInboxUnreadCount = () => client.get('/inbox/unread-count')
 export const getInboxSalesOptions = (id) => client.get(`/inbox/threads/${id}/sales-options`)
 export const getSalesDashboard = () => client.get('/sales/dashboard')
+export const createOnBehalfOrder = (payload) => client.post('/orders/on-behalf', payload)
 export const getSalesCustomers = () => client.get('/sales/customers')
 export const getSalesOrders = (params = {}) => client.get('/sales/orders', { params })
 export const getSalesExpiringLines = () => client.get('/sales/expiring-lines')

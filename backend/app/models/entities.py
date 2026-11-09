@@ -162,6 +162,12 @@ class Order(TimestampMixin, Base):
     delivered_line_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True, index=True)
     delivered_quantity: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     renewal_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 谁开的单：客户自助 / 销售代客 / 管理员代开。代客下单设计见
+    # docs/销售代客下单设计.md；列表页靠这两个字段区分来源和统计代客单量。
+    created_via: Mapped[str] = mapped_column(String(20), default="self_service", server_default="self_service", nullable=False)
+    # 只存用户 id，不加外键：这是审计字段，用户不会被硬删除；SQLite 也不支持
+    # ALTER 加外键（批量重建又要求历史匿名约束先命名），刻意保持可迁移。
+    created_by_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 
 class Notification(TimestampMixin, Base):

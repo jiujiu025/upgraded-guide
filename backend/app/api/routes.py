@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 import unicodedata
 from uuid import uuid4
 
@@ -19,7 +20,7 @@ from app.models import (
 )
 from app.schemas.common import (
     AssignCustomerIn, CompleteRenewalIn, CreateSalesUserIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
-    DeliverOrderIn, InviteCodeCreateIn, InviteCodeOut, InviteCodePublicOut, LineIn, LineOut, LoginIn, NotificationOut, OrderIn, RegisterIn,
+    DeliverOrderIn, InviteCodeCreateIn, InviteCodeOut, InviteCodePublicOut, LineIn, LineOut, LoginIn, NotificationOut, OnBehalfOrderIn, OrderIn, RegisterIn,
     OrderOut, OrderPageOut, OrderPreviewIn, OrderPreviewOut, PasswordRecoveryIn, ProductOut, PublicProductOut,
     RegionOut, RenewalIn, TokenOut, UpdateSalesUserIn, UserOut,
     SecurityQuestionsUpdateIn,
@@ -42,7 +43,7 @@ from app.services.invite_code_service import (
 )
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
 from app.services.registration_service import (enforce_invite_check_rate_limit, enforce_login_rate_limit, enforce_password_recovery_rate_limit,
-    enforce_registration_rate_limit)
+    enforce_public_rate_limit, enforce_registration_rate_limit)
 from app.services.session_service import (SessionError, create_session, csrf_token, find_refresh,
     revoke_session, revoke_user_sessions, rotate_session, validate_session)
 from app.tasks.notify import notify_admins
@@ -207,7 +208,9 @@ def customer_line_payload(db: Session, line: CustomerLine) -> dict:
     }
 
 
-def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, order_type: str = "purchase", renewal_line_id: int | None = None) -> Order:
+def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, order_type: str = "purchase",
+                renewal_line_id: int | None = None, discount_percent: float = 0.0,
+                created_via: str = "self_service", skip_sales_notification: bool = False) -> Order:
     product = db.scalar(select(Product).where(Product.id == payload.product_id, Product.is_active.is_(True)))
     if not product or not product.is_in_stock:
         raise HTTPException(status_code=404, detail="产品不存在、已停用或暂时无货")
@@ -217,6 +220,16 @@ def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, o
         raise HTTPException(status_code=422, detail="产品与地区不匹配")
     billing_days = payload.billing_days or product.billing_days
     unit_price, total_amount = calculate_order_price(db, product, payload.quantity, billing_days)
+    remark = payload.remark
+    if discount_percent:
+        # 折扣只在订单层施加，pricing_service 仍然是无折扣的唯一定价源：
+        # 先按标价算出该周期单价，再按折扣比例折算，合计始终等于 折后单价 × 数量。
+        factor = (Decimal("100") - Decimal(str(discount_percent))) / Decimal("100")
+        discounted_unit = (Decimal(str(unit_price)) * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        unit_price = float(discounted_unit)
+        total_amount = float((discounted_unit * payload.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        discount_note = f"管理员折扣 {discount_percent:g}%"
+        remark = f"{remark}；{discount_note}" if remark else discount_note
     order = Order(
         order_no=f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}",
         customer_id=customer.id,
@@ -235,14 +248,16 @@ def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, o
         status=initial_order_status(payload.payment_method, order_type),
         order_type=order_type,
         renewal_line_id=renewal_line_id,
-        remark=payload.remark,
+        remark=remark,
+        created_via=created_via,
+        created_by_user_id=user.id,
     )
     db.add(order)
     db.flush()
     if order_type == "renewal":
-        notify_order_parties(db, customer, order, "续费订单已创建", f"续费订单 {order.order_no} 已创建，原线路到期时间未变更。", "renewal")
+        notify_order_parties(db, customer, order, "续费订单已创建", f"续费订单 {order.order_no} 已创建，原线路到期时间未变更。", "renewal", skip_sales=skip_sales_notification)
     else:
-        notify_order_parties(db, customer, order, "订单已创建", f"订单 {order.order_no} 已创建，等待后续处理。", "order")
+        notify_order_parties(db, customer, order, "订单已创建", f"订单 {order.order_no} 已创建，等待后续处理。", "order", skip_sales=skip_sales_notification)
     write_audit(db, user, "create", "order", order.id, f"类型={order_type}; 数量={payload.quantity}; 周期={billing_days}")
     return order
 
@@ -682,7 +697,7 @@ def public_register(
 
 
 @router.get("/public/products", response_model=list[PublicProductOut])
-def public_products(db: Session = Depends(get_db)):
+def public_products(db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
     rows = db.execute(select(Product, Region).join(Region, Product.region_id == Region.id).where(Product.is_active.is_(True), Region.is_active.is_(True)).order_by(Product.id)).all()
     return [{**ProductOut.model_validate(product).model_dump(), "region": region.name,
              "resource_category": product.resource_category,
@@ -690,7 +705,7 @@ def public_products(db: Session = Depends(get_db)):
 
 
 @router.get("/public/products/{product_id}", response_model=PublicProductOut)
-def public_product(product_id: int, db: Session = Depends(get_db)):
+def public_product(product_id: int, db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
     row = db.execute(select(Product, Region).join(Region, Product.region_id == Region.id).where(Product.id == product_id, Product.is_active.is_(True), Region.is_active.is_(True))).first()
     if not row:
         raise HTTPException(status_code=404, detail="产品不存在或已停用")
@@ -701,12 +716,12 @@ def public_product(product_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/public/regions", response_model=list[RegionOut])
-def public_regions(db: Session = Depends(get_db)):
+def public_regions(db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
     return list(db.scalars(select(Region).where(Region.is_active.is_(True)).order_by(Region.id)).all())
 
 
 @router.post("/public/orders/preview", response_model=OrderPreviewOut)
-def public_order_preview(payload: OrderPreviewIn, db: Session = Depends(get_db)):
+def public_order_preview(payload: OrderPreviewIn, db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
     product = db.scalar(select(Product).where(Product.id == payload.product_id, Product.is_active.is_(True)))
     region = db.scalar(select(Region).where(Region.id == payload.region_id, Region.is_active.is_(True)))
     if not product or not product.is_in_stock:
@@ -768,6 +783,64 @@ def customer_create_order(payload: OrderIn, db: Session = Depends(get_db), user:
     except Exception:
         db.rollback()
         raise
+
+
+@router.post("/orders/on-behalf", response_model=OrderOut)
+def create_order_on_behalf(
+    payload: OnBehalfOrderIn,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_roles("sales", "admin", "super_admin")),
+):
+    """销售/管理员代客下单。
+
+    - 销售只能给名下客户开单；别人的客户一律 404，不区分"不存在"与"无权"，
+      否则这个接口就成了客户存在性探测工具；
+    - 折扣只有管理员能设，上限 MAX_ORDER_DISCOUNT_PERCENT（默认 30%，即 7 折）；
+    - 幂等键必填：同键同客户返回原单，同键不同客户 409，避免重试串单。
+    """
+    customer = db.scalar(select(Customer).where(Customer.id == payload.customer_id, Customer.is_deleted.is_(False)))
+    if not customer or (actor.role == "sales" and customer.sales_id != actor.id):
+        raise HTTPException(status_code=404, detail="客户不存在或无权操作")
+    existing = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+    if existing is not None:
+        if existing.customer_id != customer.id:
+            raise HTTPException(status_code=409, detail="请求重复但客户不一致，请刷新后重试")
+        return existing
+    if payload.discount_percent:
+        if actor.role not in {"admin", "super_admin"}:
+            raise HTTPException(status_code=403, detail="折扣只能由管理员设置")
+        limit = get_settings().max_order_discount_percent
+        if payload.discount_percent > limit:
+            raise HTTPException(status_code=422, detail=f"折扣超过上限（{limit}%），请联系管理员")
+    if not customer.user_id and payload.payment_method != "contact_manager":
+        # 没有登录账号的客户无法自己在线支付，也看不到余额；只能走人工收款。
+        raise HTTPException(status_code=422, detail="该客户还没有登录账号，只能用「联系经理」方式下单")
+    order_payload = OrderIn(
+        product_id=payload.product_id, region_id=payload.region_id, quantity=payload.quantity,
+        billing_days=payload.billing_days, payment_method=payload.payment_method, remark=payload.remark,
+    )
+    try:
+        order = build_order(
+            db, actor, customer, order_payload,
+            discount_percent=payload.discount_percent or 0.0,
+            created_via="sales_assisted" if actor.role == "sales" else "admin",
+            skip_sales_notification=True,
+        )
+        order.idempotency_key = payload.idempotency_key
+        write_audit(db, actor, "create", "order", order.id, f"代客下单; 客户={customer.name}; 折扣={payload.discount_percent or 0:g}%")
+        db.commit()
+    except IntegrityError:
+        # 并发同键：唯一约束挡住第二条，回滚后回查并返回已有单，仍然保证幂等。
+        db.rollback()
+        existing = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+        if existing is not None and existing.customer_id == customer.id:
+            return existing
+        raise HTTPException(status_code=409, detail="重复提交，请刷新后重试")
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(order)
+    return order
 
 
 @router.post("/customer/orders/{order_id}/cancel", response_model=OrderOut)

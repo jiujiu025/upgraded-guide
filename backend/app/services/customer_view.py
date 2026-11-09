@@ -45,7 +45,7 @@ def wallet_cents_map(db: Session, user_ids: Iterable[int | None]) -> dict[int, i
 def customer_view(customer: Customer, balance_cents: int) -> CustomerOut:
     """按钱包余额组装对外视图。字段名与类型保持 ``balance: float``，前端无需改动。"""
     view = CustomerOut.model_validate(customer)
-    return view.model_copy(update={"balance": balance_cents / 100})
+    return view.model_copy(update={"balance": balance_cents / 100, "has_account": customer.user_id is not None})
 
 
 def customer_views(db: Session, customers: Iterable[Customer]) -> list[CustomerOut]:

@@ -285,6 +285,8 @@ class CustomerOut(CustomerIn):
     id: int
     email: str | None = None
     balance: float
+    # 是否有登录账号：没有账号的客户不能在线/余额支付，代客下单时前端据此禁用选项。
+    has_account: bool = False
 
 
 class ProductOut(BaseModel):
@@ -394,6 +396,24 @@ class OrderIn(BaseModel):
     remark: str | None = Field(default=None, max_length=1000)
 
 
+class OnBehalfOrderIn(BaseModel):
+    """销售/管理员代客下单。折扣只有管理员能设，销售传了会被拒。
+
+    幂等键必填：双击、超时重试、客户端重放都不该产生第二张单。
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    customer_id: int = Field(gt=0)
+    product_id: int = Field(gt=0)
+    region_id: int | None = None
+    quantity: int = Field(default=1, ge=1, le=100)
+    billing_days: int | None = Field(default=None, gt=0)
+    payment_method: str = "contact_manager"
+    discount_percent: float | None = Field(default=None, ge=0, le=90)
+    remark: str | None = Field(default=None, max_length=1000)
+    idempotency_key: str = Field(min_length=36, max_length=64)
+
+
 class RenewalIn(BaseModel):
     billing_days: int = Field(gt=0)
     payment_method: str = "contact_manager"
@@ -426,6 +446,9 @@ class OrderOut(BaseModel):
     renewal_line_id: int | None
     delivered_line_id: int | None
     delivered_quantity: int
+    # 订单来源：self_service / sales_assisted / admin。列表页用它显示「代客」标记。
+    created_via: str = "self_service"
+    created_by_user_id: int | None = None
     renewal_completed_at: datetime | None
     remark: str | None
     created_at: datetime

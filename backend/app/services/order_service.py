@@ -163,9 +163,12 @@ def add_notification(db: Session, user_id: int | None, title: str, content: str,
         db.add(Notification(user_id=user_id, title=title, content=content, category=category))
 
 
-def notify_order_parties(db: Session, customer: Customer, order: Order, title: str, content: str, category: str) -> None:
+def notify_order_parties(db: Session, customer: Customer, order: Order, title: str, content: str, category: str,
+                         skip_sales: bool = False) -> None:
     add_notification(db, customer.user_id, title, content, category)
-    add_notification(db, order.assigned_sales_id, title, f"客户 {customer.name}：{content}", category)
+    # 代客下单时销售本人就是操作者，再给他发一条站内信纯属噪音（skip_sales=True）。
+    if not skip_sales:
+        add_notification(db, order.assigned_sales_id, title, f"客户 {customer.name}：{content}", category)
 
 
 def ensure_sales_user(db: Session, sales_id: int | None) -> User | None:

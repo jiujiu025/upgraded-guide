@@ -31,8 +31,24 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="玖玖云运营中台", version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+# 生产环境必须关掉交互式文档：/docs、/redoc、/openapi.json 会把全部接口结构、
+# 字段和错误码挂在公网，等于给扫描器发地图。开发/测试环境保留，方便调试。
+def api_docs_paths(environment: str) -> dict[str, str | None]:
+    enabled = environment != "production"
+    return {
+        "docs_url": "/docs" if enabled else None,
+        "redoc_url": "/redoc" if enabled else None,
+        "openapi_url": "/openapi.json" if enabled else None,
+    }
+
+
+app = FastAPI(
+    title="玖玖云运营中台",
+    version="0.1.0",
+    lifespan=lifespan,
+    **api_docs_paths(settings.environment),
+)
+app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(SecurityHeadersMiddleware)
 # 最后添加 = 最外层：这样 404、CORS 预检和未捕获异常的响应也会带上 request_id。
 app.add_middleware(RequestLoggingMiddleware)

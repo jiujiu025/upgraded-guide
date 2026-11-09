@@ -1,5 +1,6 @@
 <script setup>
 import BrandLogo from "../components/BrandLogo.vue";
+import OrderOnBehalfDialog from "../components/OrderOnBehalfDialog.vue";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
   Activity,
@@ -98,6 +99,13 @@ const securityQuestions = ref({ configured: false, question_1: null, question_2:
 // 我的外部推送渠道：管理员绑定后，用户只能开/关，不能改推送目标（防止被改成别人的）。
 const myChannels = ref([]);
 const channelBusy = ref(0);
+// 代客下单：销售只能给名下客户开单，折扣只有管理员能设（上限与后端保持一致，后端是唯一权威）。
+const MAX_DISCOUNT_PERCENT = 30;
+const onBehalfOpen = ref(false);
+const onBehalfCustomer = ref(null);
+const canSetDiscount = computed(() =>
+  ["admin", "super_admin"].includes(storedUser.value.role),
+);
 const securityQuestionForm = reactive({ current_password: "", question_1: "", answer_1: "", question_2: "", answer_2: "" });
 const securityQuestionOptions = [
   ["childhood_friend", "您童年最好的朋友叫什么？"],
@@ -631,6 +639,19 @@ async function saveSecurityQuestions() {
   }
 }
 
+function openOnBehalf(customer) {
+  onBehalfCustomer.value = customer;
+  onBehalfOpen.value = true;
+}
+
+async function handleOnBehalfCreated(order) {
+  showSuccess(`订单 ${order.order_no} 已创建，金额 ${money(order.total_amount)}`);
+  if (workspace.value === "sales") {
+    salesOrderPage.value = 1;
+    await loadOrders();
+  }
+}
+
 async function toggleMyChannel(binding) {
   if (channelBusy.value) return;
   channelBusy.value = binding.id;
@@ -987,6 +1008,14 @@ onMounted(load);
       </header>
       <main class="workspace-content">
         <div v-if="success" class="workspace-toast">{{ success }}</div>
+        <OrderOnBehalfDialog
+          :open="onBehalfOpen"
+          :customer="onBehalfCustomer"
+          :can-discount="canSetDiscount"
+          :max-discount-percent="MAX_DISCOUNT_PERCENT"
+          @close="onBehalfOpen = false"
+          @created="handleOnBehalfCreated"
+        />
         <div v-if="loading" class="workspace-state">
           <span class="spinner"></span>
           <p>正在加载业务数据…</p>
@@ -1865,7 +1894,17 @@ onMounted(load);
                       >{{ customer.email }} ·
                       {{ customer.phone || "未填写手机号" }}</small
                     ></span
-                  ><em>{{ customer.status }}</em>
+                  >
+                  <div class="customer-row-actions">
+                    <em>{{ customer.status }}</em>
+                    <button
+                      type="button"
+                      class="mini-order-button"
+                      @click="openOnBehalf(customer)"
+                    >
+                      代客下单
+                    </button>
+                  </div>
                 </div>
               </section>
               <section class="workspace-panel">
@@ -2798,4 +2837,8 @@ onMounted(load);
 .my-channel-row b{font-size:13px;color:#28433c}
 .my-channel-row small{display:block;margin-top:3px;font-size:11px;color:#788a85;word-break:break-all}
 .my-channel-row .outline-action{min-height:32px;padding:5px 10px;font-size:12px;white-space:nowrap}
+.customer-row-actions{display:flex;align-items:center;gap:8px;flex:none}
+.mini-order-button{min-height:28px;padding:0 9px;border:1px solid #b8c8c4;border-radius:5px;background:#fff;color:#2c6f60;font-size:11px;font-weight:650;white-space:nowrap}
+.mini-order-button:hover{border-color:#3d9587;background:#f1f6f3;color:#247d70}
+@media(max-width:760px){.compact-row{align-items:flex-start;flex-direction:column;gap:8px}.customer-row-actions{width:100%;justify-content:space-between}}
 </style>

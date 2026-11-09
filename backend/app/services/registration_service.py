@@ -135,6 +135,15 @@ def enforce_invite_check_rate_limit(request: Request) -> None:
     _enforce(request, "invite_check", settings.registration_rate_limit)
 
 
+def enforce_public_rate_limit(request: Request) -> None:
+    """公开只读接口（产品列表、算价预览）的每 IP 限流。
+
+    这几个口不需要登录，产品页和算价页又会高频调用；不设限等于把算价逻辑
+    免费开放给任何脚本压测。默认 60 次/分钟，正常浏览不会碰到。
+    """
+    _enforce(request, "public_read", settings.public_rate_limit)
+
+
 def enforce_login_rate_limit(request: Request, username: str) -> None:
     """登录限流双键。
 

@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = ""
     frontend_origin: str = "http://localhost:5173"
+    # 额外的跨域来源（逗号分隔），用于官网独立域名等场景。主来源仍是 frontend_origin，
+    # 两者合并去重后作为 CORS 白名单；生产环境每个来源都必须过与主来源相同的校验。
+    frontend_origins: str = ""
     environment: Literal["development", "test", "production"] = "development"
     rate_limit_backend: Literal["memory", "redis"] = "memory"
     redis_url: str = "redis://localhost:6379/0"
@@ -33,6 +36,12 @@ class Settings(BaseSettings):
     # 见 registration_service.enforce_login_rate_limit 的说明。
     login_ip_rate_limit: int = 30
     registration_rate_limit: int = 5
+    # 公开只读接口（产品列表、算价预览）的每 IP 每分钟上限：这两个口不需要登录，
+    # 不设限就等于把算价逻辑开放给任何人刷。
+    public_rate_limit: int = 60
+    # 代客下单的最大折扣（百分比）。30 表示最多 7 折；0 表示完全不允许折扣。
+    # 折扣只有管理员能设置，销售下单只能按标价。
+    max_order_discount_percent: int = 30
     rate_limit_window_seconds: int = 60
     global_proxy_api_key: SecretStr | None = None
     supplier_secret_encryption_key: SecretStr | None = None
@@ -109,6 +118,11 @@ class Settings(BaseSettings):
         self._parse_line_reminder_days()
         if not 0 <= self.line_expiry_grace_hours <= 720:
             raise ValueError("线路到期宽限小时数必须在 0 到 720 之间")
+        if not 1 <= self.public_rate_limit <= 6000:
+            raise ValueError("公开接口限流必须在每分钟 1 到 6000 次之间")
+        if not 0 <= self.max_order_discount_percent <= 90:
+            raise ValueError("代客下单最大折扣必须在 0 到 90% 之间")
+        self._parse_frontend_origins()
         if self.global_proxy_base_url.rstrip("/") != "https://admin.quanqiudaili.com":
             raise ValueError("全球代理 API 地址必须使用官方 HTTPS 地址")
         if self.environment != "production":
@@ -198,6 +212,42 @@ class Settings(BaseSettings):
     @property
     def trusted_proxy_networks(self):
         return self._parse_trusted_proxy_networks()
+
+    def _parse_frontend_origins(self) -> tuple[str, ...]:
+        """主来源 + 额外来源，去重后作为 CORS 白名单。
+
+        生产环境每个额外来源都要过与 FRONTEND_ORIGIN 相同的检查：必须 https、
+        不含凭据/路径/查询/片段、不得是回环地址、不得是通配符。开发环境放宽到
+        允许 http，但仍然拒绝通配符——allow_credentials=True 时带 * 是浏览器的
+        错误用法，也是安全事故。
+        """
+        extra = [item.strip().rstrip("/") for item in self.frontend_origins.split(",") if item.strip()]
+        primary = self.frontend_origin.rstrip("/")
+        for origin in extra:
+            if not origin or "*" in origin:
+                raise ValueError("FRONTEND_ORIGINS 禁止使用通配符")
+            parsed = urlsplit(origin)
+            if not parsed.hostname:
+                raise ValueError(f"无效的跨域来源: {origin}")
+            if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+                raise ValueError(f"跨域来源不得包含凭据、路径、查询或片段: {origin}")
+            if self.environment == "production":
+                if parsed.scheme != "https":
+                    raise ValueError(f"生产环境跨域来源必须使用 HTTPS: {origin}")
+                if parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1"}:
+                    raise ValueError(f"生产环境跨域来源禁止使用 localhost 或回环地址: {origin}")
+        # 主来源的严格校验留在生产分支里做，那里能给出"缺少必需配置"等更准确的报错。
+        if not primary or "*" in primary:
+            raise ValueError("FRONTEND_ORIGIN 禁止使用通配符")
+        seen: list[str] = []
+        for origin in [primary, *extra]:
+            if origin not in seen:
+                seen.append(origin)
+        return tuple(seen)
+
+    @property
+    def cors_origins(self) -> tuple[str, ...]:
+        return self._parse_frontend_origins()
 
 
 @lru_cache

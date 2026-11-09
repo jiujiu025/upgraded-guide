@@ -1,11 +1,12 @@
 <script setup>
 import BrandLogo from '../components/BrandLogo.vue'
+import OrderOnBehalfDialog from '../components/OrderOnBehalfDialog.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Activity, ArrowLeft, ArrowDownToLine, BadgeCheck, ChevronLeft, ChevronRight,
   Check, CircleDollarSign, ClipboardList, Copy, CreditCard, FileClock, KeyRound, LogOut, Menu,
-  MessageSquare, Package, Pencil, RefreshCw, Search, ShieldCheck, UserPlus, UserRound, Users, X,
+  MessageSquare, Package, Pencil, RefreshCw, Search, ShieldCheck, ShoppingCart, UserPlus, UserRound, Users, X,
 } from 'lucide-vue-next'
 import { getAdminCustomer, getAdminCustomerRecords, getAdminCustomers, getAdminSalesOptions, createAdminCustomer, createOfflineRecharge, resetAdminUserPassword, updateAdminCustomer, logout as endSession } from '../api'
 import { session } from '../api/session'
@@ -190,6 +191,15 @@ function showNotice(message) {
   notice.value = message
   window.clearTimeout(showNotice.timer)
   showNotice.timer = window.setTimeout(() => { notice.value = '' }, 3200)
+}
+
+// 代客下单：管理员可给任意客户开单，并可设折扣（上限与后端一致，后端为唯一权威）。
+const MAX_DISCOUNT_PERCENT = 30
+const onBehalfOpen = ref(false)
+
+async function handleOnBehalfCreated(order) {
+  showNotice(`订单 ${order.order_no} 已创建，金额 ¥${Number(order.total_amount || 0).toFixed(2)}`)
+  await loadDetail()
 }
 
 async function loadList() {
@@ -491,7 +501,7 @@ onMounted(async () => {
               <div class="profile-avatar"><UserRound :size="25" /></div>
               <div class="profile-identity"><h2>{{ detail.customer.name }}</h2><p>{{ detail.customer.username ? `账号 ${detail.customer.username}` : '未绑定登录账号' }}<span>·</span>ID {{ detail.customer.id }}</p></div>
               <span class="customer-status" :data-status="detail.customer.status">{{ detail.customer.status }}</span>
-              <div class="profile-actions"><button class="secondary-control" @click="startEdit"><Pencil :size="15" />编辑资料</button><button class="primary-control" :disabled="!detail.customer.user_id || detail.customer.account_active === false" @click="openRecharge(detail.customer)"><ArrowDownToLine :size="15" />线下充值</button></div>
+              <div class="profile-actions"><button class="secondary-control" @click="onBehalfOpen = true"><ShoppingCart :size="15" />代客下单</button><button class="secondary-control" @click="startEdit"><Pencil :size="15" />编辑资料</button><button class="primary-control" :disabled="!detail.customer.user_id || detail.customer.account_active === false" @click="openRecharge(detail.customer)"><ArrowDownToLine :size="15" />线下充值</button></div>
             </section>
             <section class="customer-facts">
               <div><small>钱包余额</small><strong class="large-balance">{{ balanceLabel(detail.customer.balance_cents) }}</strong><button class="fact-link" :disabled="!detail.customer.user_id" @click="openRecharge(detail.customer)"><CircleDollarSign :size="14" />充值</button></div>
@@ -558,6 +568,14 @@ onMounted(async () => {
         <div class="dialog-actions"><button class="secondary-control" :disabled="saving" @click="cancelRecharge">返回</button><button class="primary-control" :disabled="saving" @click="submitRecharge">{{ saving ? '入账中…' : '确认入账' }}</button></div>
       </section>
     </div>
+    <OrderOnBehalfDialog
+      :open="onBehalfOpen"
+      :customer="detail?.customer || null"
+      :can-discount="true"
+      :max-discount-percent="MAX_DISCOUNT_PERCENT"
+      @close="onBehalfOpen = false"
+      @created="handleOnBehalfCreated"
+    />
   </div>
 </template>
 
