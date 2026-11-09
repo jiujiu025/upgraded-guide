@@ -54,6 +54,11 @@ async function submit() {
     const { data: verifiedUser } = await getAuthMe()
     if (verifiedUser.role === 'customer') await getCustomerMe()
     session.user = verifiedUser
+    // 管理员重置过密码 / 首次登录：业务接口会被后端 428 拦住，先来改密。
+    if (verifiedUser.must_change_password) {
+      await router.replace('/change-password')
+      return
+    }
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : ''
     await router.replace(redirect && canOpen(verifiedUser.role, redirect) ? redirect : roleHome(verifiedUser.role))
   } catch (requestError) {

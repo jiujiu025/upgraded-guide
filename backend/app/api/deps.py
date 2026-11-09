@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt import InvalidTokenError
 from sqlalchemy import select
@@ -12,7 +12,7 @@ from app.services.session_service import SessionError, validate_session
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-def current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def current_user(request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
     try:
         payload = decode_access_token(token)
         user_id = int(payload["sub"])
@@ -31,6 +31,11 @@ def current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_
         validate_session(session, user)
     except SessionError as exc:
         raise HTTPException(status_code=401, detail="登录已失效") from exc
+    # 管理员重置密码 / 首次登录：除认证类接口外一律拦住，必须先改密。
+    # 只放行 /api/auth/*（改密、登出、会话、密保找回都在这个命名空间下），
+    # 否则用户可以拿着临时密码继续做业务操作，"强制改密"就是一句空话。
+    if user.must_change_password and not request.url.path.startswith("/api/auth/"):
+        raise HTTPException(status_code=428, detail="首次登录或密码已被重置，请先修改密码")
     return user
 
 

@@ -2,7 +2,6 @@
 
 from sqlalchemy.orm import Session
 
-from app.models.base import utcnow
 from app.services.notification_channel_service import (
     DEGRADE_THRESHOLD, DISPATCH_MARKER, _degraded_channel_ids, dispatch_pending_notifications,
 )

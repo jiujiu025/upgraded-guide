@@ -177,9 +177,14 @@ def outreach_queue(
     }
 
     items = []
+    # 同一商品在队列里会出现很多次（同一个国家的不同客户），价格按商品缓存一次，
+    # 否则每条线路都要查一次价目表。
+    price_cache: dict[int, float | None] = {}
     for line, customer, product, node in rows:
         left = days_left_of(line.expires_at, now)
-        price = _renewal_price(db, product)
+        if product.id not in price_cache:
+            price_cache[product.id] = _renewal_price(db, product)
+        price = price_cache[product.id]
         line_name = node.name if node else ""
         message = build_message(
             customer_name=customer.name,

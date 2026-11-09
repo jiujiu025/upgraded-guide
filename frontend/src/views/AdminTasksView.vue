@@ -60,13 +60,39 @@ async function load() {
   }
 }
 
+// 后端改成 202 + 后台执行（供应商刷新可能几十秒）。这里轮询流水，等到本次新增的
+// 那条跑完再报结果，避免"点了没反应"或误以为失败。
+async function waitForRun(name, afterId, timeoutMs = 45000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    try {
+      const { data } = await getTaskRuns({ limit: 50, task_name: name })
+      const hit = data.find((item) => item.id > afterId)
+      if (hit && hit.status !== 'running') return hit
+    } catch { /* 轮询失败继续等下一轮，最终由超时兜底 */ }
+  }
+  return null
+}
+
 async function trigger(name) {
   running.value = name
   try {
-    const result = await runTaskNow(name)
-    showNotice(`${name} 执行完成：${result.data.summary}`)
+    const afterId = runs.value.reduce((max, item) => Math.max(max, item.id), 0)
+    await runTaskNow(name)
+    showNotice(`${name} 已开始执行，等待结果…`)
+    const finished = await waitForRun(name, afterId)
+    if (!finished) {
+      showNotice(`${name} 仍在执行，稍后刷新流水查看结果`)
+    } else if (finished.status === 'failed') {
+      showNotice(`${name} 执行失败：${finished.error || '详见流水'}`)
+    } else if (finished.status === 'skipped') {
+      showNotice(`${name} 被跳过（可能有其他实例正在执行）`)
+    } else {
+      showNotice(`${name} 执行完成：${finished.summary || '成功'}`)
+    }
   } catch (runError) {
-    showNotice(runError.response?.data?.detail || '任务执行失败，请查看流水中的错误信息')
+    showNotice(runError.response?.data?.detail || '任务触发失败，请查看流水中的错误信息')
   } finally {
     running.value = ''
     await load()

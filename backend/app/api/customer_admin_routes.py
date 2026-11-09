@@ -16,6 +16,7 @@ from app.models import (
 from app.core.security import hash_password
 from app.services.session_service import revoke_user_sessions
 from app.services.audit_service import write_audit
+from app.services.customer_email import ensure_unique_customer_email
 from app.services.wallet_service import ensure_wallet
 
 
@@ -243,6 +244,7 @@ def create_admin_customer(
         User.id == payload.sales_id, User.role == "sales", User.is_active.is_(True),
     )):
         raise HTTPException(status_code=422, detail="请选择有效的在职销售账号")
+    ensure_unique_customer_email(db, payload.email)
 
     account = User(
         username=payload.username,
@@ -503,6 +505,8 @@ def update_admin_customer(
     new_phone = changes.get("phone", customer.phone)
     if not new_email and not new_phone:
         raise HTTPException(status_code=422, detail="邮箱和手机号至少保留一项")
+    if "email" in changes:
+        ensure_unique_customer_email(db, changes.get("email"), exclude_id=customer.id)
     if "sales_id" in changes and changes["sales_id"] is not None and changes["sales_id"] != customer.sales_id:
         sales = db.scalar(select(User).where(
             User.id == changes["sales_id"], User.role == "sales", User.is_active.is_(True),

@@ -44,6 +44,18 @@ function selectRegion(id) {
   selectedProductId.value = first?.id ?? products.value.find((item) => item.region_id === id)?.id ?? null
 }
 
+// 上次选择存在 sessionStorage 里，可能被其他版本写坏或被手动改过。
+// 解析失败就当没有选择，不能让整个产品列表跟着挂掉（以前会报成"网络错误"）。
+function readSavedSelection() {
+  try {
+    const raw = sessionStorage.getItem('checkout_selection')
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    sessionStorage.removeItem('checkout_selection')
+    return null
+  }
+}
+
 async function loadCatalog() {
   loading.value = true
   error.value = ''
@@ -51,7 +63,7 @@ async function loadCatalog() {
     const [productResponse, regionResponse] = await Promise.all([getPublicProducts(), getPublicRegions()])
     products.value = productResponse.data
     regions.value = regionResponse.data
-    const saved = JSON.parse(sessionStorage.getItem('checkout_selection') || 'null')
+    const saved = readSavedSelection()
     const queryRegion = regions.value.find((item) => item.name === route.query.region)
     const initialRegion = regions.value.find((item) => item.id === saved?.region_id) || queryRegion || regions.value[0]
     selectRegion(initialRegion?.id ?? null)

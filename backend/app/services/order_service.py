@@ -10,6 +10,10 @@ from app.services.pricing_service import PricingError, quote as _quote
 
 PAYMENT_METHODS = {"balance", "online", "contact_manager"}
 TERMINAL_ORDER_STATUSES = {"completed", "cancelled", "refunded"}
+# `refunding` 与 `partially_refunded` 是**保留状态**：目前退款只有"整单一次性登记"
+# （finance_routes.record_completed_refund 直接落 refunded），没有任何代码写入这两个值。
+# 它们只出现在各处的过滤集合里做防御，将来做部分退款时可以直接启用，不需要改过滤逻辑。
+# 文档（docs/功能缺陷与Bug清单.md P3-2）记录的就是这个事实，不要误以为是漏写。
 # 尚未结清的支付单：`pending` 是通道处理中，`manual_review` 是钱可能已到但账没落。
 # 这两种情况下取消订单，都会让"钱在平台、单在本地消失"，口径与
 # ``tasks.orders.close_expired_orders`` 保持一致。

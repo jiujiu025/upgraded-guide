@@ -1,6 +1,6 @@
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 

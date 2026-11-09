@@ -17,7 +17,7 @@ from app.models import NotificationChannel, NotificationChannelBinding, Notifica
 from app.models.base import utcnow
 from app.services.audit_service import write_audit
 from app.services.notification_channel_service import (
-    ADAPTERS, CHANNEL_TYPES, channel_encryption_ready, encrypt_channel_config, send_to_channel,
+    CHANNEL_TYPES, channel_encryption_ready, encrypt_channel_config, send_to_channel,
 )
 
 router = APIRouter(tags=["通知渠道"])

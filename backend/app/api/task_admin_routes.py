@@ -1,6 +1,6 @@
 """定时任务运维接口：查看执行流水、手动触发一次。"""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -48,14 +48,18 @@ def task_catalog(_: User = Depends(require_roles("super_admin", "admin"))):
     ]
 
 
-@router.post("/admin/task-runs/{task_name}/run")
+@router.post("/admin/task-runs/{task_name}/run", status_code=202)
 def run_task_now(
     task_name: str,
+    background: BackgroundTasks,
     _: User = Depends(require_roles("super_admin", "admin")),
 ):
+    """手动触发一次任务：立即返回 202，实际执行放到后台。
+
+    供应商目录/报价刷新要打外部接口，可能几十秒。以前是同步执行，浏览器会一直挂到
+    超时或任务结束；现在先回 202，前端轮询执行流水看结果，请求本身不再被拖住。
+    """
     if task_name not in TASKS:
         raise HTTPException(status_code=404, detail="任务不存在")
-    outcome = execute(task_name, triggered_by="manual_api")
-    if outcome.status == "skipped":
-        raise HTTPException(status_code=409, detail="任务正在由其他实例执行，请稍后再试")
-    return {"name": outcome.name, "status": outcome.status, "summary": outcome.summary, "error": outcome.error}
+    background.add_task(execute, task_name, triggered_by="manual_api")
+    return {"name": task_name, "status": "queued"}

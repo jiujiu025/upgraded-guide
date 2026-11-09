@@ -48,6 +48,11 @@ client.interceptors.response.use((response) => response, async (error) => {
   }
   const detail = error.response?.data?.detail
   const status = error.response?.status
+  // 428 = 后端要求先改密（管理员重置过密码）。直接把人送到改密页，
+  // 否则每个业务请求都会失败，用户只会看到一堆"请求失败"。
+  if (status === 428 && typeof window !== 'undefined' && !window.location.pathname.startsWith('/change-password')) {
+    window.location.replace('/change-password')
+  }
   const validationMessage = Array.isArray(detail) ? detail.map((item) => item.msg?.replace(/^Value error,\s*/, '')).filter(Boolean).join('；') : ''
   const objectMessage = detail && !Array.isArray(detail) && typeof detail.message === 'string' ? detail.message : ''
   error.userMessage = typeof detail === 'string' ? detail : validationMessage || objectMessage || (status === 403 ? '当前账号没有执行此操作的权限' : status >= 500 ? '服务暂时不可用，请稍后重试' : error.response ? '请求失败，请检查填写内容后重试' : '网络连接失败，请确认后端服务已启动')

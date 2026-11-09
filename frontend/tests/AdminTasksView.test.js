@@ -52,18 +52,32 @@ describe('AdminTasksView', () => {
     expect(wrapper.text()).toContain('23ms')
   })
 
-  it('手动运行后提示结果并重新拉取流水', async () => {
-    const wrapper = mount(AdminTasksView)
-    await flushPromises()
-    api.getTaskRuns.mockClear()
+  it('手动运行后轮询结果并提示完成', async () => {
+    // 后端改成 202 + 后台执行：触发后组件会每 2 秒轮询一次流水，等到新增的那条跑完再报结果。
+    vi.useFakeTimers()
+    try {
+      const wrapper = mount(AdminTasksView)
+      await flushPromises()
+      api.getTaskRuns.mockClear()
+      api.runTaskNow.mockImplementation(() => response({ status: 'queued' }))
+      api.getTaskRuns.mockImplementation(() => response([
+        { id: 4, task_name: 'close_expired_orders', status: 'success', triggered_by: 'manual_api',
+          started_at: '2026-11-08T07:00:00', duration_ms: 15, summary: '{"closed":1}', error: null },
+        ...runs,
+      ]))
 
-    const button = wrapper.findAll('.task-catalog article button')[1]
-    await button.trigger('click')
-    await flushPromises()
+      const button = wrapper.findAll('.task-catalog article button')[1]
+      await button.trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(2100)
+      await flushPromises()
 
-    expect(api.runTaskNow).toHaveBeenCalledWith('close_expired_orders')
-    expect(api.getTaskRuns).toHaveBeenCalledTimes(1)
-    expect(wrapper.text()).toContain('执行完成')
+      expect(api.runTaskNow).toHaveBeenCalledWith('close_expired_orders')
+      expect(api.getTaskRuns).toHaveBeenCalled()
+      expect(wrapper.text()).toContain('执行完成')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('接口报错时展示可重试的错误态', async () => {

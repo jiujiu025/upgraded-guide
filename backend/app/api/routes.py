@@ -3,7 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import unicodedata
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Header
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -28,6 +28,7 @@ from app.schemas.common import (
 from app.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, counts_by, like_pattern, page_payload, paginate
 from app.services.audit_service import write_audit
 from app.services.customer_scope import get_customer_profile, scoped_customer_ids
+from app.services.customer_email import ensure_unique_customer_email
 from app.services.customer_view import balance_cents_of, customer_view, customer_views
 from app.services.health_service import check_node
 from app.services.order_service import (
@@ -55,6 +56,21 @@ router = APIRouter()
 LOGIN_ERROR_DETAIL = "用户名或密码错误"
 DUMMY_PASSWORD_HASH = hash_password("rate-limit-timing-placeholder")
 REFRESH_COOKIE = "__Host-ops_refresh"
+
+
+def cap_rows(response: Response, rows: list, limit: int) -> list:
+    """硬上限列表的统一收尾：多查一条判断有没有被截断，并回标记头。
+
+    这几个列表按业务量做了硬上限（客户 200、订单 1000、订阅 2000）。之前超限的
+    数据直接静默消失，界面上看不出少了东西。现在多取一条：有第 N+1 条就说明被
+    截断，回 ``X-Result-Truncated: true`` 与 ``X-Result-Limit``，前端据此提示
+    "仅显示前 N 条"，而不是让人误以为数据就这么多。
+    """
+    if len(rows) > limit:
+        response.headers["X-Result-Truncated"] = "true"
+        response.headers["X-Result-Limit"] = str(limit)
+        return rows[:limit]
+    return rows
 
 
 class ChangePasswordIn(BaseModel):
@@ -180,10 +196,32 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def customer_line_payload(db: Session, line: CustomerLine) -> dict:
-    product = db.get(Product, line.product_id)
-    node = db.get(Node, line.node_id)
-    region = db.get(Region, product.region_id) if product else None
+def customer_line_payload(db: Session, line: CustomerLine, cache: dict | None = None) -> dict:
+    """单条线路的展示载荷。
+
+    ``cache`` 由列表调用方传入，用来在同一个请求里复用 Product / Node / Region
+    与周期价（``periods_of`` 每次都要查价目表）。不传就是单条查询，行为不变。
+    之前每条线路 3 次 db.get + 一次价目表查询，300 条线路接近 1200 次 SQL。
+    """
+    if cache is None:
+        cache = {}
+    products = cache.setdefault("products", {})
+    nodes = cache.setdefault("nodes", {})
+    regions = cache.setdefault("regions", {})
+    periods_cache = cache.setdefault("periods", {})
+    if line.product_id not in products:
+        products[line.product_id] = db.get(Product, line.product_id)
+    product = products[line.product_id]
+    if line.node_id not in nodes:
+        nodes[line.node_id] = db.get(Node, line.node_id) if line.node_id else None
+    node = nodes[line.node_id]
+    region = None
+    if product:
+        if product.region_id not in regions:
+            regions[product.region_id] = db.get(Region, product.region_id)
+        region = regions[product.region_id]
+        if line.product_id not in periods_cache:
+            periods_cache[line.product_id] = periods_of(db, product)
     return {
         "id": line.id,
         "region": region.name if region else "未知地区",
@@ -192,7 +230,7 @@ def customer_line_payload(db: Session, line: CustomerLine) -> dict:
         "product_type": product.product_type if product else "未知产品",
         "billing_days": product.billing_days if product else 0,
         # 续费表单按这里给出的档位渲染，避免前端写死 30/180/360 导致 90 天线路无法续费。
-        "periods": periods_of(db, product) if product else [],
+        "periods": periods_cache.get(line.product_id, []) if product else [],
         "line_name": node.name if node else "线路数据待接入",
         "status": line.status,
         "started_at": line.started_at,
@@ -292,7 +330,8 @@ def login(
         raise HTTPException(status_code=401, detail=LOGIN_ERROR_DETAIL)
     user.failed_login_count = 0
     user.locked_until = None
-    user.must_change_password = False
+    # 不清 must_change_password：管理员重置密码后它就是 True，登录后必须先去改密。
+    # 以前这里每次登录都置 False，等于把这个字段做成了死字段。
     session, raw = create_session(db, user)
     _record_sales_login(db, user, request, "success")
     db.commit()
@@ -429,16 +468,18 @@ def recover_password(payload: PasswordRecoveryIn, request: Request, response: Re
 
 
 @router.get("/customers", response_model=list[CustomerOut])
-def list_customers(keyword: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def list_customers(response: Response, keyword: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
     query = select(Customer).where(Customer.id.in_(scoped_customer_ids(db, user)))
     if keyword:
         query = query.where(Customer.name.contains(keyword) | Customer.email.contains(keyword))
-    return customer_views(db, db.scalars(query.order_by(Customer.created_at.desc()).limit(200)).all())
+    rows = db.scalars(query.order_by(Customer.created_at.desc()).limit(201)).all()
+    return customer_views(db, cap_rows(response, rows, 200))
 
 
 @router.post("/customers", response_model=CustomerOut)
 def create_customer(payload: CustomerIn, db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin", "sales"))):
     sales_id = payload.sales_id if user.role in {"super_admin", "admin"} else user.id
+    ensure_unique_customer_email(db, payload.email)
     customer = Customer(**payload.model_dump(exclude={"sales_id"}), sales_id=sales_id)
     db.add(customer)
     write_audit(db, user, "create", "customer", detail=customer.name)
@@ -650,6 +691,7 @@ def public_register(
     if db.scalar(select(User.id).where(User.username == payload.username)):
         raise HTTPException(status_code=400, detail="无法完成注册，请检查提交信息")
     invite = lookup_active_code(db, payload.invite_code) if payload.invite_code else None
+    ensure_unique_customer_email(db, payload.email)
     try:
         user = User(
             username=payload.username,
@@ -869,7 +911,8 @@ def customer_cancel_order(order_id: int, db: Session = Depends(get_db), user: Us
 def customer_lines(db: Session = Depends(get_db), user: User = Depends(require_roles("customer"))):
     customer = get_customer_profile(db, user)
     lines = db.scalars(select(CustomerLine).where(CustomerLine.customer_id == customer.id).order_by(CustomerLine.started_at.desc())).all()
-    return [customer_line_payload(db, line) for line in lines]
+    cache: dict = {}
+    return [customer_line_payload(db, line, cache) for line in lines]
 
 
 @router.post("/customer/lines", response_model=OrderOut)
@@ -1031,7 +1074,8 @@ def sales_orders(
 def sales_expiring_lines(days: int = Query(default=30, ge=1, le=365), db: Session = Depends(get_db), user: User = Depends(require_roles("sales"))):
     now = utcnow()
     lines = db.scalars(select(CustomerLine).where(CustomerLine.customer_id.in_(scoped_customer_ids(db, user)), CustomerLine.status == "active", CustomerLine.expires_at >= now, CustomerLine.expires_at <= now + timedelta(days=days)).order_by(CustomerLine.expires_at)).all()
-    return [customer_line_payload(db, line) for line in lines]
+    cache: dict = {}
+    return [customer_line_payload(db, line, cache) for line in lines]
 
 
 @router.get("/sales/health-impacts")
@@ -1225,6 +1269,7 @@ def admin_order_center_options(
 
 @router.get("/admin/order-center/subscriptions")
 def admin_subscriptions(
+    response: Response,
     customer_id: int | None = None,
     product_id: int | None = None,
     expires_from: datetime | None = None,
@@ -1249,7 +1294,8 @@ def admin_subscriptions(
             query = query.where((Order.source_type == "owned") | Order.id.is_(None))
         else:
             query = query.where(Order.source_type == source_type)
-    rows = db.execute(query.order_by(CustomerLine.expires_at.asc()).limit(2000)).all()
+    rows = db.execute(query.order_by(CustomerLine.expires_at.asc()).limit(2001)).all()
+    rows = cap_rows(response, rows, 2000)
     return [{
         "id": line.id, "customer_id": line.customer_id, "customer_name": customer_name,
         "product_id": line.product_id, "product_name": product_name, "order_id": line.order_id,
@@ -1259,9 +1305,10 @@ def admin_subscriptions(
 
 
 @router.get("/admin/order-center/orders")
-def admin_order_center_orders(db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
+def admin_order_center_orders(response: Response, db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
     rows = db.execute(select(Order, Customer.name).join(Customer, Customer.id == Order.customer_id)
-                      .order_by(Order.created_at.desc()).limit(1000)).all()
+                      .order_by(Order.created_at.desc()).limit(1001)).all()
+    rows = cap_rows(response, rows, 1000)
     return [{**{column.name: getattr(order, column.name) for column in Order.__table__.columns},
              "customer_name": customer_name} for order, customer_name in rows]
 
@@ -1740,9 +1787,10 @@ def admin_reset_password(user_id: int, payload: ResetPasswordIn, db: Session = D
         raise HTTPException(status_code=422, detail=length_error)
     target = _manageable_user(db, actor, user_id)
     target.password_hash = hash_password(payload.new_password)
-    target.must_change_password = False
+    # 管理员重置出来的是"临时密码"：标记强制改密，用户下次登录必须先改成自己的密码。
+    target.must_change_password = True
     revoke_user_sessions(db, target, "password_reset")
-    write_audit(db, actor, "reset_password", "user", target.id, "已撤销全部会话")
+    write_audit(db, actor, "reset_password", "user", target.id, "已撤销全部会话；要求下次登录修改密码")
     db.commit()
 
 

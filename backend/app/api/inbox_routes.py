@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_user, require_roles
 from app.db import get_db
-from app.models import Customer, CustomerLine, InboxMessage, InboxThread, Notification, Order, User
+from app.models import Customer, CustomerLine, InboxMessage, InboxThread, Order, User
 from app.schemas.common import (
     InboxMessageIn,
     InboxMessageOut,

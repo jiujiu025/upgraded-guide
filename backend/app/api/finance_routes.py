@@ -1,17 +1,16 @@
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import current_user, require_roles
-from app.core.config import get_settings
+from app.api.deps import require_roles
 from app.core.timeutil import SHANGHAI, local_date_of, local_day_range_utc
 from app.db import get_db
 from app.models import (
@@ -29,7 +28,7 @@ from app.services.payment_gateway import (
 from app.services.order_service import is_payable_order, rollback_renewal_extension, settle_renewal
 from app.tasks.notify import notify_admins
 from app.services.wallet_service import (
-    accrue_sales_commission, apply_wallet_delta, ensure_wallet, money_to_cents,
+    accrue_sales_commission, apply_wallet_delta, money_to_cents,
     reverse_sales_commission,
 )
 
@@ -262,9 +261,15 @@ def admin_finance_summary(
              for index in range((end_day - start_day).days + 1)]
     aggregate = {key: sum(day[key] for day in daily) for key in daily[0] if key != "date"}
     today_values = buckets[today.isoformat()]
+    # 佣金列表必须与上方汇总同区间：之前是全时段累计，同一页面出现两个口径。
+    # 条件写在 join 里（不是 where），这样区间内没有佣金的销售仍然列出来显示 0。
     commission_rows = db.execute(
         select(User.id, User.display_name, func.coalesce(func.sum(SalesCommissionEntry.amount_cents), 0))
-        .outerjoin(SalesCommissionEntry, SalesCommissionEntry.sales_id == User.id)
+        .outerjoin(SalesCommissionEntry, and_(
+            SalesCommissionEntry.sales_id == User.id,
+            SalesCommissionEntry.created_at >= start_utc,
+            SalesCommissionEntry.created_at < end_utc,
+        ))
         .where(User.role == "sales")
         .group_by(User.id, User.display_name)
         .order_by(User.display_name)

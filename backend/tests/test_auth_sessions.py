@@ -112,10 +112,15 @@ def test_reset_password_and_role_isolation(api):
     assert reset.status_code == 204
     assert api.get("/api/auth/me", headers=bearer(staff)).status_code == 401
     new_login = api.post("/api/auth/login", json={"username": "staff", "password": "NewAdmin_123!"}, headers={"Origin": ORIGIN}).json()
-    assert new_login["user"]["must_change_password"] is False
-    assert api.get("/api/admin/users/1/sessions", headers=bearer(new_login)).status_code == 403
+    # 管理员重置出来的是临时密码：标记为必须改密，业务接口会被 428 拦住
+    assert new_login["user"]["must_change_password"] is True
     assert api.post("/api/auth/change-password", json={"current_password": "NewAdmin_123!", "new_password": "NextAdmin_123!"}, headers=bearer(new_login)).status_code == 204
     assert api.get("/api/auth/me", headers=bearer(new_login)).status_code == 401
+    after_change = api.post("/api/auth/login", json={"username": "staff", "password": "NextAdmin_123!"},
+                            headers={"Origin": ORIGIN})
+    assert after_change.status_code == 200
+    # 改密之后才轮到角色隔离：staff 不是管理员，访问管理接口必须是 403
+    assert api.get("/api/admin/users/1/sessions", headers=bearer(after_change.json())).status_code == 403
     with api.factory() as db:
         audit = db.scalar(select(AuditLog).where(AuditLog.action == "reset_password"))
         assert "NewAdmin" not in audit.detail

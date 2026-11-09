@@ -790,7 +790,8 @@ def test_inbox_rejects_sensitive_content_and_notifications_are_generic(api):
         "token: abcdef123456",
         "vless://credential@example",
         "节点地址 10.0.0.1:443",
-        "订阅地址 https://example.com/subscription",
+        # 订阅链接的关键是 URL 里带 token，普通链接放行（P2-3.9 收窄了规则）
+        "订阅链接 https://example.com/sub?token=abc123",
     ]
     for content in sensitive_messages:
         response = api.post(f"/api/inbox/threads/{thread['id']}/messages", json={"content": content}, headers=auth(customer_token))
@@ -801,6 +802,13 @@ def test_inbox_rejects_sensitive_content_and_notifications_are_generic(api):
         headers=auth(customer_token),
     )
     assert safe.status_code == 201
+    # 普通链接（测速页、截图、工单）必须能发，否则客服无法沟通。
+    plain_link = api.post(
+        f"/api/inbox/threads/{thread['id']}/messages",
+        json={"content": "测速结果 https://speed.example.com/result/123 麻烦看下"},
+        headers=auth(customer_token),
+    )
+    assert plain_link.status_code == 201
     api.db.expire_all()
     notifications = api.db.scalars(select(Notification).where(Notification.category == "inbox")).all()
     assert notifications

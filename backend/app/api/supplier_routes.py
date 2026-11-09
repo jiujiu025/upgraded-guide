@@ -11,7 +11,7 @@ from app.api.deps import require_roles
 from app.core.config import get_settings
 from app.db import get_db
 from app.models import (
-    CatalogPublication, ProductSupplyRule, ResourcePool, Supplier, SupplierInventorySnapshot, SupplierIpSegmentSnapshot,
+    CatalogPublication, ProductSupplyRule, Supplier, SupplierInventorySnapshot, SupplierIpSegmentSnapshot,
     SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
 )
 from app.services.audit_service import write_audit
@@ -21,7 +21,7 @@ from app.services.supplier_credentials import (
     save_api_key,
 )
 from app.services.supplier_service import (
-    CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, INVENTORY_ENDPOINT, begin_sync_run,
+    CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, begin_sync_run,
     configure_manual_supply_rule, ensure_pool_one, finish_sync_run, map_supplier_product,
     map_supplier_region, RESOURCE_CATEGORY_CODES, save_inventory, save_ip_segment_snapshots, save_quotes, sync_products, sync_regions, sync_supplier_catalog,
 )
@@ -221,7 +221,6 @@ def aggregate_states(states: list[str]) -> str:
 def list_suppliers(db: Session = Depends(get_db), _: User = Depends(require_roles("super_admin", "admin"))):
     ensure_pool_one(db)
     db.commit()
-    settings = get_settings()
     suppliers = db.scalars(select(Supplier).order_by(Supplier.id)).all()
     return [{
         "id": item.id,

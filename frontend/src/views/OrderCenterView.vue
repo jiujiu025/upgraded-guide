@@ -99,12 +99,20 @@ async function loadOptions() {
   options.value = response.data
   if (!form.resource_category) form.resource_category = options.value.categories[0]?.code || ''
 }
+// 后端对订单/订阅有硬上限（1000/2000）。被截断时它会回 X-Result-Truncated，
+// 这里据此提示用户"只看到前 N 条"，避免把不完整当完整。
+const truncated = reactive({ orders: false, subscriptions: false })
+
 async function loadOrders() {
-  orders.value = (await getAdminOrderCenterOrders()).data
+  const response = await getAdminOrderCenterOrders()
+  orders.value = response.data
+  truncated.orders = response.headers?.['x-result-truncated'] === 'true'
 }
 async function loadSubscriptions() {
   const params = Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== ''))
-  subscriptions.value = (await getAdminSubscriptions(params)).data
+  const response = await getAdminSubscriptions(params)
+  subscriptions.value = response.data
+  truncated.subscriptions = response.headers?.['x-result-truncated'] === 'true'
 }
 async function load() {
   loading.value = true
@@ -234,7 +242,7 @@ onMounted(load)
               <button type="button" class="primary-button" @click="applyFilters"><Filter :size="15" />筛选</button>
             </section>
             <section class="table-section">
-              <div class="section-title"><div><h2>已开通线路</h2><p>仅显示已实际创建的客户线路，待付款订单不会出现在此处。</p></div><span>{{ subscriptions.length }} 条记录</span></div>
+              <div class="section-title"><div><h2>已开通线路</h2><p>仅显示已实际创建的客户线路，待付款订单不会出现在此处。</p><em v-if="truncated.subscriptions" class="truncate-hint">已达 2000 条上限，仅显示前 2000 条；请用上方筛选缩小范围</em></div><span>{{ subscriptions.length }} 条记录</span></div>
               <div v-if="!subscriptions.length" class="empty-state"><CalendarDays :size="22" /><b>没有符合条件的线路</b><span>调整客户、产品或到期时间筛选条件。</span></div>
               <div v-else class="table-wrap subscription-table"><table><thead><tr><th>客户</th><th>线路产品</th><th>来源</th><th>IP / 资源</th><th>状态</th><th>开通时间</th><th>到期时间</th></tr></thead><tbody><tr v-for="line in subscriptions" :key="line.id"><td><b>{{ line.customer_name }}</b><small>客户 #{{ line.customer_id }}</small></td><td><b>{{ line.product_name }}</b><small>线路 #{{ line.id }}</small></td><td><span class="source-label" :data-source="line.source_type">{{ line.source_type === 'resource_pool' ? '资源池 1' : '玖玖云' }}</span></td><td>{{ line.static_ip || '—' }}</td><td><span class="state-label" :data-tone="stateTone(line.status)">{{ stateLabel(line.status) }}</span></td><td>{{ formatDate(line.started_at) }}</td><td><b>{{ formatDate(line.expires_at) }}</b></td></tr></tbody></table></div>
             </section>
@@ -269,7 +277,7 @@ onMounted(load)
               </aside>
             </section>
             <section class="table-section recent-orders">
-              <div class="section-title"><div><h2>最近订单</h2><p>资源池订单需完成支付、管理员审批、沙箱及补偿流程后才能接入自动采购。</p></div><span>{{ orders.length }} 条</span></div>
+              <div class="section-title"><div><h2>最近订单</h2><p>资源池订单需完成支付、管理员审批、沙箱及补偿流程后才能接入自动采购。</p><em v-if="truncated.orders" class="truncate-hint">已达 1000 条上限，仅显示最近的 1000 条</em></div><span>{{ orders.length }} 条</span></div>
               <div v-if="!orders.length" class="empty-state"><PackageSearch :size="22" /><b>还没有订单</b><span>创建订单后会在此记录客户、价格与处理状态。</span></div>
               <div v-else class="table-wrap order-table"><table><thead><tr><th>订单编号</th><th>客户</th><th>产品 / 国家</th><th>来源</th><th>数量</th><th>售价</th><th>成本快照</th><th>状态</th></tr></thead><tbody><tr v-for="order in orders.slice(0, 50)" :key="order.id"><td><b>{{ order.order_no }}</b><small>{{ formatDateTime(order.created_at) }}</small></td><td>{{ order.customer_name }}</td><td><b>{{ order.product_name }}</b><small>{{ order.region_name || '—' }}</small></td><td><span class="source-label" :data-source="order.source_type">{{ order.source_type === 'resource_pool' ? '资源池 1' : '玖玖云' }}</span></td><td>{{ order.quantity }}</td><td>{{ money(order.total_amount) }}</td><td>{{ order.supplier_cost == null ? '—' : money(order.supplier_cost, 4) }}</td><td><span class="state-label" :data-tone="stateTone(order.status)">{{ stateLabel(order.status) }}</span></td></tr></tbody></table></div>
             </section>
@@ -319,6 +327,7 @@ onMounted(load)
 .table-section,.form-panel{min-width:0;margin-bottom:15px;padding:16px;border:1px solid #dce5e1;border-radius:6px;background:#fff}
 .section-title{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
 .section-title h2{margin:0;color:#22352e;font-size:15px;line-height:1.35}.section-title p{margin:4px 0 0;color:#71837b;font-size:10px;line-height:1.5}.section-title>span{color:#71847c;font-size:10px;white-space:nowrap}
+.truncate-hint{display:inline-block;margin-top:6px;padding:2px 7px;border-radius:4px;background:#fdf4e3;color:#8a6420;font-size:10px;font-style:normal}
 .table-wrap{max-width:100%;overflow:auto;border:1px solid #e0e8e4;border-radius:5px}
 table{width:100%;border-collapse:collapse;font-size:11px;text-align:left;white-space:nowrap}
 th{height:37px;padding:0 12px;background:#f0f5f2;color:#657a70;font-size:10px;font-weight:650}
