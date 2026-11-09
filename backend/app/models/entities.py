@@ -577,3 +577,44 @@ class SalesInviteCode(TimestampMixin, Base):
     note: Mapped[str | None] = mapped_column(String(120), nullable=True)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     disabled_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class NotificationChannel(TimestampMixin, Base):
+    """通知分发渠道配置（企业微信应用/群机器人，后续 Telegram 等）。
+
+    站内信照旧写 notifications 表；本表只描述"往哪推"。config 加密落库，
+    明文只在发送瞬间解密在内存。设计见 docs/通知渠道分发设计.md。
+    """
+    __tablename__ = "notification_channels"
+
+    channel_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    config_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # 逗号分隔的 category 白名单，空 = 全部。
+    push_categories: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class NotificationChannelBinding(TimestampMixin, Base):
+    """用户 ↔ 渠道目标：哪个账号要收、推到哪个地址（企微 userid / TG chat_id）。"""
+    __tablename__ = "notification_channel_bindings"
+    __table_args__ = (UniqueConstraint("user_id", "channel_id", name="uq_notification_binding_user_channel"),)
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("notification_channels.id"), index=True)
+    target: Mapped[str] = mapped_column(String(120), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class NotificationDelivery(TimestampMixin, Base):
+    """投递流水：一条通知 × 一个渠道目标 = 一条流水，唯一约束保证幂等。"""
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (UniqueConstraint("notification_id", "channel_id", "target", name="uq_notification_delivery_target"),)
+
+    notification_id: Mapped[int] = mapped_column(ForeignKey("notifications.id"), index=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("notification_channels.id"), index=True)
+    target: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

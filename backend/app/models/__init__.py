@@ -4,6 +4,7 @@ from app.models.entities import (
     SupplierInventorySnapshot, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
     PaymentChannelAcceptance, PaymentChannelConfig, PaymentOrder, PaymentRefund, SalesCommissionEntry, ScheduledTaskRun,
     RenewalOutreach, WalletAccount, WalletTransaction, SalesInviteCode,
+    NotificationChannel, NotificationChannelBinding, NotificationDelivery,
 )
 
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     "SupplierRegion", "SupplierSyncRun", "User",
     "PaymentChannelAcceptance", "PaymentChannelConfig", "PaymentOrder", "PaymentRefund", "SalesCommissionEntry",
     "RenewalOutreach", "ScheduledTaskRun", "WalletAccount", "WalletTransaction", "SalesInviteCode",
+    "NotificationChannel", "NotificationChannelBinding", "NotificationDelivery",
 ]

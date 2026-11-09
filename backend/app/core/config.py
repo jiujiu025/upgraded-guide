@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # 只通过"本地模拟闭环"验收时，线上单笔金额被压到这个上限，避免没跑过真实
     # 回调就先放开大额收款；跑通一笔真实支付并登记 live 验收后自动解除。
     payment_sandbox_max_cents: int = 10000
+    # 通知渠道分发：外部 IM 接口的超时（秒）与每轮批量上限（防限流风暴）。
+    notification_http_timeout_seconds: float = 10.0
+    notification_dispatch_batch_limit: int = 50
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     @model_validator(mode="after")
@@ -91,6 +94,10 @@ class Settings(BaseSettings):
             raise ValueError("订单支付超时时间必须为正整数")
         if self.payment_reconcile_grace_minutes < 0:
             raise ValueError("支付对账宽限时间不得为负数")
+        if self.notification_http_timeout_seconds <= 0:
+            raise ValueError("通知渠道 HTTP 超时时间必须大于 0")
+        if not 1 <= self.notification_dispatch_batch_limit <= 500:
+            raise ValueError("通知分发每轮批量必须在 1 到 500 之间")
         if not 100 <= self.payment_sandbox_max_cents <= 10000000:
             raise ValueError("沙箱单笔上限必须在 1 元到 10 万元之间（单位：分）")
         if not 1 <= self.db_pool_size <= 50 or not 0 <= self.db_max_overflow <= 50:

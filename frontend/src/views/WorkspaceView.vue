@@ -52,6 +52,8 @@ import {
   getSalesOrders,
   getSalesOutreach,
   getSecurityQuestions,
+  getMyNotificationChannels,
+  toggleMyNotificationChannel,
   markAllNotificationsRead,
   markNotificationRead,
   recordRenewalTouch,
@@ -93,6 +95,9 @@ const inviteBusy = ref(false);
 const inviteError = ref("");
 const salesUserForm = reactive({ username: "", display_name: "", phone: "", password: "", confirmPassword: "" });
 const securityQuestions = ref({ configured: false, question_1: null, question_2: null });
+// 我的外部推送渠道：管理员绑定后，用户只能开/关，不能改推送目标（防止被改成别人的）。
+const myChannels = ref([]);
+const channelBusy = ref(0);
 const securityQuestionForm = reactive({ current_password: "", question_1: "", answer_1: "", question_2: "", answer_2: "" });
 const securityQuestionOptions = [
   ["childhood_friend", "您童年最好的朋友叫什么？"],
@@ -517,7 +522,12 @@ async function load() {
   detail.value = null;
   try {
     if (page.value === "security-center") {
-      securityQuestions.value = (await getSecurityQuestions()).data;
+      const [questionResponse, channelResponse] = await Promise.all([
+        getSecurityQuestions(),
+        getMyNotificationChannels().catch(() => ({ data: [] })),
+      ]);
+      securityQuestions.value = questionResponse.data;
+      myChannels.value = channelResponse.data || [];
     } else if (workspace.value === "client") {
       await loadClientBase();
       if (page.value === "order")
@@ -618,6 +628,22 @@ async function saveSecurityQuestions() {
     error.value = requestError.userMessage || "保存密保问题失败，请重试";
   } finally {
     busy.value = false;
+  }
+}
+
+async function toggleMyChannel(binding) {
+  if (channelBusy.value) return;
+  channelBusy.value = binding.id;
+  error.value = "";
+  try {
+    const { data } = await toggleMyNotificationChannel(binding.id);
+    const index = myChannels.value.findIndex((item) => item.id === binding.id);
+    if (index >= 0) myChannels.value[index] = data;
+    showSuccess(data.is_enabled ? "已开启该渠道的推送" : "已关闭该渠道的推送");
+  } catch (requestError) {
+    error.value = requestError.userMessage || "操作失败，请稍后重试";
+  } finally {
+    channelBusy.value = 0;
   }
 }
 
@@ -1549,6 +1575,18 @@ onMounted(load);
                 <p class="security-question-note">答案只以加密哈希保存，无法在页面查看。修改密保时需要重新填写两题和当前密码。</p>
                 <button class="security-save" type="submit" :disabled="busy"><ShieldCheck :size="16" />{{ busy ? "正在保存…" : "保存密保问题" }}</button>
               </form>
+            </section>
+            <section class="workspace-panel security-panel">
+              <div class="panel-head">
+                <div><h2>消息推送</h2><p>站内信始终保留；这里控制是否同步推到企业微信等外部渠道。</p></div>
+              </div>
+              <p v-if="!myChannels.length" class="security-warning">管理员还没有为你绑定推送渠道。绑定后新订单、客户消息和到期提醒会同时推到微信。</p>
+              <div v-else class="my-channel-list">
+                <div v-for="item in myChannels" :key="item.id" class="my-channel-row">
+                  <span><b>{{ item.channel_name }}</b><small>推送到 {{ item.target }}</small></span>
+                  <button type="button" class="outline-action" :disabled="channelBusy === item.id" @click="toggleMyChannel(item)">{{ item.is_enabled ? "已开启 · 关闭" : "已关闭 · 开启" }}</button>
+                </div>
+              </div>
             </section>
           </template>
           <template v-else-if="page === 'profile'"
@@ -2754,4 +2792,10 @@ onMounted(load);
 .invite-form{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;padding-top:12px;border-top:1px solid #e4e9e7}
 .invite-form input{flex:1;min-width:200px;height:36px;padding:0 10px;border:1px solid #cfdad7;border-radius:5px;background:#fff;font-size:12px}
 @media(max-width:760px){.invite-row{grid-template-columns:1fr}.invite-actions{justify-content:flex-start}}
+.my-channel-list{display:grid;gap:2px}
+.my-channel-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 2px;border-bottom:1px solid #e4e9e7}
+.my-channel-row:last-child{border-bottom:0}
+.my-channel-row b{font-size:13px;color:#28433c}
+.my-channel-row small{display:block;margin-top:3px;font-size:11px;color:#788a85;word-break:break-all}
+.my-channel-row .outline-action{min-height:32px;padding:5px 10px;font-size:12px;white-space:nowrap}
 </style>

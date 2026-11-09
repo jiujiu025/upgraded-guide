@@ -7,7 +7,7 @@ from typing import Callable
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.tasks import lines, orders, payments, suppliers, wallet
+from app.tasks import lines, notifications, orders, payments, suppliers, wallet
 
 
 @dataclass(frozen=True)
@@ -60,6 +60,10 @@ def _supplier_inventory_refresh(db: Session, now: datetime) -> dict:
     )
 
 
+def _notification_dispatch(db: Session, now: datetime) -> dict:
+    return notifications.notification_dispatch(db, now)
+
+
 # 顺序即执行顺序：先跑影响钱和客户的，再跑上游刷新；库存是唯一需要逐个国家
 # 串行请求的任务，放最后，避免它拖慢同一轮里的关单和到期提醒。
 # 钱包巡检是只读的且很快，紧跟支付对账，保证"钱有问题"在每轮最早被看见。
@@ -72,6 +76,8 @@ SPECS = (
     # 避免刚过期的线路被"提醒"了一遍却没从正常列表里消失。
     TaskSpec("expire_lines", "线路到期标记", 60, _expire_lines),
     TaskSpec("line_expiry_reminders", "线路到期提醒", 360, _line_expiry_reminders),
+    # 通知分发：站内信落库后 1 分钟内推到企微等渠道；幂等靠投递流水唯一约束。
+    TaskSpec("notification_dispatch", "通知渠道分发", 1, _notification_dispatch),
     TaskSpec("supplier_catalog_refresh", "供应商目录刷新", 360, _supplier_catalog_refresh),
     TaskSpec("supplier_quotes_refresh", "供应商报价刷新", 360, _supplier_quotes_refresh),
     TaskSpec("supplier_inventory_refresh", "供应商库存刷新（按国家轮转）", 30, _supplier_inventory_refresh),
