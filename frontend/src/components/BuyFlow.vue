@@ -64,11 +64,17 @@ async function loadCatalog() {
     products.value = productResponse.data
     regions.value = regionResponse.data
     const saved = readSavedSelection()
+    // 详情页「开始选购」带着 ?product=<id> 过来，优先级最高：直接选中该 SKU 与它的地区。
+    const queryProduct = products.value.find((item) => String(item.id) === String(route.query.product || ''))
     const queryRegion = regions.value.find((item) => item.name === route.query.region)
-    const initialRegion = regions.value.find((item) => item.id === saved?.region_id) || queryRegion || regions.value[0]
+    const initialRegion = (queryProduct && regions.value.find((item) => item.id === queryProduct.region_id))
+      || regions.value.find((item) => item.id === saved?.region_id)
+      || queryRegion
+      || regions.value[0]
     selectRegion(initialRegion?.id ?? null)
     const savedProduct = availableProducts.value.find((item) => item.id === saved?.product_id)
-    if (savedProduct) selectedProductId.value = savedProduct.id
+    if (queryProduct) selectedProductId.value = queryProduct.id
+    else if (savedProduct) selectedProductId.value = savedProduct.id
     quantity.value = Math.min(100, Math.max(1, Number(saved?.quantity) || 1))
     billingDays.value = Number(saved?.billing_days) || selectedProduct.value?.billing_days || 30
   } catch (requestError) { error.value = requestError.userMessage } finally { loading.value = false }

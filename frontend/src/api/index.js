@@ -1,5 +1,4 @@
 import axios from 'axios'
-import { helpArticles, resources } from '../mocks/data'
 import { clearSession, onSessionChange, session, setSession } from './session'
 
 const client = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || '/api', timeout: 10000, withCredentials: true })
@@ -59,11 +58,9 @@ client.interceptors.response.use((response) => response, async (error) => {
   return Promise.reject(error)
 })
 
-// 仅教程和资源内容继续使用本地内容数据，业务接口全部请求后端。
-const contentMock = (data) => Promise.resolve({ data })
-export const getArticles = () => contentMock(helpArticles)
-export const getResources = () => contentMock(resources)
 export const getPublicProducts = () => client.get('/public/products')
+export const getPublicCatalog = () => client.get('/public/catalog')
+export const getPublicCatalogDetail = (code) => client.get(`/public/catalog/${encodeURIComponent(code)}`)
 export const getPublicProduct = (id) => client.get(`/public/products/${id}`)
 export const getPublicRegions = () => client.get('/public/regions')
 export const previewOrder = (payload) => client.post('/public/orders/preview', payload)

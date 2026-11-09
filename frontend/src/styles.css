@@ -23,3 +23,6 @@
 
 .renewal-hint{flex:1 0 100%;margin:2px 0 0;color:#6f817c;font-size:11px;line-height:1.65}
 .wallet-pending-note{margin:8px 0 0;color:#6f817c;font-size:11px}
+
+.catalog-state{padding:56px 0;color:#5f7b75;font-size:14px;text-align:center}
+.article-intro{font-size:17px;line-height:1.85;color:#415b56;border-left:3px solid #49c0ab;padding-left:14px;margin:0 0 26px}

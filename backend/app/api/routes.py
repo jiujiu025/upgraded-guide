@@ -776,6 +776,116 @@ def public_order_preview(payload: OrderPreviewIn, db: Session = Depends(get_db),
             "periods": periods_of(db, product), "total_amount": total}
 
 
+def _catalog_code(product: Product) -> str:
+    """官网展示用的分类编码。
+
+    有资源分类的商品按分类聚合（同一个国家 × 分类 × 周期会生成多条 Product，
+    官网不该把它们当成多个产品平铺）；固定价商品（resource_category 为空，
+    如直播专线）各自成组，用 ``fixed-<id>`` 保证 URL 是 ASCII。
+    """
+    return product.resource_category or f"fixed-{product.id}"
+
+
+def _public_catalog_rows(db: Session):
+    return db.execute(
+        select(Product, Region)
+        .join(Region, Product.region_id == Region.id)
+        .where(Product.is_active.is_(True), Region.is_active.is_(True))
+        .order_by(Region.id, Product.billing_days, Product.id)
+    ).all()
+
+
+def _build_catalog(rows, with_offers: bool) -> list[dict]:
+    """把商品行聚合成"分类 → 地区 → 价格档位"三层结构。
+
+    官网首页与产品列表只需要"起价 / 覆盖多少地区 / 有哪些周期"，
+    详情页才需要逐地区的价格表；用 ``with_offers`` 区分，避免列表接口返回整库。
+    """
+    groups: dict[str, dict] = {}
+    for product, region in rows:
+        code = _catalog_code(product)
+        group = groups.get(code)
+        if group is None:
+            group = groups[code] = {
+                "code": code,
+                "name": product.product_type or product.name,
+                "kind": "catalog" if product.resource_category else "fixed",
+                "min_price": None,
+                "periods": set(),
+                "in_stock": False,
+                "regions": {},
+            }
+        price = float(product.price)
+        group["min_price"] = price if group["min_price"] is None else min(group["min_price"], price)
+        group["periods"].add(product.billing_days)
+        group["in_stock"] = group["in_stock"] or bool(product.is_in_stock)
+        region_entry = group["regions"].get(region.id)
+        if region_entry is None:
+            region_entry = group["regions"][region.id] = {
+                "id": region.id,
+                "name": region.name,
+                "country_code": region.country_code,
+                "min_price": price,
+                "in_stock": bool(product.is_in_stock),
+            }
+            if with_offers:
+                region_entry["offers"] = []
+        else:
+            region_entry["min_price"] = min(region_entry["min_price"], price)
+            region_entry["in_stock"] = region_entry["in_stock"] or bool(product.is_in_stock)
+        if with_offers:
+            region_entry["offers"].append({
+                "product_id": product.id,
+                "billing_days": product.billing_days,
+                "unit_price": price,
+                "in_stock": bool(product.is_in_stock),
+            })
+    result = []
+    for group in groups.values():
+        regions = sorted(group["regions"].values(), key=lambda item: item["name"])
+        result.append({
+            "code": group["code"],
+            "name": group["name"],
+            "kind": group["kind"],
+            "min_price": group["min_price"],
+            "periods": sorted(group["periods"]),
+            "region_count": len(regions),
+            "in_stock": group["in_stock"],
+            "regions": regions,
+        })
+    result.sort(key=lambda item: (item["kind"] != "catalog", item["min_price"] or 0, item["name"]))
+    return result
+
+
+@router.get("/public/catalog")
+def public_catalog(db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
+    """官网用的产品目录：按分类聚合，带起价、地区覆盖与周期档位。
+
+    比 ``/public/products`` 更适合官网：后者是逐 SKU 展开，供应商同步之后一个分类
+    可能对应上百条商品，直接铺到首页会变成一堵墙。
+    """
+    rows = _public_catalog_rows(db)
+    categories = _build_catalog(rows, with_offers=False)
+    return {
+        "categories": categories,
+        "product_count": len(rows),
+        "region_count": len({region.id for _, region in rows}),
+    }
+
+
+@router.get("/public/catalog/{code}")
+def public_catalog_detail(code: str, db: Session = Depends(get_db), _: None = Depends(enforce_public_rate_limit)):
+    """单个分类的真实价格表：每个地区 × 每个周期的单价与库存。
+
+    详情页据此渲染"选地区看价"，价格全部来自业务库，前端不参与计算。
+    """
+    rows = _public_catalog_rows(db)
+    for category in _build_catalog(rows, with_offers=True):
+        if category["code"] == code:
+            return category
+    raise HTTPException(status_code=404, detail="产品分类不存在或已下架")
+
+
 # 客户接口：客户身份和数据范围全部从 Token 解析。
 @router.get("/customer/me", response_model=CustomerOut)
 def customer_me(db: Session = Depends(get_db), user: User = Depends(require_roles("customer"))):

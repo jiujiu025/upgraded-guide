@@ -22,11 +22,13 @@ from app.main import app
 from app.models import (
     Customer, CustomerLine, Node, Product, Region, RetailPriceRule, RenewalOutreach, User,
 )
-from app.models.base import Base
+from app.models.base import Base, utcnow
 from app.services.registration_service import registration_rate_limiter
 from app.services.renewal_outreach_service import outreach_queue
 
-NOW = datetime(2026, 11, 8, 12, 0, 0)
+# 以真实当前时间为基准：之前写死 2026-11-08，随着日历推移 "还剩 N 天" 的断言
+# 必然失败（跑一次少一天），属于定时炸弹式的测试。
+NOW = utcnow()
 
 
 @pytest.fixture()

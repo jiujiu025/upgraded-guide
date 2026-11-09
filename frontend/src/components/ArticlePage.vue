@@ -1,7 +1,58 @@
 <script setup>
+// 文章页：按路由 slug 取真实条目，不再"所有链接同一篇"。
+// 内容在 src/content/articles.js；业务数据（产品/价格）不在这里。
+import { computed } from 'vue'
 import { ArrowLeft, ArrowRight, BookOpen } from 'lucide-vue-next'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import Footer from './Footer.vue'
+import { articleNeighbours, findArticle } from '../content/articles'
+
+const route = useRoute()
 const router = useRouter()
+const article = computed(() => findArticle(String(route.params.slug || '')))
+const neighbours = computed(() => articleNeighbours(String(route.params.slug || '')))
+const isHelp = computed(() => ['clash', 'v2ray', 'nekobox', 'import'].includes(article.value?.slug))
+const backPath = computed(() => (isHelp.value ? '/help' : '/resources'))
 </script>
-<template><div><section class="article-hero"><p class="eyebrow">GUIDE / NETWORK OPERATIONS</p><h1>跨境团队如何建立<br />可交付的网络线路流程</h1><p>从需求梳理到线路导入，一套更容易协作的工作方法。</p></section><section class="article-layout"><aside><div class="toc-title"><BookOpen :size="15" />本文目录</div><a href="#scene">先明确业务场景</a><a href="#delivery">再确认交付内容</a><a href="#check">上线前检查</a></aside><article class="article-body"><div class="article-meta">出海网络指南 · 2026.06.18 · 6 分钟阅读</div><h2 id="scene">先明确业务场景</h2><p>直播、短视频、社媒运营对地区线路的关注点不同。先确认业务平台、团队人数和使用周期，再选择线路类型，可以减少后续反复更换。</p><h2 id="delivery">再确认交付内容</h2><p>一条线路不应该只交付一个模糊的“节点”。需要明确地区、线路名称、静态 IP、节点链接、订阅地址、二维码和开通状态。</p><h2 id="check">上线前检查</h2><ul><li>确认客户端版本与协议支持</li><li>完成一台设备的导入验证</li><li>记录订单和到期时间</li></ul><div class="article-nav"><button @click="router.push('/resources')"><ArrowLeft :size="15" />返回资源中心</button><button @click="router.push('/help/clash')">下一篇 <ArrowRight :size="15" /></button></div></article></section><Footer /></div></template>
+
+<template>
+  <div>
+    <section v-if="!article" class="article-hero">
+      <p class="eyebrow">GUIDE / NOT FOUND</p>
+      <h1>这篇内容还在整理</h1>
+      <p>你可以先回到教程或资源中心，看已经发布的内容。</p>
+      <button class="button" @click="router.push('/help')">返回教程 <ArrowRight :size="15" /></button>
+    </section>
+    <template v-else>
+      <section class="article-hero">
+        <p class="eyebrow">GUIDE / {{ article.category || article.tag }}</p>
+        <h1>{{ article.title }}</h1>
+        <p>{{ article.desc || article.intro }}</p>
+      </section>
+      <section class="article-layout">
+        <aside>
+          <div class="toc-title"><BookOpen :size="15" />本文目录</div>
+          <a v-for="section in article.sections" :key="section.id" :href="'#' + section.id">{{ section.heading }}</a>
+        </aside>
+        <article class="article-body">
+          <div class="article-meta">{{ article.category || article.tag }}<template v-if="article.date"> · {{ article.date }}</template><template v-if="article.time"> · {{ article.time }}</template></div>
+          <p v-if="article.intro" class="article-intro">{{ article.intro }}</p>
+          <template v-for="section in article.sections" :key="section.id">
+            <h2 :id="section.id">{{ section.heading }}</h2>
+            <p v-for="(paragraph, index) in section.body" :key="index">{{ paragraph }}</p>
+            <ul v-if="section.bullets">
+              <li v-for="item in section.bullets" :key="item">{{ item }}</li>
+            </ul>
+          </template>
+          <div class="article-nav">
+            <button @click="router.push(backPath)"><ArrowLeft :size="15" />返回{{ isHelp ? '教程' : '资源中心' }}</button>
+            <button v-if="neighbours.next" @click="router.push('/' + (isHelp ? 'help/' : 'guide/') + neighbours.next.slug)">
+              下一篇：{{ neighbours.next.title }} <ArrowRight :size="15" />
+            </button>
+          </div>
+        </article>
+      </section>
+    </template>
+    <Footer />
+  </div>
+</template>
