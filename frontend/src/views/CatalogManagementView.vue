@@ -4,9 +4,9 @@ import { Check, ChevronLeft, ChevronRight, CircleAlert, Database, PackageCheck, 
 import AppSelect from '../components/AppSelect.vue'
 import PriceCell from '../components/PriceCell.vue'
 import {
-  bulkUpdateManagedCatalogProducts, bulkUpdateManagedRetailPrices,
-  getManagedCatalogProducts, getManagedRetailPrices,
-  updateManagedCatalogProduct, updateManagedRetailPrice,
+  bulkUpdateCatalogListings, bulkUpdateManagedCatalogProducts, bulkUpdateManagedRetailPrices,
+  getCatalogListings, getManagedCatalogProducts, getManagedRetailPrices,
+  setManagedProductActive, updateCatalogListing, updateManagedCatalogProduct, updateManagedRetailPrice,
 } from '../api'
 
 const tab = ref('products')
@@ -31,6 +31,28 @@ const priceFilter = reactive({ resource_category: '', country_code: '', billing_
 const selectedPrices = ref(new Set())
 const retailBulkPrice = ref('')
 const pendingBulk = ref('')
+// 官网可见性：三条线 × 全部启用国家的上架状态
+const listings = ref({ lines: [], regions: [], cells: [], summary: {} })
+const listingFilter = ref('')
+const listingBusy = ref(false)
+const listingFilterOptions = [
+  { value: '', label: '全部国家' },
+  { value: 'missing', label: '仅缺报价' },
+  { value: 'unlisted', label: '仅已下架' },
+]
+const listingRows = computed(() => {
+  const rows = new Map()
+  for (const cell of listings.value.cells || []) {
+    if (!rows.has(cell.region_id)) {
+      rows.set(cell.region_id, { id: cell.region_id, name: cell.region_name, code: cell.country_code, cells: {} })
+    }
+    rows.get(cell.region_id).cells[cell.line_code] = cell
+  }
+  const all = [...rows.values()]
+  if (listingFilter.value === 'missing') return all.filter((row) => Object.values(row.cells).every((c) => !c.has_price))
+  if (listingFilter.value === 'unlisted') return all.filter((row) => Object.values(row.cells).every((c) => !c.visible))
+  return all
+})
 const productPageCount = computed(() => Math.max(1, Math.ceil(productTotal.value / 25)))
 const pricePageCount = computed(() => Math.max(1, Math.ceil(priceTotal.value / 50)))
 const selectedProductList = computed(() => products.value.filter((item) => selectedProducts.value.has(item.id)))
@@ -135,10 +157,73 @@ async function loadPrices() {
   }
 }
 
+async function loadListings() {
+  loading.value = true
+  error.value = ''
+  try {
+    listings.value = (await getCatalogListings()).data
+  } catch (requestError) {
+    error.value = requestError.userMessage || '官网可见性加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
 async function loadCurrent() {
   pendingBulk.value = ''
   if (tab.value === 'products') await loadProducts()
-  else await loadPrices()
+  else if (tab.value === 'prices') await loadPrices()
+  else await loadListings()
+}
+
+/** 点格子直接切换：上架/下架是一次点击就生效的操作，不用再弹一次确认。 */
+async function toggleListing(cell) {
+  if (!cell || listingBusy.value) return
+  const next = cell.visible ? 'unlisted' : 'listed'
+  listingBusy.value = true
+  error.value = ''
+  try {
+    await updateCatalogListing({ line_code: cell.line_code, region_id: cell.region_id, status: next })
+    await loadListings()
+    showNotice(`${cell.region_name} · ${cell.line_name} 已${next === 'listed' ? '上架' : '下架'}`)
+  } catch (requestError) {
+    error.value = requestError.userMessage || '切换上架状态失败'
+  } finally {
+    listingBusy.value = false
+  }
+}
+
+async function bulkToggleLine(line, status) {
+  if (listingBusy.value) return
+  const regionIds = [...new Set((listings.value.cells || []).map((cell) => cell.region_id))]
+  if (!regionIds.length) return
+  listingBusy.value = true
+  error.value = ''
+  try {
+    const { data } = await bulkUpdateCatalogListings({ line_code: line.code, region_ids: regionIds, status })
+    await loadListings()
+    showNotice(`${line.name}：${data.updated} 个国家已${status === 'listed' ? '上架' : '下架'}`)
+  } catch (requestError) {
+    error.value = requestError.userMessage || '批量切换失败'
+  } finally {
+    listingBusy.value = false
+  }
+}
+
+/** 商品级上下架：停用后整条商品在所有国家都不出现。 */
+async function toggleProductActive(item) {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    await setManagedProductActive(item.id, !item.is_active)
+    await loadProducts()
+    showNotice(`${item.name} 已${item.is_active ? '下架' : '上架'}`)
+  } catch (requestError) {
+    error.value = requestError.userMessage || '切换商品上架状态失败'
+  } finally {
+    busy.value = false
+  }
 }
 
 /**
@@ -301,7 +386,7 @@ onMounted(loadProducts)
     <div v-if="notice" class="catalog-notice" role="status"><Check :size="15" />{{ notice }}</div>
     <div v-if="error" class="catalog-error" role="alert"><CircleAlert :size="15" /><span>{{ error }}</span><button type="button" aria-label="关闭提示" @click="error = ''"><X :size="15" /></button></div>
 
-    <nav class="catalog-tabs" aria-label="价格管理类别"><button type="button" :class="{ active: tab === 'products' }" @click="tab = 'products'; loadProducts()"><PackageCheck :size="15" />官网商品</button><button type="button" :class="{ active: tab === 'prices' }" @click="tab = 'prices'; loadPrices()"><Tags :size="15" />国家周期售价 <span>{{ priceTotal }}</span></button></nav>
+    <nav class="catalog-tabs" aria-label="价格管理类别"><button type="button" :class="{ active: tab === 'products' }" @click="tab = 'products'; loadProducts()"><PackageCheck :size="15" />官网商品</button><button type="button" :class="{ active: tab === 'prices' }" @click="tab = 'prices'; loadPrices()"><Tags :size="15" />国家周期售价 <span>{{ priceTotal }}</span></button><button type="button" :class="{ active: tab === 'listings' }" @click="tab = 'listings'; loadListings()"><Database :size="15" />官网可见性</button></nav>
 
     <template v-if="tab === 'products'">
       <form class="catalog-filters" @submit.prevent="applyProductFilters"><label class="search-field"><Search :size="15" /><input v-model="productFilter.keyword" type="search" placeholder="搜索商品、类型或地区" /></label><AppSelect v-model="productFilter.stock" :options="stockFilterOptions" aria-label="按售卖状态筛选" /><button class="secondary-action" type="submit">筛选</button></form>
@@ -313,12 +398,12 @@ onMounted(loadProducts)
       <section class="catalog-table-section">
         <div v-if="loading" class="table-state"><RefreshCw :size="17" class="spinning" />正在加载商品</div>
         <div v-else-if="!products.length" class="table-state"><Database :size="22" />没有匹配的商品</div>
-        <div v-else class="table-scroll"><table class="catalog-table"><thead><tr><th class="select-column"><input type="checkbox" aria-label="选择当前页全部商品" :checked="products.length > 0 && products.every((item) => selectedProducts.has(item.id))" @change="toggleAllProducts($event.target.checked)" /></th><th>商品</th><th>地区</th><th>计费周期</th><th>官网售价</th><th>手动售卖状态</th></tr></thead><tbody><tr v-for="item in products" :key="item.id"><td class="select-column"><input type="checkbox" :aria-label="`选择 ${item.name}`" :checked="selectedProducts.has(item.id)" @change="toggleProductSelection(item.id, $event.target.checked)" /></td><td><b>{{ item.name }}</b><small>{{ item.product_type }} · #{{ item.id }}</small></td><td>{{ item.region_name || '—' }}</td><td>{{ item.billing_days }} 天</td><td><PriceCell :value="item.price" :locked="item.price_locked" :busy="busy" :aria-label="`${item.name} 售价`" lock-hint="价格由零售价目表的月价决定，请在「国家周期售价」页修改" @save="saveProductPrice(item, $event)" /><small v-if="item.price_locked">随月价联动</small></td><td><AppSelect compact :model-value="item.is_in_stock" :options="productStockOptions" :disabled="busy" :aria-label="`${item.name} 售卖状态`" @update:model-value="saveProductStock(item, $event)" /></td></tr></tbody></table></div>
+        <div v-else class="table-scroll"><table class="catalog-table"><thead><tr><th class="select-column"><input type="checkbox" aria-label="选择当前页全部商品" :checked="products.length > 0 && products.every((item) => selectedProducts.has(item.id))" @change="toggleAllProducts($event.target.checked)" /></th><th>商品</th><th>地区</th><th>计费周期</th><th>官网售价</th><th>手动售卖状态</th><th>官网上架</th></tr></thead><tbody><tr v-for="item in products" :key="item.id"><td class="select-column"><input type="checkbox" :aria-label="`选择 ${item.name}`" :checked="selectedProducts.has(item.id)" @change="toggleProductSelection(item.id, $event.target.checked)" /></td><td><b>{{ item.name }}</b><small>{{ item.product_type }} · #{{ item.id }}</small></td><td>{{ item.region_name || '—' }}</td><td>{{ item.billing_days }} 天</td><td><PriceCell :value="item.price" :locked="item.price_locked" :busy="busy" :aria-label="`${item.name} 售价`" lock-hint="价格由零售价目表的月价决定，请在「国家周期售价」页修改" @save="saveProductPrice(item, $event)" /><small v-if="item.price_locked">随月价联动</small></td><td><AppSelect compact :model-value="item.is_in_stock" :options="productStockOptions" :disabled="busy" :aria-label="`${item.name} 售卖状态`" @update:model-value="saveProductStock(item, $event)" /></td><td><button class="product-active" :class="{ off: !item.is_active }" type="button" :disabled="busy" :title="item.is_active ? '点击下架（官网不再展示）' : '点击上架'" @click="toggleProductActive(item)">{{ item.is_active ? '上架' : '下架' }}</button></td></tr></tbody></table></div>
         <footer v-if="productTotal" class="table-footer"><span>{{ productTotal }} 个商品 · 第 {{ productPage }} / {{ productPageCount }} 页</span><div><button type="button" aria-label="上一页" :disabled="productPage <= 1 || loading" @click="productPage--; loadProducts()"><ChevronLeft :size="16" /></button><button type="button" aria-label="下一页" :disabled="productPage >= productPageCount || loading" @click="productPage++; loadProducts()"><ChevronRight :size="16" /></button></div></footer>
       </section>
     </template>
 
-    <template v-else>
+    <template v-else-if="tab === 'prices'">
       <form class="catalog-filters retail-filters" @submit.prevent="applyPriceFilters">
         <label><span>资源类型</span><AppSelect v-model="priceFilter.resource_category" :options="categoryOptions" aria-label="按资源类型筛选" /></label>
         <label><span>国家/地区</span><AppSelect v-model="priceFilter.country_code" :options="countryFilterOptions" aria-label="按国家筛选" /></label>
@@ -333,11 +418,89 @@ onMounted(loadProducts)
         <footer v-if="priceTotal" class="table-footer"><span>{{ priceTotal }} 条价格规则 · 第 {{ pricePage }} / {{ pricePageCount }} 页</span><div><button type="button" aria-label="上一页" :disabled="pricePage <= 1 || loading" @click="pricePage--; loadPrices()"><ChevronLeft :size="16" /></button><button type="button" aria-label="下一页" :disabled="pricePage >= pricePageCount || loading" @click="pricePage++; loadPrices()"><ChevronRight :size="16" /></button></div></footer>
       </section>
     </template>
+
+    <template v-else>
+      <div class="listing-summary">
+        <span>共 <b>{{ listings.summary.total || 0 }}</b> 个组合</span>
+        <span>在售 <b>{{ listings.summary.listed || 0 }}</b></span>
+        <span>已下架 <b>{{ listings.summary.unlisted || 0 }}</b></span>
+        <span>缺报价 <b>{{ listings.summary.missing_price || 0 }}</b></span>
+        <span v-if="listings.summary.manual">人工调整过 <b>{{ listings.summary.manual }}</b></span>
+        <span class="listing-hint">缺报价的国家默认不上架；点格子即可切换，点完立即生效</span>
+      </div>
+      <form class="catalog-filters" @submit.prevent>
+        <label><span>筛选</span><AppSelect v-model="listingFilter" :options="listingFilterOptions" aria-label="筛选国家" /></label>
+      </form>
+      <section class="catalog-table-section">
+        <div v-if="loading" class="table-state"><RefreshCw :size="17" class="spinning" />正在加载可见性</div>
+        <div v-else-if="!listingRows.length" class="table-state"><Database :size="22" />没有匹配的国家</div>
+        <div v-else class="table-scroll">
+          <table class="catalog-table listing-table">
+            <thead>
+              <tr>
+                <th>国家/地区</th>
+                <th v-for="line in listings.lines" :key="line.code">
+                  <div class="listing-head">
+                    <span>{{ line.name }}</span>
+                    <em>
+                      <button type="button" :disabled="listingBusy" @click="bulkToggleLine(line, 'listed')">全上架</button>
+                      <button type="button" :disabled="listingBusy" @click="bulkToggleLine(line, 'unlisted')">全下架</button>
+                    </em>
+                  </div>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in listingRows" :key="row.id">
+                <td><b>{{ row.name }}</b><small>{{ row.code }}</small></td>
+                <td v-for="line in listings.lines" :key="line.code">
+                  <button
+                    type="button"
+                    class="listing-cell"
+                    :class="!row.cells[line.code] ? 'off' : !row.cells[line.code].visible ? 'off' : (row.cells[line.code].has_price ? 'on' : 'no-price')"
+                    :disabled="listingBusy"
+                    :title="row.cells[line.code]?.source === 'manual' ? '人工调整过' : '按报价自动推导'"
+                    @click="toggleListing(row.cells[line.code])"
+                  >
+                    <template v-if="row.cells[line.code]">
+                      {{ row.cells[line.code].visible ? (row.cells[line.code].has_price ? '在售' : '无报价') : '已下架' }}
+                      <i v-if="row.cells[line.code].source === 'manual'">·手</i>
+                    </template>
+                    <template v-else>—</template>
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </template>
   </main>
 </template>
 
 <style scoped>
 .catalog-admin{min-height:100vh;padding:30px clamp(16px,3vw,40px) 42px;background:#f2f5f3;color:#263b33}.catalog-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.catalog-header h1{margin:0;font-size:23px;line-height:1.25}.catalog-header p{margin:6px 0 0;color:#71827a;font-size:11px}.icon-button{width:36px;height:36px;display:grid;place-items:center;border:1px solid #d1ddd6;border-radius:5px;background:#fff;color:#47675a}.icon-button:disabled{opacity:.45}.catalog-notice,.catalog-error{display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:10px 12px;border:1px solid #bfdeca;border-radius:5px;background:#eef8f1;color:#2d6e4d;font-size:11px}.catalog-error{border-color:#e5c2bb;background:#fff2ef;color:#984a3d}.catalog-error span{flex:1}.catalog-tabs{display:flex;gap:5px;margin-bottom:14px;border-bottom:1px solid #d8e2dc}.catalog-tabs button{min-height:41px;display:flex;align-items:center;gap:7px;padding:0 12px;border-bottom:2px solid transparent;color:#6a7d74;font-size:11px}.catalog-tabs button.active{border-color:#2c8167;color:#1f6b53;font-weight:700}.catalog-tabs button span{color:#7b8b83;font-size:9px}.catalog-filters{display:flex;align-items:end;gap:9px;margin-bottom:12px;padding:12px;background:#fff;border:1px solid #dce5e0;border-radius:6px}.catalog-filters>label{display:grid;gap:5px;color:#62776d;font-size:10px}.catalog-filters select,.catalog-filters input{height:35px;min-width:150px;padding:0 9px;border:1px solid #cfdad4;border-radius:4px;background:#fff;color:#334a40;font:inherit;font-size:10px}.search-field{flex:1;display:flex!important;align-items:center;gap:7px;padding:0 9px;border:1px solid #cfdad4;border-radius:4px;color:#7b8c84}.search-field input{width:100%;min-width:0;border:0;outline:0}.search-field:focus-within{outline:2px solid #7bb49c;outline-offset:1px}.secondary-action,.primary-action,.save-row,.text-action{min-height:34px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 10px;border:1px solid #cfdbd5;border-radius:4px;background:#fff;color:#476459;font-size:10px;font-weight:650;white-space:nowrap}.secondary-action:hover,.save-row:hover{background:#f1f7f3;border-color:#a8c7b8}.primary-action{border-color:#26785f;background:#26785f;color:#fff}.primary-action:hover{background:#1e694f}.primary-action:disabled,.save-row:disabled{opacity:.45;cursor:not-allowed}.text-action{min-height:auto;padding:3px;border:0;color:#527467}.bulk-editor{margin-bottom:12px;padding:13px 14px;background:#fff;border:1px solid #d9e4de;border-radius:6px}.bulk-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.bulk-head b{font-size:11px}.bulk-fields{display:flex;align-items:end;gap:10px}.bulk-fields label{display:grid;gap:5px;min-width:190px;color:#657971;font-size:9px}.bulk-fields input,.bulk-fields select{height:34px;padding:0 9px;border:1px solid #cedbd4;border-radius:4px;background:#fff;color:#30483d;font-size:10px}.retail-bulk label{min-width:240px}.bulk-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:11px;padding-top:11px;border-top:1px solid #e6ece8}.bulk-confirm span{flex:1 1 280px;color:#405a4e;font-size:10px}.catalog-table-section{overflow:hidden;background:#fff;border:1px solid #dce5e0;border-radius:6px}.table-scroll{width:100%;overflow:auto}.catalog-table{width:100%;min-width:830px;border-collapse:collapse;text-align:left}.retail-table{min-width:1050px}.catalog-table th{height:40px;padding:0 11px;background:#f6f8f7;border-bottom:1px solid #e3eae6;color:#6f8178;font-size:9px;font-weight:650;white-space:nowrap}.catalog-table td{height:58px;padding:8px 11px;border-bottom:1px solid #edf1ef;color:#485e53;font-size:10px;white-space:nowrap}.catalog-table tr:last-child td{border-bottom:0}.catalog-table tbody tr:hover{background:#fafcfb}.catalog-table td:nth-child(2){min-width:170px}.catalog-table td:nth-child(2) b{display:block;color:#2d4439;font-size:11px}.catalog-table td:nth-child(2) small{display:block;margin-top:3px;color:#829188;font-size:9px}.catalog-table input[type="checkbox"]{width:15px;height:15px;accent-color:#287a61}.select-column{width:36px;text-align:center}.catalog-table select{height:32px;padding:0 7px;border:1px solid #d1ddd6;border-radius:4px;background:#fff;color:#40594d;font-size:10px}.price-input{width:112px;height:32px;display:flex;align-items:center;gap:4px;padding:0 7px;border:1px solid #cfdcd5;border-radius:4px;background:#fff;color:#73867c}.price-input:focus-within{border-color:#448d70;box-shadow:0 0 0 2px #448d701c}.price-input input{width:100%;min-width:0;border:0;outline:0;color:#2f4b3c;font-size:11px;font-variant-numeric:tabular-nums}.save-row{min-height:30px;padding:0 8px}.country-code{display:inline-grid;place-items:center;min-width:33px;padding:4px;border-radius:3px;background:#eff5f1;color:#536c60;font-size:9px}.table-state{min-height:200px;display:flex;align-items:center;justify-content:center;gap:8px;color:#7d8c84;font-size:11px}.table-footer{min-height:44px;display:flex;align-items:center;justify-content:space-between;padding:6px 11px;border-top:1px solid #e6ece9;color:#788981;font-size:9px}.table-footer>div{display:flex;gap:5px}.table-footer button{width:28px;height:28px;display:grid;place-items:center;border:1px solid #d3ded8;border-radius:4px;background:#fff;color:#4e685d}.table-footer button:disabled{opacity:.35;cursor:not-allowed}.spinning{animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.catalog-admin :focus-visible{outline:2px solid #39866a;outline-offset:2px}
+.product-active{min-height:28px;padding:0 9px;border:1px solid #a6d5b6;border-radius:4px;background:#eaf7ef;color:#1f6b53;font-size:10px;font-weight:650;cursor:pointer}
+.product-active.off{border-color:#dfe6e2;background:#f4f6f5;color:#8a9a92}
+.product-active:hover:not(:disabled){filter:brightness(.975)}
+.product-active:disabled{opacity:.5;cursor:progress}
+.listing-summary{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:12px;padding:10px 12px;background:#fff;border:1px solid #dce5e0;border-radius:6px;color:#5f776d;font-size:10px}
+.listing-summary b{color:#1f6b53;font-size:12px}
+.listing-hint{color:#8a9a92;margin-left:auto}
+.listing-head{display:flex;flex-direction:column;gap:5px;align-items:flex-start}
+.listing-head em{display:flex;gap:4px;font-style:normal}
+.listing-head button{padding:2px 6px;border:1px solid #d3ded8;border-radius:3px;background:#fff;color:#4e685d;font-size:9px;cursor:pointer}
+.listing-head button:hover:not(:disabled){background:#f1f7f3;border-color:#a8c7b8}
+.listing-head button:disabled{opacity:.5;cursor:progress}
+.listing-cell{min-width:92px;height:28px;display:inline-flex;align-items:center;justify-content:center;gap:4px;border:1px solid #cfdbd5;border-radius:4px;font-size:10px;font-weight:650;cursor:pointer;transition:background .12s}
+.listing-cell.on{background:#eaf7ef;border-color:#a6d5b6;color:#1f6b53}
+.listing-cell.no-price{background:#fff8e8;border-color:#e4d0a2;color:#8a6a22}
+.listing-cell.off{background:#f4f6f5;border-color:#dfe6e2;color:#8a9a92}
+.listing-cell:hover:not(:disabled){filter:brightness(.975)}
+.listing-cell i{font-style:normal;color:#8a9a92;font-size:9px}
+.listing-cell:disabled{opacity:.6;cursor:progress}
+.listing-table td:first-child b{display:block;font-size:11px;color:#2d4439}
+.listing-table td:first-child small{display:block;color:#829188;font-size:9px;margin-top:2px}
 @media(max-width:760px){.catalog-admin{padding:68px 13px 26px}.catalog-filters{align-items:stretch;flex-wrap:wrap}.catalog-filters .search-field{flex-basis:100%}.catalog-filters>label{flex:1}.catalog-filters select,.catalog-filters input{min-width:0;width:100%}.bulk-fields{align-items:stretch;flex-direction:column}.bulk-fields label,.retail-bulk label{min-width:0}.bulk-fields .primary-action{align-self:flex-start}.catalog-header h1{font-size:20px}}
 @media(max-width:420px){.catalog-tabs button{padding:0 8px;font-size:10px}.catalog-filters .secondary-action{flex:1}.bulk-confirm{align-items:stretch}.bulk-confirm span{flex-basis:100%}.bulk-confirm button{flex:1}}
 @media(prefers-reduced-motion:reduce){.spinning{animation:none}}

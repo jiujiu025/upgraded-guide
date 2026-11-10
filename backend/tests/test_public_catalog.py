@@ -93,10 +93,18 @@ def test_public_catalog_has_three_lines_and_no_prices(api):
     assert body["price_visible"] is False
     codes = [line["code"] for line in body["lines"]]
     assert codes == ["residential", "social", "live"]
+    # 缺价国家默认不出现（法国一点报价都没有）——客户看到"暂无报价"会以为系统坏了。
+    # 副作用是三条线不再共用同一份国家清单：每条线只列出自己有商品的国家。
+    expected_regions = {
+        "residential": {"美国", "日本", "德国"},  # 德国停售但仍有商品行
+        "social": {"美国", "日本"},
+        "live": {"美国"},
+    }
     for line in body["lines"]:
-        # 三条线的国家列表必须一致，且包含没有报价的国家（德国）
-        assert line["region_count"] == 4
-        assert {region["name"] for region in line["regions"]} == {"美国", "日本", "德国", "法国"}
+        names = {region["name"] for region in line["regions"]}
+        assert names == expected_regions[line["code"]]
+        assert line["region_count"] == len(expected_regions[line["code"]])
+        assert "法国" not in names
         assert line["min_price"] is None
         for region in line["regions"]:
             assert region["min_price"] is None
@@ -122,9 +130,8 @@ def test_signed_in_catalog_exposes_prices(api):
     residential_regions = {region["name"]: region for region in lines["residential"]["regions"]}
     assert residential_regions["美国"]["min_price"] == 60.0
     assert residential_regions["日本"]["min_price"] == 85.0
-    # 一点报价都没有的国家仍在列表里，价格为 null
-    assert residential_regions["法国"]["min_price"] is None
-    assert residential_regions["法国"]["offers"] == []
+    # 缺价国家不出现在列表里（默认规则），而不是出现后标"暂无报价"
+    assert "法国" not in residential_regions
     # 有商品但停售：价格仍然展示，国家标记为不可下单
     assert residential_regions["德国"]["min_price"] == 85.0
     assert residential_regions["德国"]["in_stock"] is False

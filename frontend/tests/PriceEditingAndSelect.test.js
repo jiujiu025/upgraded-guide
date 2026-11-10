@@ -3,6 +3,10 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({
+  bulkUpdateCatalogListings: vi.fn(),
+  getCatalogListings: vi.fn(),
+  setManagedProductActive: vi.fn(),
+  updateCatalogListing: vi.fn(),
   bulkUpdateManagedCatalogProducts: vi.fn(),
   bulkUpdateManagedRetailPrices: vi.fn(),
   getManagedCatalogProducts: vi.fn(),
@@ -170,6 +174,31 @@ describe('价格管理页接入', () => {
       data: { items: [], total: 0, categories: [], countries: [], billing_days_options: [30] },
     })
     api.updateManagedCatalogProduct.mockResolvedValue({ data: {} })
+    api.updateCatalogListing.mockResolvedValue({ data: {} })
+    api.bulkUpdateCatalogListings.mockResolvedValue({ data: { updated: 3 } })
+    api.setManagedProductActive.mockResolvedValue({ data: { changed: true } })
+    api.getCatalogListings.mockResolvedValue({
+      data: {
+        lines: [
+          { code: 'residential', name: '静态住宅IP' },
+          { code: 'social', name: '社媒运营专线' },
+          { code: 'live', name: '直播专线' },
+        ],
+        regions: [
+          { id: 1, name: '美国', country_code: 'US' },
+          { id: 2, name: '荷兰', country_code: 'NL' },
+        ],
+        cells: [
+          { line_code: 'residential', line_name: '静态住宅IP', region_id: 1, region_name: '美国', country_code: 'US', has_price: true, status: 'listed', source: 'default', visible: true },
+          { line_code: 'social', line_name: '社媒运营专线', region_id: 1, region_name: '美国', country_code: 'US', has_price: true, status: 'listed', source: 'default', visible: true },
+          { line_code: 'live', line_name: '直播专线', region_id: 1, region_name: '美国', country_code: 'US', has_price: true, status: 'listed', source: 'default', visible: true },
+          { line_code: 'residential', line_name: '静态住宅IP', region_id: 2, region_name: '荷兰', country_code: 'NL', has_price: true, status: 'listed', source: 'default', visible: true },
+          { line_code: 'social', line_name: '社媒运营专线', region_id: 2, region_name: '荷兰', country_code: 'NL', has_price: false, status: 'unlisted', source: 'default', visible: false },
+          { line_code: 'live', line_name: '直播专线', region_id: 2, region_name: '荷兰', country_code: 'NL', has_price: true, status: 'listed', source: 'default', visible: true },
+        ],
+        summary: { total: 6, listed: 5, unlisted: 1, missing_price: 1, manual: 0 },
+      },
+    })
   })
 
   it('筛选状态下拉打开后不再有原生 select，选"无货"会刷新列表', async () => {
@@ -204,6 +233,76 @@ describe('价格管理页接入', () => {
     await flushPromises()
 
     expect(api.updateManagedCatalogProduct).toHaveBeenCalledWith(12, { price: 88 })
+    wrapper.unmount()
+  })
+})
+
+describe('官网可见性页签', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    Object.values(api).forEach((fn) => fn.mockReset())
+    api.getManagedCatalogProducts.mockResolvedValue({ data: { items: [], total: 0 } })
+    api.getManagedRetailPrices.mockResolvedValue({ data: { items: [], total: 0, categories: [], countries: [], billing_days_options: [30] } })
+    api.getCatalogListings.mockResolvedValue({
+      data: {
+        lines: [
+          { code: 'residential', name: '静态住宅IP' },
+          { code: 'social', name: '社媒运营专线' },
+        ],
+        regions: [
+          { id: 1, name: '美国', country_code: 'US' },
+          { id: 2, name: '荷兰', country_code: 'NL' },
+        ],
+        cells: [
+          { line_code: 'residential', line_name: '静态住宅IP', region_id: 1, region_name: '美国', country_code: 'US', has_price: true, status: 'listed', source: 'default', visible: true },
+          { line_code: 'social', line_name: '社媒运营专线', region_id: 1, region_name: '美国', country_code: 'US', has_price: true, status: 'listed', source: 'default', visible: true },
+          { line_code: 'residential', line_name: '静态住宅IP', region_id: 2, region_name: '荷兰', country_code: 'NL', has_price: true, status: 'listed', source: 'default', visible: true },
+          { line_code: 'social', line_name: '社媒运营专线', region_id: 2, region_name: '荷兰', country_code: 'NL', has_price: false, status: 'unlisted', source: 'default', visible: false },
+        ],
+        summary: { total: 4, listed: 3, unlisted: 1, missing_price: 1, manual: 0 },
+      },
+    })
+    api.updateCatalogListing.mockResolvedValue({ data: {} })
+    api.bulkUpdateCatalogListings.mockResolvedValue({ data: { updated: 2 } })
+  })
+
+  it('缺价国家显示为已下架，点击后调用接口改成上架', async () => {
+    const wrapper = mount(CatalogManagementView, { attachTo: document.body })
+    await flushPromises()
+
+    const tabButton = wrapper.findAll('.catalog-tabs button').find((item) => item.text().includes('官网可见性'))
+    await tabButton.trigger('click')
+    await flushPromises()
+
+    expect(api.getCatalogListings).toHaveBeenCalled()
+    const cells = wrapper.findAll('.listing-cell')
+    // 荷兰社媒那一格是"已下架"
+    const offCell = cells.find((item) => item.text().includes('已下架'))
+    expect(offCell).toBeTruthy()
+    expect(offCell.classes()).toContain('off')
+
+    await offCell.trigger('click')
+    await flushPromises()
+    expect(api.updateCatalogListing).toHaveBeenCalledWith({
+      line_code: 'social', region_id: 2, status: 'listed',
+    })
+    wrapper.unmount()
+  })
+
+  it('整线批量下架会带上该线所有国家', async () => {
+    const wrapper = mount(CatalogManagementView, { attachTo: document.body })
+    await flushPromises()
+    const tabButton = wrapper.findAll('.catalog-tabs button').find((item) => item.text().includes('官网可见性'))
+    await tabButton.trigger('click')
+    await flushPromises()
+
+    const bulkButtons = wrapper.findAll('.listing-head button').filter((item) => item.text() === '全下架')
+    await bulkButtons[0].trigger('click')
+    await flushPromises()
+
+    expect(api.bulkUpdateCatalogListings).toHaveBeenCalledWith({
+      line_code: 'residential', region_ids: [1, 2], status: 'unlisted',
+    })
     wrapper.unmount()
   })
 })

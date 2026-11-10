@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
 from app.db import get_db
-from app.data.site_catalog import ACTIVE_CATEGORIES
-from app.models import Product, Region, RetailPriceRule, User
+from app.data.site_catalog import ACTIVE_CATEGORIES, CATEGORY_TO_LINE, LINE_LABELS
+from app.models import CatalogListing, Product, Region, RetailPriceRule, User
 from app.services.audit_service import write_audit
 from app.services.pricing_service import BASE_PERIOD_DAYS, sync_display_price
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
@@ -282,3 +282,173 @@ def bulk_update_retail_prices(
         _sync_products_of_rule(db, actor, item)
     db.commit()
     return {"updated_count": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# 官网可见性：产品线 × 国家 的上架/下架
+#
+# 缺价的国家（社媒 11 国、静态俄罗斯）没有商品行，没法用 products.is_active 控制，
+# 所以单独记一层覆盖。默认规则是"有价即上架"，这里只存人工改过的格子。
+# ---------------------------------------------------------------------------
+
+LISTING_STATUSES = {"listed", "unlisted"}
+SITE_LINE_CODES = ("residential", "social", "live")
+
+
+class ListingUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    line_code: str = Field(pattern="^(residential|social|live)$")
+    region_id: int = Field(gt=0)
+    status: str
+    reason: str | None = Field(default=None, max_length=200)
+
+    def validated_status(self) -> str:
+        if self.status not in LISTING_STATUSES:
+            raise HTTPException(status_code=422, detail="状态只能是 listed 或 unlisted")
+        return self.status
+
+
+class ListingBulkUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # line_code 为空表示三条线一起改
+    line_code: str | None = Field(default=None, pattern="^(residential|social|live)$")
+    region_ids: list[int] = Field(min_length=1, max_length=200)
+    status: str
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class ProductActiveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool
+
+
+def _priced_cells(db: Session) -> set[tuple[str, int]]:
+    """哪些 (分类, 地区) 有在售商品。分类再映射到产品线。"""
+    rows = db.execute(
+        select(Product.resource_category, Product.region_id)
+        .where(Product.is_active.is_(True), Product.resource_category.is_not(None))
+        .distinct()
+    ).all()
+    cells = set()
+    for category, region_id in rows:
+        line = CATEGORY_TO_LINE.get(category or "")
+        if line:
+            cells.add((line, region_id))
+    return cells
+
+
+@router.get("/listings")
+def list_catalog_listings(db: Session = Depends(get_db),
+                          _: User = Depends(require_roles("super_admin", "admin"))):
+    """官网可见性网格：三条线 × 全部启用国家，含默认推导结果与人工覆盖。"""
+    regions = db.scalars(select(Region).where(Region.is_active.is_(True)).order_by(Region.name)).all()
+    overrides = {(row.line_code, row.region_id): row for row in db.scalars(select(CatalogListing)).all()}
+    priced = _priced_cells(db)
+
+    cells = []
+    for line in SITE_LINE_CODES:
+        for region in regions:
+            record = overrides.get((line, region.id))
+            has_price = (line, region.id) in priced
+            if record is not None:
+                status, source, reason = record.status, "manual", record.reason
+            else:
+                status, source, reason = ("listed" if has_price else "unlisted"), "default", None
+            cells.append({
+                "line_code": line,
+                "line_name": LINE_LABELS[line],
+                "region_id": region.id,
+                "region_name": region.name,
+                "country_code": region.country_code,
+                "has_price": has_price,
+                "status": status,
+                "source": source,
+                "reason": reason,
+                "visible": status == "listed",
+            })
+
+    listed = sum(1 for cell in cells if cell["visible"])
+    return {
+        "lines": [{"code": line, "name": LINE_LABELS[line]} for line in SITE_LINE_CODES],
+        "regions": [{"id": region.id, "name": region.name, "country_code": region.country_code}
+                    for region in regions],
+        "cells": cells,
+        "summary": {
+            "total": len(cells),
+            "listed": listed,
+            "unlisted": len(cells) - listed,
+            # 没有报价、默认不可见的格子：就是"缺价先下架"的那批
+            "missing_price": sum(1 for cell in cells if not cell["has_price"]),
+            "manual": sum(1 for cell in cells if cell["source"] == "manual"),
+        },
+    }
+
+
+def _upsert_listing(db: Session, actor: User, line_code: str, region_id: int, status: str,
+                    reason: str | None) -> CatalogListing:
+    region = db.get(Region, region_id)
+    if region is None or not region.is_active:
+        raise HTTPException(status_code=404, detail="国家不存在或已停用")
+    record = db.scalar(select(CatalogListing).where(
+        CatalogListing.line_code == line_code, CatalogListing.region_id == region_id,
+    ))
+    if record is None:
+        record = CatalogListing(line_code=line_code, region_id=region_id, status=status,
+                                reason=reason, updated_by=actor.id)
+        db.add(record)
+    else:
+        record.status = status
+        record.reason = reason
+        record.updated_by = actor.id
+    db.flush()
+    return record
+
+
+@router.patch("/listings")
+def update_catalog_listing(payload: ListingUpdateIn, db: Session = Depends(get_db),
+                           user: User = Depends(require_roles("super_admin", "admin"))):
+    status = payload.validated_status()
+    record = _upsert_listing(db, user, payload.line_code, payload.region_id, status, payload.reason)
+    region = db.get(Region, payload.region_id)
+    write_audit(db, user, "update_listing", "catalog_listing", record.id,
+                f"线={payload.line_code}; 国家={region.country_code if region else payload.region_id}; 状态={status}")
+    db.commit()
+    return {"line_code": record.line_code, "region_id": record.region_id,
+            "status": record.status, "reason": record.reason, "source": "manual"}
+
+
+@router.post("/listings/bulk")
+def bulk_update_catalog_listings(payload: ListingBulkUpdateIn, db: Session = Depends(get_db),
+                                 user: User = Depends(require_roles("super_admin", "admin"))):
+    if payload.status not in LISTING_STATUSES:
+        raise HTTPException(status_code=422, detail="状态只能是 listed 或 unlisted")
+    lines = [payload.line_code] if payload.line_code else list(SITE_LINE_CODES)
+    region_ids = list(dict.fromkeys(payload.region_ids))
+    changed = 0
+    for line in lines:
+        for region_id in region_ids:
+            _upsert_listing(db, user, line, region_id, payload.status, payload.reason)
+            changed += 1
+    write_audit(db, user, "bulk_update_listing", "catalog_listing", None,
+                f"线={payload.line_code or '全部'}; 国家数={len(region_ids)}; 状态={payload.status}; 影响={changed}")
+    db.commit()
+    return {"updated": changed, "lines": lines, "regions": len(region_ids), "status": payload.status}
+
+
+@router.patch("/products/{product_id}/active")
+def set_product_active(product_id: int, payload: ProductActiveIn, db: Session = Depends(get_db),
+                       user: User = Depends(require_roles("super_admin", "admin"))):
+    """商品级上下架：停用后该商品在所有国家/线路都不再出现。"""
+    product = db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="商品不存在")
+    if product.is_active == payload.is_active:
+        return {"id": product.id, "is_active": product.is_active, "changed": False}
+    product.is_active = payload.is_active
+    write_audit(db, user, "toggle_product_active", "product", product.id,
+                f"上下架={payload.is_active}")
+    db.commit()
+    return {"id": product.id, "is_active": product.is_active, "changed": True}

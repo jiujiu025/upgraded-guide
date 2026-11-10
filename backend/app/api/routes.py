@@ -15,7 +15,7 @@ from app.core.client_ip import get_client_ip
 from app.core.timeutil import local_date_of, local_day_range_utc
 from app.db import get_db
 from app.models import (
-    AuthSession, Customer, CustomerLine, HealthIncident, Node, Notification, Order, PaymentOrder, PaymentRefund, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
+    AuthSession, CatalogListing, Customer, CustomerLine, HealthIncident, Node, Notification, Order, PaymentOrder, PaymentRefund, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
     SalesInviteCode, SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
 )
 from app.schemas.common import (
@@ -818,33 +818,62 @@ def _catalog_rows(db: Session):
     ).all()
 
 
-def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
-    """按三条产品线聚合。地区列表是**全部启用国家**，三条线完全一致。
+def _listing_overrides(db: Session) -> dict[tuple[str, int], str]:
+    """(产品线, 地区) → 人工设置的可见性。没有记录 = 按默认规则推导。"""
+    return {
+        (row.line_code, row.region_id): row.status
+        for row in db.scalars(select(CatalogListing)).all()
+    }
 
-    没有报价的国家照样出现（``min_price`` 为 null），官网显示"暂无报价"，
-    而不是从列表里消失——不然客户会以为这个国家不支持。
+
+def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
+    """按三条产品线聚合，只输出**当前应该让客户看到**的国家。
+
+    可见性规则（两层，见 docs/商品上下架与销售端升级设计.md）：
+
+    1. 默认：有报价才出现。缺价的国家不出现——客户看到"暂无报价"会以为系统坏了，
+       或以为自己点错了国家。
+    2. 覆盖：管理员在后台可以强制上架（没价也显示，标"暂无报价"）或强制下架
+       （有价也不显示）。覆盖是人工决定，补价后不会自动复活。
+
     ``with_price=False`` 时不返回任何金额与 offer，未登录用户拿不到价格。
     """
     regions = _active_regions(db)
+    overrides = _listing_overrides(db)
+
+    # 先把每条线上"哪些国家有商品"统计出来，再决定每个格子要不要出现。
+    priced: dict[str, dict[int, list]] = {line: {} for line in LINE_ORDER}
+    for product, region in _catalog_rows(db):
+        line = _site_line_of(product)
+        if line:
+            priced.setdefault(line, {}).setdefault(region.id, []).append(product)
+
     groups: dict[str, dict] = {}
     for line in sorted(LINE_ORDER, key=lambda code: LINE_ORDER[code]):
+        entries: dict[int, dict] = {}
+        for region in regions:
+            state = overrides.get((line, region.id))
+            if state == "unlisted":
+                continue  # 人工下架：即使有价也不出现
+            has_offer = bool(priced.get(line, {}).get(region.id))
+            if not has_offer and state != "listed":
+                continue  # 默认规则：没报价、也没被强制上架 → 不出现
+            entries[region.id] = {
+                "id": region.id,
+                "name": region.name,
+                "country_code": region.country_code,
+                "min_price": None,
+                "in_stock": False,
+                "offers": [],
+                "listed_by_admin": state == "listed",
+            }
         groups[line] = {
             "code": line,
             "name": LINE_LABELS[line],
             "min_price": None,
             "periods": set(),
             "in_stock": False,
-            "regions": {
-                region.id: {
-                    "id": region.id,
-                    "name": region.name,
-                    "country_code": region.country_code,
-                    "min_price": None,
-                    "in_stock": False,
-                    "offers": [],
-                }
-                for region in regions
-            },
+            "regions": entries,
         }
     for product, region in _catalog_rows(db):
         line = _site_line_of(product)

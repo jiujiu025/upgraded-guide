@@ -624,3 +624,27 @@ class NotificationDelivery(TimestampMixin, Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CatalogListing(TimestampMixin, Base):
+    """官网「产品线 × 国家」的可见性覆盖。
+
+    为什么需要单独一张表：官网缺价的国家（社媒 11 国、静态俄罗斯）根本没有商品行，
+    没有对象可以设 products.is_active。而"要不要让客户看到这个国家"是一个
+    产品线级的决定，只能按 (line_code, region_id) 记。
+
+    默认规则（无记录时）：有报价才上架，没报价不出现。本表只记录**人工覆盖**：
+    - status=unlisted：即使后来补了价也不自动出现，必须管理员再点一次上架；
+    - status=listed：即使没报价也出现，展示「暂无报价」且不可下单。
+    """
+    __tablename__ = "catalog_listings"
+    __table_args__ = (
+        UniqueConstraint("line_code", "region_id", name="uq_catalog_listing_line_region"),
+    )
+
+    line_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    region_id: Mapped[int] = mapped_column(ForeignKey("regions.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 审计字段，不加外键：用户不会被硬删除（与 orders.created_by_user_id 同一理由）。
+    updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)

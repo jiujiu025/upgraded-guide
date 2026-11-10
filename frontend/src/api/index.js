@@ -153,6 +153,12 @@ export const bulkUpdateManagedCatalogProducts = (payload) => client.post('/admin
 export const getManagedRetailPrices = (params = {}) => client.get('/admin/catalog-management/retail-prices', { params })
 export const updateManagedRetailPrice = (id, payload) => client.patch(`/admin/catalog-management/retail-prices/${id}`, payload)
 export const bulkUpdateManagedRetailPrices = (payload) => client.post('/admin/catalog-management/retail-prices/bulk', payload)
+// 官网可见性：产品线 × 国家的上架/下架（缺价国家没有商品行，只能在这一层控制）
+export const getCatalogListings = () => client.get('/admin/catalog-management/listings')
+export const updateCatalogListing = (payload) => client.patch('/admin/catalog-management/listings', payload)
+export const bulkUpdateCatalogListings = (payload) => client.post('/admin/catalog-management/listings/bulk', payload)
+export const setManagedProductActive = (id, isActive) =>
+  client.patch(`/admin/catalog-management/products/${id}/active`, { is_active: isActive })
 export const searchFinanceAccounts = (q) => client.get('/admin/finance/accounts', { params: { q } })
 export const createOfflineRecharge = (payload) => client.post('/admin/finance/offline-recharges', payload)
 export const getPaymentConfig = () => client.get('/admin/finance/payment-config')
