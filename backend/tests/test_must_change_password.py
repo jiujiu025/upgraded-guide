@@ -5,16 +5,15 @@
 """
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.core.security import create_access_token, hash_password
+from app.core.security import hash_password
 from app.db import get_db
 from app.main import app
 from app.models import Customer, User
 from app.models.base import Base
-from app.services.session_service import create_session
 
 
 @pytest.fixture()

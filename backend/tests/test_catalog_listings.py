@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.security import hash_password
 from app.db import get_db
 from app.main import app
-from app.models import AuditLog, CatalogListing, Customer, Product, Region, RetailPriceRule, User
+from app.models import AuditLog, Customer, Product, Region, RetailPriceRule, User
 from app.models.base import Base
 from app.services.registration_service import registration_rate_limiter
 from app.services.session_service import create_session

@@ -176,13 +176,12 @@ def test_dispatch_delivers_once_and_is_idempotent(api, monkeypatch):
 
 
 def test_dispatch_respects_categories_and_window(api, monkeypatch):
-    channel_json = api.post("/api/admin/notification-channels", json={
+    api.post("/api/admin/notification-channels", json={
         "channel_type": "wecom_webhook", "name": "只推订单",
         "config": {"webhook_url": "https://example.com/hook/x"},
         "push_categories": "order",
     }, headers=auth(token(api, "admin", "Admin_123456"))).json()
     api.db.expire_all()
-    channel = api.db.get(NotificationChannel, channel_json["id"])
     add_notification(api.db, api.users["admin"].id, title="订单通知", category="order")
     add_notification(api.db, api.users["admin"].id, title="客户通知", category="customer")
     add_notification(api.db, api.users["admin"].id, title="陈年通知", category="order")

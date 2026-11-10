@@ -24,7 +24,6 @@ from app.models import (
 )
 from app.models.base import Base, utcnow
 from app.services.registration_service import registration_rate_limiter
-from app.services.renewal_outreach_service import outreach_queue
 
 # 以真实当前时间为基准：之前写死 2026-11-08，随着日历推移 "还剩 N 天" 的断言
 # 必然失败（跑一次少一天），属于定时炸弹式的测试。

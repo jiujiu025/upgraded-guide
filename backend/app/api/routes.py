@@ -261,12 +261,19 @@ def customer_line_payload(db: Session, line: CustomerLine, cache: dict | None = 
 
 def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, order_type: str = "purchase",
                 renewal_line_id: int | None = None, discount_percent: float = 0.0,
-                created_via: str = "self_service", skip_sales_notification: bool = False) -> Order:
+                created_via: str = "self_service", skip_sales_notification: bool = False,
+                allow_inactive_region: bool = False) -> Order:
     product = db.scalar(select(Product).where(Product.id == payload.product_id, Product.is_active.is_(True)))
     if not product or not product.is_in_stock:
         raise HTTPException(status_code=404, detail="产品不存在、已停用或暂时无货")
     region_id = payload.region_id or product.region_id
-    region = db.scalar(select(Region).where(Region.id == region_id, Region.is_active.is_(True)))
+    # 续费要放行已停用地区：老线路的商品可能挂在一个后来被合并停用的地区上
+    # （例如"香港"并入"中国香港"），客户照样应当能续费，否则停用一个地区
+    # 就把历史客户的续费一起停掉了。新购仍严格要求地区在线。
+    region_query = select(Region).where(Region.id == region_id)
+    if not allow_inactive_region:
+        region_query = region_query.where(Region.is_active.is_(True))
+    region = db.scalar(region_query)
     if region_id != product.region_id or not region:
         raise HTTPException(status_code=422, detail="产品与地区不匹配")
     billing_days = payload.billing_days or product.billing_days
@@ -1152,20 +1159,36 @@ def customer_renewals(db: Session = Depends(get_db), user: User = Depends(requir
     return list(db.scalars(select(Order).where(Order.customer_id == customer.id, Order.order_type == "renewal").order_by(Order.created_at.desc())).all())
 
 
+def _create_renewal_order(db: Session, actor: User, customer: Customer, line: CustomerLine,
+                          payload: RenewalIn, remark_suffix: str = "") -> Order:
+    """续费建单。客户自助与销售代客共用这一份，价格口径与闸门完全一致。"""
+    if line.status == "deleted":
+        raise HTTPException(status_code=409, detail="已删除线路不能续费")
+    duplicate = db.scalar(select(Order).where(
+        Order.renewal_line_id == line.id,
+        Order.order_type == "renewal",
+        Order.status.not_in(TERMINAL_ORDER_STATUSES),
+    ))
+    if duplicate:
+        raise HTTPException(status_code=409, detail="该线路已有进行中的续费订单")
+    product = db.get(Product, line.product_id)
+    order_payload = OrderIn(product_id=line.product_id, region_id=product.region_id if product else None,
+                            quantity=1, billing_days=payload.billing_days,
+                            payment_method=payload.payment_method,
+                            remark=f"线路 {line.id} 续费{remark_suffix}")
+    # 续费放行已停用地区，理由见 build_order 里 allow_inactive_region 的注释
+    return build_order(db, actor, customer, order_payload, "renewal", line.id,
+                       allow_inactive_region=True)
+
+
 @router.post("/customer/lines/{line_id}/renew", response_model=OrderOut)
 def customer_renew_line(line_id: int, payload: RenewalIn, db: Session = Depends(get_db), user: User = Depends(require_roles("customer"))):
     customer = get_customer_profile(db, user)
     line = db.scalar(select(CustomerLine).where(CustomerLine.id == line_id, CustomerLine.customer_id == customer.id))
     if not line:
         raise HTTPException(status_code=404, detail="线路不存在或无权访问")
-    if line.status == "deleted":
-        raise HTTPException(status_code=409, detail="已删除线路不能续费")
-    duplicate = db.scalar(select(Order).where(Order.renewal_line_id == line.id, Order.order_type == "renewal", Order.status.not_in(TERMINAL_ORDER_STATUSES)))
-    if duplicate:
-        raise HTTPException(status_code=409, detail="该线路已有进行中的续费订单")
-    order_payload = OrderIn(product_id=line.product_id, region_id=db.get(Product, line.product_id).region_id, quantity=1, billing_days=payload.billing_days, payment_method=payload.payment_method, remark=f"线路 {line.id} 续费")
     try:
-        order = build_order(db, user, customer, order_payload, "renewal", line.id)
+        order = _create_renewal_order(db, user, customer, line, payload)
         db.commit()
         db.refresh(order)
         return order
@@ -1251,6 +1274,72 @@ def sales_orders(
         query = query.where(Order.order_no.ilike(like_pattern(keyword.strip()), escape="\\"))
     items, total = paginate(db, query.order_by(Order.created_at.desc(), Order.id.desc()), page, page_size)
     return page_payload(items, total, page, page_size, status_counts=status_counts)
+
+
+@router.get("/sales/orders/{order_id}", response_model=OrderOut)
+def sales_order_detail(order_id: int, db: Session = Depends(get_db),
+                       user: User = Depends(require_roles("sales"))):
+    """销售看名下客户的订单详情。越界返回 404（与"不存在"同一文案，不能用来探测）。"""
+    order = db.scalar(select(Order).where(
+        Order.id == order_id,
+        Order.customer_id.in_(scoped_customer_ids(db, user)),
+    ))
+    if not order:
+        raise HTTPException(status_code=404, detail="订单不存在或无权访问")
+    return order
+
+
+@router.get("/sales/lines", response_model=list[CustomerLineOut])
+def sales_lines(
+    customer_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("sales")),
+):
+    """名下客户的线路。带 customer_id 时只返回该客户，越界 404。"""
+    # scoped_customer_ids 返回的是子查询，要先取出 id 集合才能做成员判断
+    visible_ids = set(db.scalars(scoped_customer_ids(db, user)).all())
+    query = select(CustomerLine).where(CustomerLine.customer_id.in_(visible_ids))
+    if customer_id:
+        if customer_id not in visible_ids:
+            raise HTTPException(status_code=404, detail="客户不存在或无权访问")
+        query = query.where(CustomerLine.customer_id == customer_id)
+    lines = db.scalars(query.order_by(CustomerLine.expires_at.asc())).all()
+    cache: dict = {}
+    return [customer_line_payload(db, line, cache) for line in lines]
+
+
+@router.get("/sales/renewals", response_model=list[OrderOut])
+def sales_renewals(db: Session = Depends(get_db), user: User = Depends(require_roles("sales"))):
+    """名下客户的续费订单，按创建时间倒序。"""
+    return list(db.scalars(
+        select(Order)
+        .where(Order.customer_id.in_(scoped_customer_ids(db, user)), Order.order_type == "renewal")
+        .order_by(Order.created_at.desc())
+        .limit(200)
+    ).all())
+
+
+@router.post("/sales/lines/{line_id}/renew", response_model=OrderOut)
+def sales_renew_line(line_id: int, payload: RenewalIn, db: Session = Depends(get_db),
+                     user: User = Depends(require_roles("sales"))):
+    """销售代客户发起续费。金额与官网一致，不另给折扣。"""
+    line = db.scalar(select(CustomerLine).where(
+        CustomerLine.id == line_id,
+        CustomerLine.customer_id.in_(scoped_customer_ids(db, user)),
+    ))
+    if not line:
+        raise HTTPException(status_code=404, detail="线路不存在或无权访问")
+    customer = db.get(Customer, line.customer_id)
+    if customer is None or customer.is_deleted:
+        raise HTTPException(status_code=404, detail="客户不存在或无权访问")
+    try:
+        order = _create_renewal_order(db, user, customer, line, payload, remark_suffix="（销售代办）")
+        db.commit()
+        db.refresh(order)
+        return order
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.get("/sales/expiring-lines", response_model=list[CustomerLineOut])

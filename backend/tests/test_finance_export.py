@@ -12,7 +12,7 @@
 """
 import csv
 import io
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,8 +25,7 @@ from app.core.timeutil import local_day_range_utc
 from app.db import get_db
 from app.main import app
 from app.models import (
-    AuditLog, Customer, Order, PaymentOrder, PaymentRefund, Product, Region, User, WalletAccount,
-    WalletTransaction,
+    AuditLog, Customer, Order, PaymentOrder, PaymentRefund, Product, Region, User, WalletTransaction,
 )
 from app.models.base import Base
 from app.services.registration_service import registration_rate_limiter

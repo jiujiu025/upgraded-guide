@@ -19,6 +19,7 @@ import {
   PackageSearch,
   RefreshCw,
   RotateCw,
+  Search,
   Server,
   ShieldCheck,
   ShieldOff,
@@ -51,7 +52,11 @@ import {
   createSalesInviteCode,
   disableSalesInviteCode,
   getSalesExpiringLines,
+  getSalesLines,
+  getSalesOrder,
   getSalesOrders,
+  getSalesRenewals,
+  renewSalesLine,
   getSalesOutreach,
   getSecurityQuestions,
   getMyNotificationChannels,
@@ -130,6 +135,17 @@ const salesOrderTotal = ref(0);
 const salesOrderStatusCounts = ref({});
 const salesOrderPage = ref(1);
 const salesOrderPageSize = 20;
+// 销售端客户管理的搜索：在前端过滤，客户数量是"名下客户"，量级不大
+const salesCustomerKeyword = ref("");
+const filteredSalesCustomers = computed(() => {
+  const keyword = salesCustomerKeyword.value.trim().toLowerCase();
+  if (!keyword) return salesCustomers.value;
+  return salesCustomers.value.filter((item) =>
+    [item.name, item.email, item.phone].some((field) =>
+      String(field || "").toLowerCase().includes(keyword),
+    ),
+  );
+});
 const orderPages = computed(() => Math.max(1, Math.ceil(orderTotal.value / orderPageSize)));
 const salesOrderPages = computed(() => Math.max(1, Math.ceil(salesOrderTotal.value / salesOrderPageSize)));
 const filters = reactive({ product: "", region: "", status: "", note: "" });
@@ -197,10 +213,18 @@ const nav = computed(() =>
     ? clientNav
     : workspace.value === "sales"
       ? [
+          // 客户有的功能销售也要有：订单、线路、续费、通知、资料全部对齐，
+          // 差别只在数据范围（后端按名下客户限权），不在界面。
           ["销售概览", "/sales", Gauge],
-          ["我的钱包", "/sales/wallet", CircleDollarSign],
-          ["我的客户影响", "/sales/health", Activity],
+          ["客户管理", "/sales/customers", Users],
+          ["订单管理", "/sales/orders", PackageSearch],
+          ["客户线路", "/sales/lines", Server],
+          ["续费管理", "/sales/renewals", RotateCw],
           ["客户会话", "/sales/inbox", MessageSquare],
+          ["我的钱包", "/sales/wallet", CircleDollarSign],
+          ["客户影响", "/sales/health", Activity],
+          ["通知中心", "/sales/notifications", Inbox],
+          ["账户资料", "/sales/profile", Settings],
           ["安全中心", "/sales/security", ShieldCheck],
         ]
       : [
@@ -225,7 +249,22 @@ const titles = {
   "admin-sales-users": "创建销售账号",
   "security-center": "安全中心",
 };
-const pageTitle = computed(() => titles[page.value] || "工作台");
+// 同一个 page 在客户和销售下叫法不同（"我的订单" vs "客户订单"）。
+const salesTitles = {
+  orders: "客户订单",
+  order: "订单详情",
+  lines: "客户线路",
+  line: "线路详情",
+  renewals: "续费管理",
+  notifications: "通知中心",
+  profile: "账户资料",
+  "sales-customers": "客户管理",
+};
+const pageTitle = computed(() =>
+  (workspace.value === "sales" ? salesTitles[page.value] : null) ||
+  titles[page.value] ||
+  "工作台",
+);
 const securityQuestionLabel = (id) => securityQuestionOptions.find(([key]) => key === id)?.[1] || "—";
 const unreadCount = computed(
   () => notifications.value.filter((item) => !item.is_read).length,
@@ -460,6 +499,30 @@ async function loadClientBase() {
   profile.value = profileResponse.data;
 }
 
+/**
+ * 销售业务页的数据：与客户端同结构，只是接口换成 /api/sales/*。
+ * 后端按名下客户限权，越界返回 404，所以前端不需要再过滤一遍。
+ */
+async function loadSalesBase() {
+  const [orderResponse, lineResponse, notificationResponse, renewalResponse, customerResponse] =
+    await Promise.all([
+      getSalesOrders({
+        page: orderPage.value,
+        page_size: orderPageSize,
+        status: orderStatus.value || undefined,
+      }),
+      getSalesLines(),
+      getNotifications(),
+      getSalesRenewals(),
+      getSalesCustomers(),
+    ]);
+  applyOrderPage(orderResponse.data);
+  lines.value = lineResponse.data;
+  notifications.value = notificationResponse.data;
+  renewals.value = renewalResponse.data;
+  salesCustomers.value = customerResponse.data;
+}
+
 // 三个角色共用一套分页状态：同一时刻只渲染一个工作台，所以订单状态筛选
 // 不需要按角色拆成三份。
 function applyOrderPage(payload) {
@@ -544,6 +607,16 @@ async function load() {
         detail.value = (await getCustomerOrder(route.params.id)).data;
       if (page.value === "line")
         detail.value = (await getCustomerLine(route.params.id)).data;
+    } else if (workspace.value === "sales" && page.value !== "sales") {
+      // 业务页：订单/线路/续费/通知/客户管理共用客户的模板，数据换成销售接口
+      await loadSalesBase();
+      if (page.value === "order") {
+        detail.value = (await getSalesOrder(route.params.id)).data;
+      } else if (page.value === "line") {
+        const found = lines.value.find((item) => String(item.id) === String(route.params.id));
+        if (!found) throw new Error("线路不存在或无权访问");
+        detail.value = found;
+      }
     } else if (workspace.value === "sales") {
       const [
         dashboardResponse,
@@ -828,16 +901,21 @@ async function submitRenew() {
 async function confirmCustomerRenewal() {
   const pending = customerRenewalConfirmation.value;
   if (!pending || busy.value) return;
-  const needsPayment = pending.payment_method !== "contact_manager";
+  // 销售代客户续费：走 /sales/lines/{id}/renew，金额口径与客户自助完全一致；
+  // 也不能替客户用余额/在线付款，只能落到「联系经理确认」。
+  const forSales = workspace.value === "sales";
+  const needsPayment = !forSales && pending.payment_method !== "contact_manager";
   const succeeded = await runAction(
     () =>
-      renewCustomerLine(pending.line.id, {
+      (forSales ? renewSalesLine : renewCustomerLine)(pending.line.id, {
         billing_days: pending.billing_days,
         payment_method: pending.payment_method,
       }),
-    needsPayment
-      ? "续费订单已创建，正在前往账户余额完成支付"
-      : "续费订单已创建，等待管理员确认完成",
+    forSales
+      ? "续费订单已创建（代客），等待管理员确认完成"
+      : needsPayment
+        ? "续费订单已创建，正在前往账户余额完成支付"
+        : "续费订单已创建，等待管理员确认完成",
   );
   if (succeeded) {
     customerRenewalConfirmation.value = null;
@@ -1274,6 +1352,7 @@ onMounted(load);
                 </button>
                 <button
                   v-if="
+                    workspace !== 'sales' &&
                     ['pending_payment', 'pending_confirm', 'renewal'].includes(
                       detail.status,
                     )
@@ -1499,8 +1578,8 @@ onMounted(load);
               ><label
                 >支付方式<select v-model="renewDraft.payment_method">
                   <option value="contact_manager">联系经理确认（人工完成）</option>
-                  <option value="balance">余额支付</option>
-                  <option value="online">在线支付</option>
+                  <option v-if="workspace !== 'sales'" value="balance">余额支付</option>
+                  <option v-if="workspace !== 'sales'" value="online">在线支付</option>
                 </select></label
               >
               <p class="renewal-hint">
@@ -1661,6 +1740,39 @@ onMounted(load);
               </p>
             </section></template
           >
+          <template v-else-if="page === 'sales-customers'">
+            <div class="workspace-toolbar">
+              <label class="search-field">
+                <Search :size="15" />
+                <input v-model="salesCustomerKeyword" type="search" placeholder="搜索客户名称、邮箱或手机号" />
+              </label>
+              <span class="toolbar-hint">{{ filteredSalesCustomers.length }} / {{ salesCustomers.length }} 位客户</span>
+            </div>
+            <div v-if="!filteredSalesCustomers.length" class="inline-empty">
+              {{ salesCustomers.length ? '没有匹配的客户' : '暂无负责客户：客户通过你的邀请码注册后会自动出现在这里' }}
+            </div>
+            <section v-else class="workspace-panel">
+              <div class="panel-head">
+                <h2>负责客户</h2>
+                <span>行内可直接代客下单</span>
+              </div>
+              <div
+                v-for="customer in filteredSalesCustomers"
+                :key="customer.id"
+                class="compact-row static-row"
+              >
+                <span>
+                  <b>{{ customer.name }}</b>
+                  <small>{{ customer.email }} · {{ customer.phone || "未填写手机号" }}</small>
+                </span>
+                <div class="customer-row-actions">
+                  <em>{{ customer.status }}</em>
+                  <button type="button" class="mini-order-button" @click="openOnBehalf(customer)">代客下单</button>
+                </div>
+              </div>
+            </section>
+          </template>
+
           <template v-else-if="page === 'sales'"
             ><section v-if="dashboard" class="metric-grid sales-metrics">
               <article>

@@ -9,10 +9,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
-from app.core.security import create_access_token, hash_password
+from app.core.security import hash_password
 from app.db import get_db
 from app.main import app
-from app.models import AuditLog, Customer, CustomerLine, HealthIncident, InboxMessage, InboxThread, Node, Notification, Order, Product, Region, User
+from app.models import AuditLog, Customer, CustomerLine, HealthIncident, InboxMessage, Node, Notification, Order, Product, Region, User
 from app.models.base import Base
 from app.models.base import utcnow
 from app.services.health_service import check_node

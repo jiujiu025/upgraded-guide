@@ -9,7 +9,7 @@ from app.models import (
     CatalogPublication, Region, SupplierInventorySnapshot, SupplierProduct, SupplierQuote, SupplierRegion,
 )
 from app.models.base import Base
-from app.services.supplier_service import CITIES_ENDPOINT, COUNTRIES_ENDPOINT, ensure_pool_one
+from app.services.supplier_service import COUNTRIES_ENDPOINT, ensure_pool_one
 from app.suppliers.base import InventoryItem, SupplierProductItem, SupplierRegionItem, SupplierTimeoutError
 from app.suppliers.base import QuoteItem
 from app.tasks import registry, suppliers
