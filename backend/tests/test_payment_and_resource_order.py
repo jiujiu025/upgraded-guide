@@ -13,6 +13,7 @@ from datetime import datetime
 from uuid import uuid4
 
 import pytest
+from fastapi import BackgroundTasks
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -78,7 +79,8 @@ def test_balance_payment_succeeds_and_records_commission_actor(db):
     db.commit()
 
     result = pay_order_with_balance(
-        order.id, IdempotencyIn(idempotency_key="k" * 20), db=db, user=customer_user,
+        order.id, IdempotencyIn(idempotency_key="k" * 20), BackgroundTasks(),
+        db=db, user=customer_user,
     )
 
     assert result["status"] == "paid"

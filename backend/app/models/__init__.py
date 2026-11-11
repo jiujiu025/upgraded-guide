@@ -5,7 +5,7 @@ from app.models.entities import (
     PaymentChannelAcceptance, PaymentChannelConfig, PaymentOrder, PaymentRefund, SalesCommissionEntry, ScheduledTaskRun,
     RenewalOutreach, WalletAccount, WalletTransaction, SalesInviteCode,
     NotificationChannel, NotificationChannelBinding, NotificationDelivery,
-    CatalogListing, CatalogCityOption,
+    CatalogListing, CatalogCityOption, Procurement,
 )
 
 __all__ = [
@@ -15,6 +15,6 @@ __all__ = [
     "SupplierRegion", "SupplierSyncRun", "User",
     "PaymentChannelAcceptance", "PaymentChannelConfig", "PaymentOrder", "PaymentRefund", "SalesCommissionEntry",
     "RenewalOutreach", "ScheduledTaskRun", "WalletAccount", "WalletTransaction", "SalesInviteCode",
-    "NotificationChannel", "NotificationChannelBinding", "NotificationDelivery", "CatalogListing",
+    "NotificationChannel", "NotificationChannelBinding", "NotificationDelivery", "CatalogListing", "Procurement",
     "CatalogCityOption",
 ]

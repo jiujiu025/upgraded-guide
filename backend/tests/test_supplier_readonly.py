@@ -5,7 +5,6 @@ from decimal import Decimal
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -364,8 +363,9 @@ def test_supplier_access_is_admin_only_and_procurement_is_hard_disabled(supplier
         response = supplier_api.post(f"/api/admin/suppliers/{action}", headers=admin_headers)
         assert response.status_code == 403
         assert response.json()["detail"]["code"] == "SUPPLIER_PROCUREMENT_DISABLED"
-    with pytest.raises(ValidationError, match="supplier_auto_procurement_enabled"):
-        Settings(supplier_auto_procurement_enabled=True, _env_file=None)
+    # 采购开关从"写死 false"改成可配置：默认关，显式打开才生效（打开就是真扣上游余额）
+    assert Settings(_env_file=None).supplier_auto_procurement_enabled is False
+    assert Settings(supplier_auto_procurement_enabled=True, _env_file=None).supplier_auto_procurement_enabled is True
 
 
 def test_freshness_out_of_stock_failed_sync_and_audit(supplier_api):

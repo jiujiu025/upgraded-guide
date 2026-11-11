@@ -16,7 +16,11 @@ import json
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-SUPPORTED_PROTOCOLS = ("vless", "vmess", "trojan", "ss", "hysteria2", "tuic")
+SUPPORTED_PROTOCOLS = ("vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks5", "http")
+
+# 上游交付的静态住宅就是代理账号（socks5/http + 账密），不是隧道协议，
+# 这里把它们也当成一种"节点"，才能走同一套二维码与订阅。
+PROXY_ACCOUNT_PROTOCOLS = {"socks5", "http"}
 
 # 这些协议默认走 TLS，链接里没写 security 时按 tls 处理（Clash 侧需要 servername）。
 TLS_DEFAULT_PROTOCOLS = {"trojan", "hysteria2", "tuic"}
@@ -203,6 +207,8 @@ def parse_link(raw: str) -> ParsedNode:
     scheme = text.split("://", 1)[0].strip().lower()
     if scheme == "hy2":
         scheme = "hysteria2"
+    if scheme == "https":
+        scheme = "http"
     if scheme not in SUPPORTED_PROTOCOLS:
         raise ProxyLinkError(f"暂不支持 {scheme} 协议，目前支持 {' / '.join(SUPPORTED_PROTOCOLS)}")
 
@@ -231,6 +237,15 @@ def to_clash_proxy(node: ParsedNode, tag: str) -> dict:
     proxy: dict = {"name": tag, "type": node.protocol, "server": node.server, "port": node.port}
     method, secret = _credential_parts(node)
     params = node.params
+
+    if node.protocol in PROXY_ACCOUNT_PROTOCOLS:
+        # socks5://user:pass@host:port —— 用户名口令拆成 Clash 的两个字段
+        username, _, password = secret.partition(":")
+        proxy["type"] = node.protocol
+        if username:
+            proxy["username"] = username
+            proxy["password"] = password
+        return proxy
 
     if node.protocol == "ss":
         proxy["cipher"] = method or "aes-256-gcm"

@@ -63,7 +63,11 @@ class Settings(BaseSettings):
     supplier_read_retry_attempts: int = 3
     supplier_retry_backoff_seconds: float = 0.25
     supplier_retry_max_delay_seconds: float = 5.0
-    supplier_auto_procurement_enabled: Literal[False] = False
+    # 付款后自动向上游采购并交付。默认关闭：一旦打开就是真扣上游余额，必须先配好 Key
+    # 并用沙箱或小额订单验证过。生产在 .env.production 里显式置 true。
+    supplier_auto_procurement_enabled: bool = False
+    # 自动采购后是否直接生成客户线路（否则只落采购单，仍由人工交付）
+    supplier_auto_deliver_after_procure: bool = True
     supplier_catalog_ttl_minutes: int = 1440
     supplier_inventory_ttl_minutes: int = 30
     supplier_quote_ttl_minutes: int = 1440

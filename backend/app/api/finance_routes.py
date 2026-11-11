@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -25,6 +25,7 @@ from app.services.payment_gateway import (
     PAYMENT_API_URL, PaymentGatewayError, config_for_update, create_provider_payment,
     decrypt_secret, encrypt_secret, new_payment_order_values, verify_signature,
 )
+from app.services.procurement_service import run_auto_procure_in_background
 from app.services.order_service import is_payable_order, rollback_renewal_extension, settle_renewal
 from app.tasks.notify import notify_admins
 from app.services.wallet_service import (
@@ -502,7 +503,7 @@ def create_online_recharge(payload: OnlinePaymentIn, db: Session = Depends(get_d
 
 
 @router.post("/wallet/orders/{order_id}/pay-balance")
-def pay_order_with_balance(order_id: int, payload: IdempotencyIn, db: Session = Depends(get_db), user: User = Depends(require_roles("customer", "sales"))):
+def pay_order_with_balance(order_id: int, payload: IdempotencyIn, background_tasks: BackgroundTasks, db: Session = Depends(get_db), user: User = Depends(require_roles("customer", "sales"))):
     order, customer = _require_scoped_order(db, user, order_id)
     if order.source_type == "resource_pool":
         raise HTTPException(status_code=409, detail="资源池订单支付功能尚未启用")
@@ -536,6 +537,9 @@ def pay_order_with_balance(order_id: int, payload: IdempotencyIn, db: Session = 
         write_audit(db, user, "wallet_order_payment", "order", order.id,
                     f"金额分={amount_cents}; 类型={order.order_type}; 佣金比例=15%")
         db.commit()
+        # 采购要调上游（最慢 10 秒），放后台跑，别让客户以为支付卡住了
+        if order.order_type == "purchase":
+            background_tasks.add_task(run_auto_procure_in_background, order.id)
         return {"status": order.status, "order_id": order.id, "amount_cents": amount_cents}
     except IntegrityError:
         db.rollback()

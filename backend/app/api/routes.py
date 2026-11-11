@@ -3,7 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import unicodedata
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -34,6 +34,7 @@ from app.services.customer_scope import get_customer_profile, scoped_customer_id
 from app.services.customer_email import ensure_unique_customer_email
 from app.services.customer_view import balance_cents_of, customer_view, customer_views
 from app.services.health_service import check_node
+from app.services.procurement_service import run_auto_procure_in_background
 from app.services.order_service import (
     TERMINAL_ORDER_STATUSES, add_notification, calculate_order_price, claim_delivery_slot,
     ensure_order_cancellable, ensure_payment_settled, ensure_sales_user, initial_order_status,
@@ -1784,7 +1785,7 @@ def admin_create_resource_order(
 
 
 @router.post("/admin/orders/{order_id}/confirm", response_model=OrderOut)
-def admin_confirm_order(order_id: int, db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
+def admin_confirm_order(order_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
     order = db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
@@ -1811,6 +1812,9 @@ def admin_confirm_order(order_id: int, db: Session = Depends(get_db), user: User
         notify_order_parties(db, customer, order, "订单已确认", f"订单 {order.order_no} 已确认，等待线路交付。", "order")
         db.commit()
         db.refresh(order)
+        # 确认收款后尝试自动采购；开关没开或产品不支持时静默跳过
+        if order.order_type == "purchase":
+            background_tasks.add_task(run_auto_procure_in_background, order.id)
         return order
     except Exception:
         db.rollback()

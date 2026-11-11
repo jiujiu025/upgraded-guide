@@ -122,6 +122,34 @@ class CustomerLine(TimestampMixin, Base):
     order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True, index=True)
 
 
+class Procurement(TimestampMixin, Base):
+    """一次上游采购尝试：某张订单的第 N 条线路 → 上游订单 → 客户线路。
+
+    幂等键是 (order_id, line_index)：同一条线路重复触发只会真实下单一次。
+    上游没有幂等键，所以失败**不自动重试**——重试等于重复扣款；超时后应先用
+    上游订单查询兜底，查不到再人工处理。
+    """
+    __tablename__ = "procurements"
+    __table_args__ = (
+        UniqueConstraint("order_id", "line_index", name="uq_procurement_order_line"),
+    )
+
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), nullable=False, index=True)
+    line_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    supplier_id: Mapped[int | None] = mapped_column(ForeignKey("suppliers.id"), nullable=True, index=True)
+    supplier_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # pending / succeeded / failed / manual
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
+    external_order_no: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    # 请求参数与上游原始返回：出问题时要能复现，脱敏后再落库
+    request_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 交付成功后被采购出来的客户线路
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+
 class Order(TimestampMixin, Base):
     __tablename__ = "orders"
     order_no: Mapped[str] = mapped_column(String(40), unique=True, index=True)
