@@ -1,7 +1,10 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric,
+    String, Text, UniqueConstraint, text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -168,6 +171,11 @@ class Order(TimestampMixin, Base):
     # 只存用户 id，不加外键：这是审计字段，用户不会被硬删除；SQLite 也不支持
     # ALTER 加外键（批量重建又要求历史匿名约束先命名），刻意保持可迁移。
     created_by_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # 客户指定城市 / IP 段（可选）：空表示"不指定，交付时自动分配最优城市"。
+    # 存的是下单时的快照，后续后台改城市清单不影响历史单。
+    requested_city_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    requested_city_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    requested_ip_segment: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Notification(TimestampMixin, Base):
@@ -627,24 +635,62 @@ class NotificationDelivery(TimestampMixin, Base):
 
 
 class CatalogListing(TimestampMixin, Base):
-    """官网「产品线 × 国家」的可见性覆盖。
+    """官网可见性：池 × 产品线 × 国家，**默认全部下架，必须人工上架**。
 
-    为什么需要单独一张表：官网缺价的国家（社媒 11 国、静态俄罗斯）根本没有商品行，
-    没有对象可以设 products.is_active。而"要不要让客户看到这个国家"是一个
-    产品线级的决定，只能按 (line_code, region_id) 记。
+    设计变更（2026-11-10，见 docs/双上游资源池设计.md 第 3 节）：
 
-    默认规则（无记录时）：有报价才上架，没报价不出现。本表只记录**人工覆盖**：
-    - status=unlisted：即使后来补了价也不自动出现，必须管理员再点一次上架；
-    - status=listed：即使没报价也出现，展示「暂无报价」且不可下单。
+    - 旧规则是"有报价即上架"，新规则是"没有任何记录 = 下架"，官网展示完全由管理员决定；
+    - `pool_id` 为空表示「平台级上架」，对所有资源池生效；指定 `pool_id` 则该池单独上架/下架，
+      路由只在已上架的池里选（池级策略，见设计文档）；
+    - 缺价的国家也可以上架（展示「暂无报价」、不可下单），这仍是管理员的有意决定。
+
+    迁移时把当时在售的格子写成 `pool_id=NULL + listed`，保证上线瞬间官网不空。
     """
     __tablename__ = "catalog_listings"
     __table_args__ = (
-        UniqueConstraint("line_code", "region_id", name="uq_catalog_listing_line_region"),
+        # 全局格子（pool_id 为空）与池级格子各自唯一；SQLite/PG 用部分索引表达，
+        # 因为 NULL 在唯一约束里互不相等，普通 UNIQUE 挡不住重复的全局行。
+        Index("uq_catalog_listing_global_cell", "line_code", "region_id", unique=True,
+              sqlite_where=text("pool_id IS NULL"), postgresql_where=text("pool_id IS NULL")),
+        Index("uq_catalog_listing_pool_cell", "pool_id", "line_code", "region_id", unique=True,
+              sqlite_where=text("pool_id IS NOT NULL"), postgresql_where=text("pool_id IS NOT NULL")),
     )
 
+    # 空 = 平台级（所有池）；非空 = 只作用于该资源池
+    pool_id: Mapped[int | None] = mapped_column(ForeignKey("resource_pools.id"), nullable=True, index=True)
     line_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     region_id: Mapped[int] = mapped_column(ForeignKey("regions.id"), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # 审计字段，不加外键：用户不会被硬删除（与 orders.created_by_user_id 同一理由）。
     updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class CatalogCityOption(TimestampMixin, Base):
+    """客户可选的城市码与 IP 段（号段）。设计见 docs/城市与IP段选择设计.md。
+
+    为什么按 (resource_category, country_code) 而不是按 product 记：
+    同一个国家下的多个 SKU（不同周期、不同规格）共用一份城市清单，
+    上游的库存也是按「国家 + 城市」给的，按商品记一定会对不上。
+
+    ``ip_segments`` 用逗号分隔的短文本存（如 ``1.1.1,1.1.2``）：
+    号段是消耗品，数量几十个量级，单独建表收益不大；真正接上游后由号段快照
+    （supplier_ip_segment_snapshots）覆盖，这张表只保留人工维护的兜底清单。
+    """
+
+    __tablename__ = "catalog_city_options"
+    __table_args__ = (
+        UniqueConstraint("resource_category", "country_code", "city_code", name="uq_catalog_city_option"),
+    )
+
+    resource_category: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    country_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    # 城市码：给上游/运营看的稳定标识（美国常用 LAX、NYC 这类三字码，也可自定义）。
+    city_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    city_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    ip_segments: Mapped[str] = mapped_column(String(500), default="", server_default="", nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=100, server_default="100", nullable=False)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # manual = 后台手填；supplier_985 / supplier_global_proxy = 上游同步写入。
+    data_source: Mapped[str] = mapped_column(String(30), default="manual", server_default="manual", nullable=False)

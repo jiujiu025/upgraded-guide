@@ -64,6 +64,8 @@ export const getPublicCatalogDetail = (code) => client.get(`/public/catalog/${en
 // 登录后才带价格：未登录调 /public/* 一律拿不到金额，前端不做"藏起来"这种假保护。
 export const getCatalog = () => client.get('/catalog')
 export const getCatalogDetail = (code) => client.get(`/catalog/${encodeURIComponent(code)}`)
+// 可选精细化选项：某商品可指定的城市码与 IP 段（未配置时 supported=false）
+export const getCatalogCities = (productId) => client.get('/catalog/cities', { params: { product_id: productId } })
 export const getPublicProduct = (id) => client.get(`/public/products/${id}`)
 export const getPublicRegions = () => client.get('/public/regions')
 export const previewOrder = (payload) => client.post('/public/orders/preview', payload)
@@ -158,11 +160,16 @@ export const getManagedRetailPrices = (params = {}) => client.get('/admin/catalo
 export const updateManagedRetailPrice = (id, payload) => client.patch(`/admin/catalog-management/retail-prices/${id}`, payload)
 export const bulkUpdateManagedRetailPrices = (payload) => client.post('/admin/catalog-management/retail-prices/bulk', payload)
 // 官网可见性：产品线 × 国家的上架/下架（缺价国家没有商品行，只能在这一层控制）
-export const getCatalogListings = () => client.get('/admin/catalog-management/listings')
+export const getCatalogListings = (params = {}) => client.get('/admin/catalog-management/listings', { params })
 export const updateCatalogListing = (payload) => client.patch('/admin/catalog-management/listings', payload)
 export const bulkUpdateCatalogListings = (payload) => client.post('/admin/catalog-management/listings/bulk', payload)
 export const setManagedProductActive = (id, isActive) =>
   client.patch(`/admin/catalog-management/products/${id}/active`, { is_active: isActive })
+// 城市与号段：客户可选的城市码清单
+export const getManagedCities = (params = {}) => client.get('/admin/catalog-management/cities', { params })
+export const createManagedCity = (payload) => client.post('/admin/catalog-management/cities', payload)
+export const updateManagedCity = (id, payload) => client.patch(`/admin/catalog-management/cities/${id}`, payload)
+export const deleteManagedCity = (id) => client.delete(`/admin/catalog-management/cities/${id}`)
 export const searchFinanceAccounts = (q) => client.get('/admin/finance/accounts', { params: { q } })
 export const createOfflineRecharge = (payload) => client.post('/admin/finance/offline-recharges', payload)
 export const getPaymentConfig = () => client.get('/admin/finance/payment-config')
@@ -189,6 +196,7 @@ export const completeAdminRenewal = (id) => client.post(`/admin/orders/${id}/com
 export const getAdminCatalogProducts = () => client.get('/products')
 export const getAdminCatalogRegions = () => client.get('/regions')
 export const getSupplierOverview = () => client.get('/admin/suppliers/overview')
+export const getSupplierPools = () => client.get('/admin/suppliers/pools')
 export const getSupplierProducts = () => client.get('/admin/suppliers/products')
 export const getSupplierRegions = () => client.get('/admin/suppliers/regions')
 export const getSupplierInventory = () => client.get('/admin/suppliers/inventory')
@@ -197,6 +205,11 @@ export const getSupplierQuotes = () => client.get('/admin/suppliers/quotes')
 export const getSupplierRules = () => client.get('/admin/suppliers/supply-rules')
 export const getSupplierSyncRuns = () => client.get('/admin/suppliers/sync-runs')
 export const saveSupplierCredential = (apiKey) => client.put('/admin/suppliers/credential', { api_key: apiKey })
+// 按供应商录入 Key：每个资源池各自一把，互不覆盖
+export const saveSupplierCredentialFor = (supplierId, apiKey) =>
+  client.put(`/admin/suppliers/${supplierId}/credential`, { api_key: apiKey })
+export const deleteSupplierCredentialFor = (supplierId) =>
+  client.delete(`/admin/suppliers/${supplierId}/credential`)
 export const deleteSupplierCredential = () => client.delete('/admin/suppliers/credential')
 export const getCatalogPublications = () => client.get('/admin/suppliers/publications')
 export const publishCatalogSnapshot = (payload) => client.post('/admin/suppliers/publications', payload)
@@ -205,6 +218,8 @@ export const syncSupplierProducts = () => client.post('/admin/suppliers/sync/pro
 export const syncSupplierCatalog = () => client.post('/admin/suppliers/sync/catalog')
 export const syncSupplierCountries = (productTypeId = 2) => client.post(`/admin/suppliers/sync/countries?product_type_id=${encodeURIComponent(productTypeId)}`)
 export const syncSupplierCities = (productTypeId = 2) => client.post(`/admin/suppliers/sync/cities?product_type_id=${encodeURIComponent(productTypeId)}`)
+// 资源池1：按城市拉真实 IP 段，合并进客户可选城市清单（原生=3）
+export const syncSupplierCitySegments = (params = {}) => client.post('/admin/suppliers/sync/city-segments', null, { params })
 export const syncSupplierInventory = (countryCode, productTypeId = 2) => client.post(`/admin/suppliers/sync/inventory?product_type_id=${encodeURIComponent(productTypeId)}&country_code=${encodeURIComponent(countryCode)}`)
 export const checkSupplierInventory = (payload) => client.post('/admin/suppliers/check-inventory', payload)
 export const syncSupplierQuotes = () => client.post('/admin/suppliers/sync/quotes', {})

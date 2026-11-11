@@ -1,12 +1,13 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Check, ChevronLeft, ChevronRight, CircleAlert, Database, PackageCheck, RefreshCw, Save, Search, Tags, X } from 'lucide-vue-next'
+import { Check, ChevronLeft, ChevronRight, CircleAlert, Database, MapPin, PackageCheck, Plus, RefreshCw, Save, Search, Tags, Trash2, X } from 'lucide-vue-next'
 import AppSelect from '../components/AppSelect.vue'
 import PriceCell from '../components/PriceCell.vue'
 import {
   bulkUpdateCatalogListings, bulkUpdateManagedCatalogProducts, bulkUpdateManagedRetailPrices,
-  getCatalogListings, getManagedCatalogProducts, getManagedRetailPrices,
-  setManagedProductActive, updateCatalogListing, updateManagedCatalogProduct, updateManagedRetailPrice,
+  createManagedCity, deleteManagedCity, getCatalogListings, getManagedCatalogProducts, getManagedCities,
+  getManagedRetailPrices, setManagedProductActive, syncSupplierCitySegments, updateCatalogListing,
+  updateManagedCatalogProduct, updateManagedCity, updateManagedRetailPrice,
 } from '../api'
 
 const tab = ref('products')
@@ -32,9 +33,22 @@ const selectedPrices = ref(new Set())
 const retailBulkPrice = ref('')
 const pendingBulk = ref('')
 // 官网可见性：三条线 × 全部启用国家的上架状态
-const listings = ref({ lines: [], regions: [], cells: [], summary: {} })
+const listings = ref({ lines: [], regions: [], cells: [], summary: {}, pools: [], scope: {} })
 const listingFilter = ref('')
 const listingBusy = ref(false)
+// '' = 平台级（全池生效）；数字 = 只改该资源池
+const listingPool = ref('')
+const listingPoolOptions = computed(() => [
+  { value: '', label: '平台级（全池）' },
+  ...(listings.value.pools || []).map((pool) => ({ value: pool.id, label: pool.name })),
+])
+// 城市与号段：客户可选的精细化选项（按 分类 + 国家 维护）
+const cities = ref([])
+const cityMeta = ref({ categories: [], countries: [] })
+const cityBusy = ref(false)
+const citySyncBusy = ref(false)
+const cityFilter = reactive({ resource_category: '', country_code: '', keyword: '' })
+const cityForm = reactive({ resource_category: 'static_residential', country_code: '', city_code: '', city_name: '', ip_segments: '', sort_order: 100 })
 const listingFilterOptions = [
   { value: '', label: '全部国家' },
   { value: 'missing', label: '仅缺报价' },
@@ -94,6 +108,20 @@ const billingDayOptions = computed(() => [
   { value: '', label: '全部周期' },
   ...priceBillingDays.value.map((days) => ({ value: String(days), label: `${days} 天` })),
 ])
+const cityCategoryOptions = computed(() => [
+  { value: '', label: '全部类型' },
+  ...cityMeta.value.categories.map((item) => ({ value: item.code, label: item.label })),
+])
+const cityCountryOptions = computed(() => [
+  { value: '', label: '全部国家/地区' },
+  ...cityMeta.value.countries.map((item) => ({ value: item.code, label: `${item.name}（${item.code}）` })),
+])
+const cityFormCountryOptions = computed(() => cityMeta.value.countries.map((item) => ({
+  value: item.code, label: `${item.name}（${item.code}）`,
+})))
+const cityFormCategoryOptions = computed(() => cityMeta.value.categories.map((item) => ({
+  value: item.code, label: item.label,
+})))
 
 const priceLabel = (value) => `¥${Number(value || 0).toFixed(2)}`
 const dateLabel = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
@@ -161,7 +189,7 @@ async function loadListings() {
   loading.value = true
   error.value = ''
   try {
-    listings.value = (await getCatalogListings()).data
+    listings.value = (await getCatalogListings(listingPool.value ? { pool_id: listingPool.value } : {})).data
   } catch (requestError) {
     error.value = requestError.userMessage || '官网可见性加载失败'
   } finally {
@@ -173,7 +201,124 @@ async function loadCurrent() {
   pendingBulk.value = ''
   if (tab.value === 'products') await loadProducts()
   else if (tab.value === 'prices') await loadPrices()
+  else if (tab.value === 'cities') await loadCities()
   else await loadListings()
+}
+
+async function loadCities() {
+  loading.value = true
+  error.value = ''
+  try {
+    const { data } = await getManagedCities({
+      resource_category: cityFilter.resource_category || undefined,
+      country_code: cityFilter.country_code || undefined,
+      keyword: cityFilter.keyword.trim() || undefined,
+    })
+    cities.value = data.items
+    cityMeta.value = { categories: data.categories || [], countries: data.countries || [] }
+    if (!cityForm.country_code && cityMeta.value.countries.length) {
+      cityForm.country_code = cityMeta.value.countries[0].code
+    }
+  } catch (requestError) {
+    error.value = requestError.userMessage || '城市与号段加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 从资源池1拉真实城市与号段：只合并号段，不改手工维护的启停与展示名。 */
+async function syncCitySegments() {
+  if (citySyncBusy.value) return
+  citySyncBusy.value = true
+  error.value = ''
+  try {
+    const { data } = await syncSupplierCitySegments({ product_type_id: 3, country_code: cityFilter.country_code || undefined })
+    await loadCities()
+    const failed = (data.errors || []).length
+    showNotice(`已同步 ${data.cities_seen} 个城市、${data.segments_saved} 个号段${failed ? `，${failed} 个失败` : ''}`)
+  } catch (requestError) {
+    error.value = requestError.userMessage || '同步城市号段失败，请确认资源池1的 API Key 已配置'
+  } finally {
+    citySyncBusy.value = false
+  }
+}
+
+async function addCity() {
+  if (cityBusy.value) return
+  if (!cityForm.country_code || !cityForm.city_code.trim() || !cityForm.city_name.trim()) {
+    error.value = '国家、城市码、城市名都必填'
+    return
+  }
+  cityBusy.value = true
+  error.value = ''
+  try {
+    await createManagedCity({
+      resource_category: cityForm.resource_category,
+      country_code: cityForm.country_code,
+      city_code: cityForm.city_code.trim(),
+      city_name: cityForm.city_name.trim(),
+      ip_segments: cityForm.ip_segments.trim(),
+      sort_order: Number(cityForm.sort_order) || 100,
+    })
+    cityForm.city_code = ''
+    cityForm.city_name = ''
+    cityForm.ip_segments = ''
+    await loadCities()
+    showNotice('城市已新增，客户下单时即可选择')
+  } catch (requestError) {
+    error.value = requestError.userMessage || '新增城市失败'
+  } finally {
+    cityBusy.value = false
+  }
+}
+
+/** 行内保存：城市名 / 号段 / 排序 / 上下架都即时生效，不需要另找保存按钮。 */
+async function patchCity(item, patch, successText) {
+  if (cityBusy.value) return
+  cityBusy.value = true
+  error.value = ''
+  try {
+    await updateManagedCity(item.id, patch)
+    await loadCities()
+    if (successText) showNotice(successText)
+  } catch (requestError) {
+    error.value = requestError.userMessage || '保存城市失败'
+    await loadCities()
+  } finally {
+    cityBusy.value = false
+  }
+}
+
+function saveCityName(item, event) {
+  const value = event.target.value.trim()
+  if (!value || value === item.city_name) { event.target.value = item.city_name; return }
+  return patchCity(item, { city_name: value }, `${item.city_code} 已改为「${value}」`)
+}
+
+function saveCitySegments(item, event) {
+  const value = event.target.value.trim()
+  if (value === (item.segments || []).join(',')) return
+  return patchCity(item, { ip_segments: value }, `${item.city_code} 号段已更新`)
+}
+
+async function removeCity(item) {
+  if (cityBusy.value) return
+  if (typeof window !== 'undefined' && !window.confirm(`删除城市「${item.city_name}（${item.city_code}）」？已下单的订单不受影响。`)) return
+  cityBusy.value = true
+  error.value = ''
+  try {
+    await deleteManagedCity(item.id)
+    await loadCities()
+    showNotice('城市已删除')
+  } catch (requestError) {
+    error.value = requestError.userMessage || '删除失败'
+  } finally {
+    cityBusy.value = false
+  }
+}
+
+function applyCityFilters() {
+  loadCities()
 }
 
 /** 点格子直接切换：上架/下架是一次点击就生效的操作，不用再弹一次确认。 */
@@ -183,7 +328,10 @@ async function toggleListing(cell) {
   listingBusy.value = true
   error.value = ''
   try {
-    await updateCatalogListing({ line_code: cell.line_code, region_id: cell.region_id, status: next })
+    await updateCatalogListing({
+      line_code: cell.line_code, region_id: cell.region_id, status: next,
+      pool_id: listingPool.value || null,
+    })
     await loadListings()
     showNotice(`${cell.region_name} · ${cell.line_name} 已${next === 'listed' ? '上架' : '下架'}`)
   } catch (requestError) {
@@ -200,7 +348,9 @@ async function bulkToggleLine(line, status) {
   listingBusy.value = true
   error.value = ''
   try {
-    const { data } = await bulkUpdateCatalogListings({ line_code: line.code, region_ids: regionIds, status })
+    const { data } = await bulkUpdateCatalogListings({
+      line_code: line.code, region_ids: regionIds, status, pool_id: listingPool.value || null,
+    })
     await loadListings()
     showNotice(`${line.name}：${data.updated} 个国家已${status === 'listed' ? '上架' : '下架'}`)
   } catch (requestError) {
@@ -386,7 +536,7 @@ onMounted(loadProducts)
     <div v-if="notice" class="catalog-notice" role="status"><Check :size="15" />{{ notice }}</div>
     <div v-if="error" class="catalog-error" role="alert"><CircleAlert :size="15" /><span>{{ error }}</span><button type="button" aria-label="关闭提示" @click="error = ''"><X :size="15" /></button></div>
 
-    <nav class="catalog-tabs" aria-label="价格管理类别"><button type="button" :class="{ active: tab === 'products' }" @click="tab = 'products'; loadProducts()"><PackageCheck :size="15" />官网商品</button><button type="button" :class="{ active: tab === 'prices' }" @click="tab = 'prices'; loadPrices()"><Tags :size="15" />国家周期售价 <span>{{ priceTotal }}</span></button><button type="button" :class="{ active: tab === 'listings' }" @click="tab = 'listings'; loadListings()"><Database :size="15" />官网可见性</button></nav>
+    <nav class="catalog-tabs" aria-label="价格管理类别"><button type="button" :class="{ active: tab === 'products' }" @click="tab = 'products'; loadProducts()"><PackageCheck :size="15" />官网商品</button><button type="button" :class="{ active: tab === 'prices' }" @click="tab = 'prices'; loadPrices()"><Tags :size="15" />国家周期售价 <span>{{ priceTotal }}</span></button><button type="button" :class="{ active: tab === 'listings' }" @click="tab = 'listings'; loadListings()"><Database :size="15" />官网可见性</button><button type="button" :class="{ active: tab === 'cities' }" @click="tab = 'cities'; loadCities()"><MapPin :size="15" />城市与号段 <span>{{ cities.length }}</span></button></nav>
 
     <template v-if="tab === 'products'">
       <form class="catalog-filters" @submit.prevent="applyProductFilters"><label class="search-field"><Search :size="15" /><input v-model="productFilter.keyword" type="search" placeholder="搜索商品、类型或地区" /></label><AppSelect v-model="productFilter.stock" :options="stockFilterOptions" aria-label="按售卖状态筛选" /><button class="secondary-action" type="submit">筛选</button></form>
@@ -419,16 +569,67 @@ onMounted(loadProducts)
       </section>
     </template>
 
+    <template v-else-if="tab === 'cities'">
+      <form class="catalog-filters" @submit.prevent="applyCityFilters">
+        <label><span>资源类型</span><AppSelect v-model="cityFilter.resource_category" :options="cityCategoryOptions" aria-label="按资源类型筛选" /></label>
+        <label><span>国家/地区</span><AppSelect v-model="cityFilter.country_code" :options="cityCountryOptions" aria-label="按国家筛选" /></label>
+        <label class="search-field"><Search :size="15" /><input v-model="cityFilter.keyword" type="search" placeholder="搜索城市码或城市名" /></label>
+        <button class="secondary-action" type="submit" :disabled="loading">筛选</button>
+        <button class="secondary-action" type="button" :disabled="citySyncBusy" @click="syncCitySegments">
+          <RefreshCw :size="14" :class="{ spinning: citySyncBusy }" />{{ citySyncBusy ? '同步中…' : '从资源池1同步城市/号段' }}
+        </button>
+      </form>
+
+      <section class="city-create">
+        <div class="bulk-head"><b>新增可售城市</b><small>客户只能选这里启用的城市；IP 段可留空，留空表示该城市不允许指定号段</small></div>
+        <div class="city-create-grid">
+          <label><span>资源类型</span><AppSelect v-model="cityForm.resource_category" :options="cityFormCategoryOptions" aria-label="新城市所属资源类型" /></label>
+          <label><span>国家/地区</span><AppSelect v-model="cityForm.country_code" :options="cityFormCountryOptions" aria-label="新城市所属国家" /></label>
+          <label><span>城市码</span><input v-model="cityForm.city_code" maxlength="32" placeholder="如 LAX" /></label>
+          <label><span>城市名</span><input v-model="cityForm.city_name" maxlength="80" placeholder="如 洛杉矶" /></label>
+          <label class="wide"><span>可售 IP 段（逗号分隔，可留空）</span><input v-model="cityForm.ip_segments" maxlength="500" placeholder="如 1.1.1,1.1.2" /></label>
+          <label><span>排序</span><input v-model.number="cityForm.sort_order" type="number" min="0" max="9999" /></label>
+          <button class="primary-action" type="button" :disabled="cityBusy" @click="addCity"><Plus :size="14" />新增城市</button>
+        </div>
+      </section>
+
+      <div class="listing-summary">
+        <span>共 <b>{{ cities.length }}</b> 个城市</span>
+        <span>已启用 <b>{{ cities.filter((item) => item.is_enabled).length }}</b></span>
+        <span>可指定号段 <b>{{ cities.filter((item) => (item.segments || []).length).length }}</b></span>
+        <span class="listing-hint">客户不选城市时默认自动分配；选了就按所选交付，不做静默替换</span>
+      </div>
+
+      <section class="catalog-table-section">
+        <div v-if="loading" class="table-state"><RefreshCw :size="17" class="spinning" />正在加载城市</div>
+        <div v-else-if="!cities.length" class="table-state"><MapPin :size="22" />还没有配置城市，客户下单时将自动分配</div>
+        <div v-else class="table-scroll"><table class="catalog-table city-table">
+          <thead><tr><th>国家/地区</th><th>资源类型</th><th>城市码</th><th>城市名</th><th>可售 IP 段</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody><tr v-for="item in cities" :key="item.id">
+            <td><b>{{ item.country_name }}</b><small>{{ item.country_code }}</small></td>
+            <td>{{ item.category_label }}</td>
+            <td><b class="country-code">{{ item.city_code }}</b></td>
+            <td><input class="city-inline" :value="item.city_name" maxlength="80" :aria-label="`${item.city_code} 城市名`" @change="saveCityName(item, $event)" /></td>
+            <td><input class="city-inline wide" :value="(item.segments || []).join(',')" maxlength="500" placeholder="留空表示不可指定号段" :aria-label="`${item.city_code} 可售 IP 段`" @change="saveCitySegments(item, $event)" /></td>
+            <td><button class="product-active" :class="{ off: !item.is_enabled }" type="button" :disabled="cityBusy" :title="item.is_enabled ? '点击停用（客户不再可选）' : '点击启用'" @click="patchCity(item, { is_enabled: !item.is_enabled }, `${item.city_code} 已${item.is_enabled ? '停用' : '启用'}`)">{{ item.is_enabled ? '已启用' : '已停用' }}</button></td>
+            <td><button class="city-delete" type="button" :disabled="cityBusy" aria-label="删除城市" @click="removeCity(item)"><Trash2 :size="13" /></button></td>
+          </tr></tbody>
+        </table></div>
+      </section>
+    </template>
+
     <template v-else>
       <div class="listing-summary">
+        <span>当前范围 <b>{{ listings.scope?.pool_name || '平台级（全池）' }}</b></span>
         <span>共 <b>{{ listings.summary.total || 0 }}</b> 个组合</span>
         <span>在售 <b>{{ listings.summary.listed || 0 }}</b></span>
         <span>已下架 <b>{{ listings.summary.unlisted || 0 }}</b></span>
         <span>缺报价 <b>{{ listings.summary.missing_price || 0 }}</b></span>
-        <span v-if="listings.summary.manual">人工调整过 <b>{{ listings.summary.manual }}</b></span>
-        <span class="listing-hint">缺报价的国家默认不上架；点格子即可切换，点完立即生效</span>
+        <span v-if="listings.summary.manual">已设置 <b>{{ listings.summary.manual }}</b></span>
+        <span class="listing-hint">默认全部下架，点格子才上架；「平台级」改动对所有资源池生效，选具体池只改该池</span>
       </div>
       <form class="catalog-filters" @submit.prevent>
+        <label><span>生效范围</span><AppSelect v-model="listingPool" :options="listingPoolOptions" aria-label="选择资源池" @update:model-value="loadListings" /></label>
         <label><span>筛选</span><AppSelect v-model="listingFilter" :options="listingFilterOptions" aria-label="筛选国家" /></label>
       </form>
       <section class="catalog-table-section">
@@ -459,12 +660,12 @@ onMounted(loadProducts)
                     class="listing-cell"
                     :class="!row.cells[line.code] ? 'off' : !row.cells[line.code].visible ? 'off' : (row.cells[line.code].has_price ? 'on' : 'no-price')"
                     :disabled="listingBusy"
-                    :title="row.cells[line.code]?.source === 'manual' ? '人工调整过' : '按报价自动推导'"
+                    :title="row.cells[line.code]?.source === 'pool' ? '该资源池单独设置' : row.cells[line.code]?.source === 'global' ? '平台级设置（全池生效）' : '未上架，点一下上架'"
                     @click="toggleListing(row.cells[line.code])"
                   >
                     <template v-if="row.cells[line.code]">
                       {{ row.cells[line.code].visible ? (row.cells[line.code].has_price ? '在售' : '无报价') : '已下架' }}
-                      <i v-if="row.cells[line.code].source === 'manual'">·手</i>
+                      <i v-if="row.cells[line.code].source === 'pool'">·池</i>
                     </template>
                     <template v-else>—</template>
                   </button>
@@ -504,4 +705,17 @@ onMounted(loadProducts)
 @media(max-width:760px){.catalog-admin{padding:68px 13px 26px}.catalog-filters{align-items:stretch;flex-wrap:wrap}.catalog-filters .search-field{flex-basis:100%}.catalog-filters>label{flex:1}.catalog-filters select,.catalog-filters input{min-width:0;width:100%}.bulk-fields{align-items:stretch;flex-direction:column}.bulk-fields label,.retail-bulk label{min-width:0}.bulk-fields .primary-action{align-self:flex-start}.catalog-header h1{font-size:20px}}
 @media(max-width:420px){.catalog-tabs button{padding:0 8px;font-size:10px}.catalog-filters .secondary-action{flex:1}.bulk-confirm{align-items:stretch}.bulk-confirm span{flex-basis:100%}.bulk-confirm button{flex:1}}
 @media(prefers-reduced-motion:reduce){.spinning{animation:none}}
+.city-create{margin-bottom:12px;padding:12px;background:#fff;border:1px solid #dce5e0;border-radius:6px}
+.city-create .bulk-head{margin-bottom:2px}
+.city-create-grid{display:flex;flex-wrap:wrap;align-items:end;gap:9px;margin-top:7px}
+.city-create-grid>label{display:grid;gap:5px;color:#62776d;font-size:10px;min-width:140px}
+.city-create-grid>label.wide{flex:1;min-width:220px}
+.city-create-grid input{height:35px;padding:0 9px;border:1px solid #cfdad4;border-radius:4px;background:#fff;color:#334a40;font:inherit;font-size:10px}
+.city-table .city-inline{width:100%;min-width:110px;height:30px;padding:0 7px;border:1px solid #dbe4df;border-radius:4px;background:#fff;color:#2d4439;font:inherit;font-size:11px}
+.city-table .city-inline.wide{min-width:180px}
+.city-table .city-inline:focus{outline:2px solid #7bb49c;outline-offset:1px}
+.city-delete{width:28px;height:28px;display:grid;place-items:center;border:1px solid #e0d6d3;border-radius:4px;background:#fff;color:#984a3d;cursor:pointer}
+.city-delete:hover:not(:disabled){background:#fff2ef}
+.city-delete:disabled{opacity:.5;cursor:progress}
+@media(max-width:760px){.city-create-grid>label{flex:1;min-width:0}.city-create-grid>label.wide{flex-basis:100%}}
 </style>

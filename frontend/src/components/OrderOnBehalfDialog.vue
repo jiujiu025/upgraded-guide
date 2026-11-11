@@ -4,6 +4,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { Loader2, ShoppingCart, X } from 'lucide-vue-next'
 import { createOnBehalfOrder, getPublicProducts, previewOrder } from '../api'
+import CitySegmentPicker from './CitySegmentPicker.vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -19,6 +20,7 @@ const previewing = ref(false)
 const submitting = ref(false)
 const error = ref('')
 const preview = ref(null)
+const cityChoice = ref({ cityCode: '', ipSegment: '' })
 const form = reactive({
   productId: null,
   quantity: 1,
@@ -58,6 +60,7 @@ function newKey() {
 
 function resetForm() {
   Object.assign(form, { productId: null, quantity: 1, billingDays: 30, paymentMethod: 'contact_manager', discountPercent: 0, remark: '' })
+  cityChoice.value = { cityCode: '', ipSegment: '' }
   preview.value = null
   error.value = ''
   idempotencyKey = newKey()
@@ -117,6 +120,9 @@ watch([() => form.productId, () => form.quantity, () => form.billingDays], () =>
   previewTimer = setTimeout(refreshPreview, 300)
 })
 
+// 换产品意味着换国家，旧城市选择必须清掉（选择器自己也会清理不可售项）。
+watch(() => form.productId, () => { cityChoice.value = { cityCode: '', ipSegment: '' } })
+
 // 客户没有登录账号时，余额/在线支付都会被后端拒绝，这里直接把选项禁掉并说明原因。
 watch(hasAccount, (value) => {
   if (!value) form.paymentMethod = 'contact_manager'
@@ -143,6 +149,8 @@ async function submit() {
       payment_method: form.paymentMethod,
       remark: form.remark.trim() || null,
       idempotency_key: idempotencyKey,
+      city_code: cityChoice.value.cityCode || null,
+      ip_segment: cityChoice.value.ipSegment || null,
     }
     if (discountApplied.value) payload.discount_percent = Number(form.discountPercent)
     const { data } = await createOnBehalfOrder(payload)
@@ -214,6 +222,10 @@ onBeforeUnmount(() => {
             <input v-model.number="form.discountPercent" type="number" min="0" :max="maxDiscountPercent" step="1" />
             <small class="obf-hint">最多 {{ maxDiscountPercent }}%（即 {{ (100 - maxDiscountPercent) / 10 }} 折）；只有管理员能设置折扣，销售按标价开单。</small>
           </label>
+
+          <div v-if="selectedProduct" class="obf-wide">
+            <CitySegmentPicker v-model="cityChoice" :product-id="selectedProduct.id" :disabled="submitting" />
+          </div>
 
           <label class="obf-field obf-wide">备注
             <textarea v-model="form.remark" maxlength="1000" rows="2" placeholder="线路要求、交付备注（可选）" />

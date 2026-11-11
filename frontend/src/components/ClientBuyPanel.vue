@@ -5,6 +5,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowRight, Check, Loader2, Minus, Plus, ShoppingCart } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { createCustomerOrder, getCatalog, previewOrder } from '../api'
+import CitySegmentPicker from './CitySegmentPicker.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -13,6 +14,9 @@ const error = ref('')
 const previewing = ref(false)
 const submitting = ref(false)
 const preview = ref(null)
+const cityChoice = ref({ cityCode: '', ipSegment: '' })
+const citySupported = ref(false)
+const cityMeta = ref({ items: [] })
 const catalog = ref({ lines: [] })
 const form = reactive({
   lineCode: '',
@@ -32,6 +36,13 @@ const region = computed(() => regions.value.find((item) => item.id === form.regi
 const offers = computed(() => region.value?.offers || [])
 const periods = computed(() => line.value?.periods || [])
 const offer = computed(() => offers.value.find((item) => item.product_id === form.productId) || null)
+const cityLabel = computed(() => {
+  if (!cityChoice.value.cityCode) return ''
+  const hit = (cityMeta.value.items || []).find((item) => item.city_code === cityChoice.value.cityCode)
+  return hit ? `${hit.city_name}（${hit.city_code}）` : cityChoice.value.cityCode
+})
+// 没有可售城市时整块隐藏，规格步骤自动从 ④ 顶到 ③，避免编号出现空档
+const specStep = computed(() => (citySupported.value ? '④' : '③'))
 const canSubmit = computed(() => Boolean(offer.value?.in_stock) && Boolean(preview.value) && !submitting.value)
 
 function regionPrice(entry) {
@@ -127,6 +138,8 @@ async function submit() {
       billing_days: Number(form.billingDays),
       payment_method: form.paymentMethod,
       remark: form.remark.trim() || null,
+      city_code: cityChoice.value.cityCode || null,
+      ip_segment: cityChoice.value.ipSegment || null,
     })
     router.push(`/client/orders/${data.id}?created=1`)
   } catch (requestError) {
@@ -194,8 +207,21 @@ onMounted(load)
             </div>
           </section>
 
+          <section v-show="citySupported" class="buy-block">
+            <h2>③ 城市与 IP 段（可选）</h2>
+            <div v-if="!offers.length" class="inline-empty">该国家在当前产品线下暂无报价，换一个国家试试。</div>
+            <CitySegmentPicker
+              v-else-if="offer"
+              v-model="cityChoice"
+              plain
+              :product-id="offer.product_id"
+              @ready="cityMeta = $event; citySupported = Boolean($event.supported)"
+            />
+            <p v-else class="inline-empty">当前地区暂无城市可选。</p>
+          </section>
+
           <section class="buy-block">
-            <h2>③ 规格、周期与数量</h2>
+            <h2>{{ specStep }} 规格、周期与数量</h2>
             <div v-if="!offers.length" class="inline-empty">该国家在当前产品线下暂无报价，换一个国家试试。</div>
             <template v-else>
               <div v-if="offers.length > 1" class="spec-list">
@@ -240,6 +266,8 @@ onMounted(load)
           <h2>{{ line?.name || '—' }}</h2>
           <div class="summary-line"><span>地区</span><b>{{ region?.name || '—' }}</b></div>
           <div class="summary-line"><span>规格</span><b>{{ offer?.spec || '标准' }}</b></div>
+          <div v-if="cityLabel" class="summary-line"><span>城市</span><b>{{ cityLabel }}</b></div>
+          <div v-if="cityChoice.ipSegment" class="summary-line"><span>IP 段</span><b>{{ cityChoice.ipSegment }}</b></div>
           <div class="summary-line"><span>周期</span><b>{{ form.billingDays }} 天</b></div>
           <div class="summary-line"><span>数量</span><b>{{ form.quantity }} 条</b></div>
           <div class="summary-line"><span>单价</span><b>{{ preview ? `¥${preview.unit_price.toFixed(2)}` : '—' }}</b></div>

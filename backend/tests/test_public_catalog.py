@@ -17,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.security import create_access_token, hash_password
 from app.db import get_db
 from app.main import app
-from app.models import Customer, Product, Region, RetailPriceRule, User
+from app.models import CatalogListing, Customer, Product, Region, RetailPriceRule, User
 from app.models.base import Base
 from app.services.registration_service import rate_limiter
 from app.services.session_service import create_session
@@ -63,6 +63,12 @@ def api():
     # 停用商品不出现
     add_product(db, de, "static_residential", "静态住宅IP", 85, in_stock=False)
 
+    # 人工上架制：官网只展示管理员明确上架的格子（法国一个都没上架）。
+    for line, region in (("residential", us), ("residential", jp), ("residential", de),
+                         ("social", us), ("social", jp), ("live", us)):
+        db.add(CatalogListing(pool_id=None, line_code=line, region_id=region.id,
+                              status="listed", reason="测试回填"))
+
     customer_user = User(username="cust", password_hash=hash_password("Customer_123456"),
                          role="customer", display_name="客户")
     db.add(customer_user)
@@ -93,8 +99,8 @@ def test_public_catalog_has_three_lines_and_no_prices(api):
     assert body["price_visible"] is False
     codes = [line["code"] for line in body["lines"]]
     assert codes == ["residential", "social", "live"]
-    # 缺价国家默认不出现（法国一点报价都没有）——客户看到"暂无报价"会以为系统坏了。
-    # 副作用是三条线不再共用同一份国家清单：每条线只列出自己有商品的国家。
+    # 人工上架制：没有上架记录的国家不出现（法国没有商品也没上架）。
+    # 副作用是三条线不再共用同一份国家清单：每条线只列出自己上架且有商品的国家。
     expected_regions = {
         "residential": {"美国", "日本", "德国"},  # 德国停售但仍有商品行
         "social": {"美国", "日本"},
@@ -130,7 +136,7 @@ def test_signed_in_catalog_exposes_prices(api):
     residential_regions = {region["name"]: region for region in lines["residential"]["regions"]}
     assert residential_regions["美国"]["min_price"] == 60.0
     assert residential_regions["日本"]["min_price"] == 85.0
-    # 缺价国家不出现在列表里（默认规则），而不是出现后标"暂无报价"
+    # 没有上架记录的国家不出现在列表里，而不是出现后标"暂无报价"
     assert "法国" not in residential_regions
     # 有商品但停售：价格仍然展示，国家标记为不可下单
     assert residential_regions["德国"]["min_price"] == 85.0

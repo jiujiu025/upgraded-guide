@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -77,6 +78,40 @@ class QuoteItem:
     country_code: str | None = None
     currency: str = "CNY"
     is_custom: bool = False
+
+
+@dataclass(frozen=True)
+class ProxyAccount:
+    """上游交付的代理子账号（静态住宅：IP + 账密 + 端口 + 到期时间）。"""
+
+    external_id: str
+    username: str
+    password: str
+    ip: str | None = None
+    port: int | None = None
+    protocol: str | None = None
+    host: str | None = None
+    country_code: str | None = None
+    country_name: str | None = None
+    city: str | None = None
+    state: str | None = None
+    expires_at: datetime | None = None
+    remark: str | None = None
+    # 退单要用：子账号所属的购买单 id（上游字段 order_product_buy_id）
+    order_product_buy_id: int | None = None
+
+
+@dataclass(frozen=True)
+class PurchaseResult:
+    order_number: str
+    accounts: tuple[ProxyAccount, ...]
+
+
+@dataclass(frozen=True)
+class RenewalResult:
+    order_number: str
+    # (子账号 id, 续费后的到期时间)
+    expires: tuple[tuple[str, datetime | None], ...]
 
 
 class ReadOnlySupplierAdapter(Protocol):

@@ -15,8 +15,8 @@ const api = vi.hoisted(() => ({
   getSecurityQuestions: vi.fn(), markAllNotificationsRead: vi.fn(), markNotificationRead: vi.fn(),
   recordRenewalTouch: vi.fn(), renewCustomerLine: vi.fn(), updateSecurityQuestions: vi.fn(),
   updateCustomerLineNote: vi.fn(), logout: vi.fn(),
-  // 客户中心选购面板用到的三个
-  getCatalog: vi.fn(), previewOrder: vi.fn(), createCustomerOrder: vi.fn(),
+  // 客户中心选购面板用到的
+  getCatalog: vi.fn(), previewOrder: vi.fn(), createCustomerOrder: vi.fn(), getCatalogCities: vi.fn(),
 }))
 const sessionModule = vi.hoisted(() => ({ session: { user: { username: 'test_customer', role: 'customer', display_name: '测试客户' } } }))
 const healthMock = vi.hoisted(() => ({ loadHealthFixture: vi.fn() }))
@@ -53,6 +53,7 @@ beforeEach(() => {
   api.getCustomerLines.mockResolvedValue({ data: [] })
   api.getCustomerRenewals.mockResolvedValue({ data: [] })
   api.getNotifications.mockResolvedValue({ data: [] })
+  api.getCatalogCities.mockResolvedValue({ data: { supported: false, items: [], auto_label: '自动分配' } })
 })
 
 describe('客户中心内选购', () => {
@@ -64,6 +65,36 @@ describe('客户中心内选购', () => {
     expect(wrapper.text()).toContain('在本页完成选购')
     expect(wrapper.text()).toContain('静态住宅IP')
     expect(wrapper.text()).toContain('美国')
+  })
+
+  it('选城市与号段后，下单请求里带上城市码和号段', async () => {
+    api.getCatalogCities.mockResolvedValue({
+      data: {
+        supported: true, country_name: '美国', auto_label: '自动分配',
+        items: [{ city_code: 'LAX', city_name: '洛杉矶', segments: ['23.94.5', '23.94.6'] }],
+      },
+    })
+    const wrapper = mount(WorkspaceView)
+    await flushPromises()
+    // 算价是 250ms 防抖，等它跑完 submit 才是可点的
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    await flushPromises()
+
+    const cityCard = wrapper.findAll('.city-card').find((item) => item.text().includes('美国 — 洛杉矶'))
+    expect(cityCard).toBeTruthy()
+    await cityCard.trigger('click')
+    await flushPromises()
+
+    const segment = wrapper.findAll('.segment-list button').find((item) => item.text() === '23.94.6')
+    await segment.trigger('click')
+    await flushPromises()
+
+    await wrapper.find('.buy-submit').trigger('click')
+    await flushPromises()
+
+    expect(api.createCustomerOrder).toHaveBeenCalledWith(expect.objectContaining({
+      product_id: 7, city_code: 'LAX', ip_segment: '23.94.6',
+    }))
   })
 
   it('侧边栏「购买线路」指向 /client/buy', async () => {

@@ -11,10 +11,12 @@ import { getAdminNavigation } from '../navigation/adminNavigation'
 import { logout as endSession } from '../api'
 import {
   getAdminCatalogProducts, getAdminCatalogRegions, getCatalogPublications, getSupplierInventory, getSupplierOverview,
-  getSupplierIpSegments, getSupplierProducts, getSupplierQuotes, getSupplierRegions, getSupplierRules, getSupplierSyncRuns,
-  checkSupplierInventory, deleteSupplierCredential, mapSupplierProduct, mapSupplierRegion, publishCatalogSnapshot, saveSupplierCredential, saveSupplierRule, syncSupplierCities,
-  syncSupplierCatalog, syncSupplierCountries, syncSupplierInventory, syncSupplierProducts, syncSupplierQuotes,
-  withdrawCatalogPublication,
+  getSupplierIpSegments, getSupplierPools, getSupplierProducts, getSupplierQuotes, getSupplierRegions,
+  getSupplierRules, getSupplierSyncRuns,
+  checkSupplierInventory, deleteSupplierCredential, deleteSupplierCredentialFor, mapSupplierProduct,
+  mapSupplierRegion, publishCatalogSnapshot, saveSupplierCredential, saveSupplierCredentialFor, saveSupplierRule,
+  syncSupplierCities, syncSupplierCatalog, syncSupplierCitySegments, syncSupplierCountries, syncSupplierInventory,
+  syncSupplierProducts, syncSupplierQuotes, withdrawCatalogPublication,
 } from '../api'
 
 const route = useRoute()
@@ -27,6 +29,12 @@ const mobileNav = ref(false)
 const busy = ref('')
 const batchState = ref('idle')
 const overview = ref(null)
+const poolOverview = ref({ items: [] })
+// 按供应商录入 Key 的临时状态：keyOpen 存 supplier.id，0 表示没展开
+const keyOpen = ref(0)
+const keyDrafts = reactive({})
+const keyBusy = reactive({})
+const poolSyncBusy = ref(0)
 const supplierProducts = ref([])
 const supplierRegions = ref([])
 const inventory = ref([])
@@ -55,6 +63,13 @@ const ruleDraft = reactive({ product_id: '', region_id: '', supplier_product_id:
 const publishDraft = reactive({ product_id: '', region_id: '', inventory_snapshot_id: '', quote_snapshot_id: '', price: '' })
 const apiRebuildCommand = 'docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps api'
 
+// 适配器类型对运营不直观，页面显示能力口径（同步/异步交付）
+const adapterLabels = {
+  global_proxy: '全球代理 · 同步交付',
+  global_proxy_readonly: '全球代理 · 只读',
+  nine_eight_five: '985Proxy · 异步交付',
+}
+const adapterLabel = (type) => adapterLabels[type] || type
 const nav = computed(() => getAdminNavigation(storedUser.value.role))
 const tabs = [
   ['overview', '状态概览'],
@@ -187,6 +202,73 @@ function errorText(requestError, fallback) {
   return requestError?.userMessage || fallback
 }
 
+async function loadPools() {
+  const { data } = await getSupplierPools()
+  poolOverview.value = data
+}
+
+function openKey(member) {
+  keyOpen.value = member.id
+  keyDrafts[member.id] = ''
+}
+
+async function savePoolKey(member) {
+  const value = (keyDrafts[member.id] || '').trim()
+  if (!value || keyBusy[member.id]) return
+  keyBusy[member.id] = true
+  error.value = ''
+  try {
+    await saveSupplierCredentialFor(member.id, value)
+    keyOpen.value = 0
+    keyDrafts[member.id] = ''
+    await loadPools()
+    feedback.value = `${member.name} 的 API Key 已保存，可直接点「立即同步」`
+  } catch (requestError) {
+    error.value = errorText(requestError, 'Key 保存失败，请重试')
+  } finally {
+    keyBusy[member.id] = false
+  }
+}
+
+async function clearPoolKey(member) {
+  if (keyBusy[member.id]) return
+  if (typeof window !== 'undefined' && !window.confirm(`清除 ${member.name} 的后台 Key？清除后将回退环境变量（如有）。`)) return
+  keyBusy[member.id] = true
+  error.value = ''
+  try {
+    await deleteSupplierCredentialFor(member.id)
+    await loadPools()
+    feedback.value = `${member.name} 的后台 Key 已清除`
+  } catch (requestError) {
+    error.value = errorText(requestError, 'Key 清除失败，请重试')
+  } finally {
+    keyBusy[member.id] = false
+  }
+}
+
+/** 保存 Key 后一键同步：商品 → 国家 → 城市 → 城市号段，全部即时执行。 */
+async function syncPoolNow(member) {
+  if (poolSyncBusy.value) return
+  poolSyncBusy.value = member.id
+  error.value = ''
+  try {
+    const products = await syncSupplierProducts()
+    const countries = await syncSupplierCountries(3)
+    const cities = await syncSupplierCities(3)
+    const segments = await syncSupplierCitySegments({ product_type_id: 3 })
+    await loadPools()
+    const productCount = products.data?.counts?.products ?? products.data?.count ?? 0
+    const countryCount = countries.data?.count ?? 0
+    const cityCount = cities.data?.count ?? 0
+    const segmentCount = segments.data?.segments_saved ?? 0
+    feedback.value = `同步完成：商品 ${productCount}、国家 ${countryCount}、城市 ${cityCount}、号段 ${segmentCount}`
+  } catch (requestError) {
+    error.value = errorText(requestError, '同步失败：请确认已录入该资源池的 API Key，且上游可访问')
+  } finally {
+    poolSyncBusy.value = 0
+  }
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -194,11 +276,11 @@ async function load() {
     const responses = await Promise.all([
       getSupplierOverview(), getSupplierProducts(), getSupplierRegions(), getSupplierInventory(), getSupplierIpSegments(),
       getSupplierQuotes(), getSupplierRules(), getSupplierSyncRuns(), getAdminCatalogProducts(),
-      getAdminCatalogRegions(), getCatalogPublications(),
+      getAdminCatalogRegions(), getCatalogPublications(), getSupplierPools(),
     ])
     ;[
       overview.value, supplierProducts.value, supplierRegions.value, inventory.value, ipSegments.value, quotes.value,
-      rules.value, syncRuns.value, localProducts.value, localRegions.value, publications.value,
+      rules.value, syncRuns.value, localProducts.value, localRegions.value, publications.value, poolOverview.value,
     ] = responses.map((response) => response.data)
     if (!categoryProducts.value.some((item) => String(item.id) === String(selectedInventoryProductId.value))) {
       selectedInventoryProductId.value = categoryProducts.value[0] ? String(categoryProducts.value[0].id) : ''
@@ -540,6 +622,65 @@ onMounted(load)
         <section v-else-if="error && !overview" class="workspace-state error-state"><AlertTriangle :size="30" /><h2>资源池数据暂时无法显示</h2><p>{{ error }}</p><button class="outline-action" @click="load"><RefreshCw :size="15" />重新加载</button></section>
         <template v-else-if="overview">
           <div v-if="error" class="workspace-alert"><span>{{ error }}</span><button @click="error = ''">关闭</button></div>
+          <section class="pool-strip" aria-label="资源池列表">
+            <article v-for="pool in poolOverview.items" :key="pool.id" class="pool-card">
+              <header>
+                <div><b>{{ pool.name }}</b><small>{{ pool.code }} · {{ pool.strategy }}</small></div>
+                <span class="status-chip" :data-tone="pool.status === 'active' ? 'healthy' : 'warning'">{{ pool.status === 'active' ? '启用' : '停用' }}</span>
+              </header>
+              <ul>
+                <li v-for="member in pool.suppliers" :key="member.id">
+                  <div class="pool-member-head">
+                    <b>{{ member.name }}</b>
+                    <small>{{ adapterLabel(member.adapter_type) }} · 优先级 {{ member.priority }}</small>
+                  </div>
+                  <div class="pool-tags">
+                    <em :data-ok="member.api_key_configured">{{ member.api_key_configured ? 'Key 已配置' : 'Key 未配置' }}</em>
+                    <em :data-ok="member.auto_purchase_enabled">{{ member.auto_purchase_enabled ? '可自动采购' : '只读 / 人工' }}</em>
+                    <em>{{ member.counts.products }} 商品 · {{ member.counts.countries }} 国 · {{ member.counts.cities }} 城</em>
+                    <em>{{ member.last_sync_status === 'not_synced' ? '未同步' : (member.last_sync_status === 'success' ? '已同步' : '同步异常') }}</em>
+                  </div>
+                  <div v-if="canManageCredential" class="pool-actions">
+                    <template v-if="keyOpen === member.id">
+                      <input
+                        v-model="keyDrafts[member.id]"
+                        type="password"
+                        autocomplete="new-password"
+                        spellcheck="false"
+                        maxlength="4096"
+                        :placeholder="member.api_key_configured ? '输入新 Key 以替换' : '粘贴该资源池的 API Key'"
+                        :disabled="keyBusy[member.id]"
+                      />
+                      <button class="secondary-action" type="button" :disabled="keyBusy[member.id] || !(keyDrafts[member.id] || '').trim()" @click="savePoolKey(member)">
+                        {{ keyBusy[member.id] ? '保存中…' : '保存 Key' }}
+                      </button>
+                      <button class="text-action" type="button" :disabled="keyBusy[member.id]" @click="keyOpen = 0">取消</button>
+                      <button v-if="member.api_key_configured" class="credential-clear" type="button" :disabled="keyBusy[member.id]" @click="clearPoolKey(member)">清除</button>
+                    </template>
+                    <template v-else>
+                      <button class="secondary-action" type="button" @click="openKey(member)">
+                        {{ member.api_key_configured ? '替换 Key' : '录入 Key' }}
+                      </button>
+                      <button
+                        v-if="member.adapter_type === 'global_proxy'"
+                        class="primary-action"
+                        type="button"
+                        :disabled="poolSyncBusy === member.id"
+                        :title="member.api_key_configured ? '立即从上游拉取商品、国家、城市与号段' : '请先录入 API Key'"
+                        @click="syncPoolNow(member)"
+                      >{{ poolSyncBusy === member.id ? '同步中…' : '立即同步' }}</button>
+                    </template>
+                  </div>
+                </li>
+                <li v-if="!pool.suppliers.length" class="pool-empty">这个池还没有成员</li>
+              </ul>
+            </article>
+            <p class="pool-note">
+              采购总开关：{{ poolOverview.purchase_enabled ? '已开启' : '已关闭' }} · 最低毛利率：{{ poolOverview.min_margin_percent ?? 20 }}%（毛利护栏）
+              <br />Key 保存后点「立即同步」会按 商品 → 国家 → 城市 → 城市号段 依次拉取，完成即可在选购页看到真实城市与 IP 段。
+              <br />官网按池上架/下架在「商品与价格 → 官网可见性」，用「生效范围」切换到具体资源池。
+            </p>
+          </section>
           <section class="supplier-key-panel" :data-ready="overview.supplier.api_key_configured">
             <div class="key-status-line">
               <KeyRound :size="18" />
@@ -791,4 +932,23 @@ onMounted(load)
 @media(prefers-reduced-motion:reduce){.spinning,.supplier-loading span{animation:none}.country-grid button{transition:none}.country-grid button:hover{transform:none}}
 .credential-form{display:grid;gap:7px;margin:12px 0 0 28px}.credential-form>label{font-size:11px;font-weight:700;color:#405a53}.credential-input-row{display:flex;align-items:center;gap:8px}.credential-input-row input{flex:1;min-width:0;height:38px;padding:0 10px;border:1px solid #b9cbc4;border-radius:5px;background:#fff;color:#243b34;font-size:13px}.credential-input-row input:focus{outline:2px solid #4a9c8e;outline-offset:1px}.credential-input-row input:disabled{background:#eef2f0}.credential-form>small,.credential-readonly{font-size:10px;color:#6d817a}.credential-readonly{margin:10px 0 0 28px}.credential-clear{justify-self:start;padding:4px 0;color:#536b64;font-size:10px;text-decoration:underline;text-underline-offset:2px}.credential-clear-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:9px 10px;border:1px solid #e4c99e;border-radius:5px;background:#fff8eb;color:#765820;font-size:10px}.credential-clear-confirm span{flex:1 1 240px}.credential-clear-danger{padding:6px 9px;border-radius:4px;background:#9c3f36;color:#fff;font-size:10px}.credential-config-error{margin:10px 0 0 28px;padding:9px 10px;border:1px solid #e6b8b2;border-radius:5px;background:#fff2f0;color:#923c34;font-size:11px}.rebuild-command{display:block;margin-top:9px;padding:9px 10px;border:1px solid #d7e1dd;border-radius:5px;background:#fff;font-size:10px;overflow-wrap:anywhere}.rebuild-copy{margin-top:7px}
 @media(max-width:768px){.credential-form,.credential-readonly,.credential-config-error{margin-left:0}.credential-input-row{align-items:stretch;flex-direction:column}.credential-input-row .primary-action{width:100%}}
+.pool-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:14px}
+.pool-card{border:1px solid #d8e2df;border-radius:6px;background:#f9fbfa;padding:14px 16px;display:grid;gap:10px}
+.pool-card header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding-bottom:9px;border-bottom:1px solid #e3ebe8}
+.pool-card header b{font-size:14px;color:#1f3730}
+.pool-card header small{display:block;margin-top:3px;color:#7b8d87;font-size:10px}
+.pool-card ul{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.pool-card li{display:grid;gap:6px;padding:9px 10px;border:1px solid #e0e8e5;border-radius:5px;background:#fff}
+.pool-member-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.pool-member-head b{font-size:12px;color:#243b33}
+.pool-member-head small{color:#82918c;font-size:9px}
+.pool-tags{display:flex;flex-wrap:wrap;gap:5px}
+.pool-tags em{font-style:normal;padding:3px 6px;border-radius:4px;background:#f0f4f2;color:#6a7d75;font-size:9px;white-space:nowrap}
+.pool-tags em[data-ok="true"]{background:#e4f4ec;color:#1f6b53}
+.pool-empty{padding:14px;color:#82918c;font-size:11px;text-align:center}
+.pool-note{grid-column:1/-1;margin:0;color:#7b8d87;font-size:10px;line-height:1.7}
+.pool-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
+.pool-actions input{flex:1;min-width:150px;height:32px;padding:0 9px;border:1px solid #cfdad4;border-radius:4px;background:#fff;color:#334a40;font:inherit;font-size:10px}
+.pool-actions .secondary-action,.pool-actions .primary-action{min-height:32px;font-size:10px}
+.pool-actions .text-action{padding:0 4px;color:#6a7d75;font-size:10px}
 </style>

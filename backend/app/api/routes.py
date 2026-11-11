@@ -27,6 +27,7 @@ from app.schemas.common import (
 )
 from app.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, counts_by, like_pattern, page_payload, paginate
 from app.services.audit_service import write_audit
+from app.services.city_option_service import CitySelectionError, customer_options, resolve_choice
 from app.services.customer_scope import get_customer_profile, scoped_customer_ids
 from app.services.customer_email import ensure_unique_customer_email
 from app.services.customer_view import balance_cents_of, customer_view, customer_views
@@ -278,6 +279,15 @@ def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, o
         raise HTTPException(status_code=422, detail="产品与地区不匹配")
     billing_days = payload.billing_days or product.billing_days
     unit_price, total_amount = calculate_order_price(db, product, payload.quantity, billing_days)
+    # 客户指定的城市 / 号段：下单时校验并快照，失败直接 422 让人改选，
+    # 绝不"自动换个城市"——静默替换等于交付了客户没要的东西。
+    try:
+        city_choice = resolve_choice(
+            db, product, region,
+            getattr(payload, "city_code", None), getattr(payload, "ip_segment", None),
+        )
+    except CitySelectionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     remark = payload.remark
     if discount_percent:
         # 折扣只在订单层施加，pricing_service 仍然是无折扣的唯一定价源：
@@ -309,14 +319,24 @@ def build_order(db: Session, user: User, customer: Customer, payload: OrderIn, o
         remark=remark,
         created_via=created_via,
         created_by_user_id=user.id,
+        requested_city_code=city_choice.city_code,
+        requested_city_name=city_choice.city_name,
+        requested_ip_segment=city_choice.ip_segment,
     )
     db.add(order)
     db.flush()
     if order_type == "renewal":
         notify_order_parties(db, customer, order, "续费订单已创建", f"续费订单 {order.order_no} 已创建，原线路到期时间未变更。", "renewal", skip_sales=skip_sales_notification)
     else:
-        notify_order_parties(db, customer, order, "订单已创建", f"订单 {order.order_no} 已创建，等待后续处理。", "order", skip_sales=skip_sales_notification)
-    write_audit(db, user, "create", "order", order.id, f"类型={order_type}; 数量={payload.quantity}; 周期={billing_days}")
+        city_note = ""
+        if city_choice.specified:
+            city_note = f"（指定城市：{city_choice.city_name or city_choice.city_code}"
+            city_note += f"，IP 段 {city_choice.ip_segment}）" if city_choice.ip_segment else "）"
+        notify_order_parties(db, customer, order, "订单已创建", f"订单 {order.order_no} 已创建，等待后续处理。{city_note}", "order", skip_sales=skip_sales_notification)
+    detail = f"类型={order_type}; 数量={payload.quantity}; 周期={billing_days}"
+    if city_choice.specified:
+        detail += f"; 城市={city_choice.city_code or '-'}; 号段={city_choice.ip_segment or '-'}"
+    write_audit(db, user, "create", "order", order.id, detail)
     return order
 
 
@@ -825,28 +845,53 @@ def _catalog_rows(db: Session):
     ).all()
 
 
-def _listing_overrides(db: Session) -> dict[tuple[str, int], str]:
-    """(产品线, 地区) → 人工设置的可见性。没有记录 = 按默认规则推导。"""
+def _all_product_cells(db: Session) -> set[tuple[str, int]]:
+    """所有（含已停用）商品覆盖的 (产品线, 地区)，用于区分两种"没报价"：
+
+    - 这个国家本来就没配过商品 → 管理员上架后展示「暂无报价」是有意为之；
+    - 配过商品但被停用 → 跟随商品一起从官网消失，不展示"暂无报价"的假入口。
+    """
+    rows = db.execute(
+        select(Product.resource_category, Product.region_id)
+        .where(Product.resource_category.is_not(None))
+        .distinct()
+    ).all()
+    cells = set()
+    for category, region_id in rows:
+        line = CATEGORY_TO_LINE.get(category or "")
+        if line:
+            cells.add((line, region_id))
+    return cells
+
+
+def _listed_cells(db: Session) -> set[tuple[str, int]]:
+    """(产品线, 地区) → 是否在官网可售。
+
+    2026-11-10 起改为**人工上架制**：只有存在 status=listed 的记录才算上架，
+    没有记录一律视为下架。池级记录（pool_id 非空）同样计入——只要某个池上架了，
+    这个国家就对客户可见；具体由哪个池供货由路由决定（见 docs/双上游资源池设计.md）。
+    """
     return {
-        (row.line_code, row.region_id): row.status
-        for row in db.scalars(select(CatalogListing)).all()
+        (row.line_code, row.region_id)
+        for row in db.scalars(select(CatalogListing).where(CatalogListing.status == "listed")).all()
     }
 
 
 def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
-    """按三条产品线聚合，只输出**当前应该让客户看到**的国家。
+    """按三条产品线聚合，只输出**管理员已上架**的国家。
 
-    可见性规则（两层，见 docs/商品上下架与销售端升级设计.md）：
+    可见性规则（见 docs/双上游资源池设计.md 第 3 节）：
 
-    1. 默认：有报价才出现。缺价的国家不出现——客户看到"暂无报价"会以为系统坏了，
-       或以为自己点错了国家。
-    2. 覆盖：管理员在后台可以强制上架（没价也显示，标"暂无报价"）或强制下架
-       （有价也不显示）。覆盖是人工决定，补价后不会自动复活。
+    1. **人工上架制**：没有上架记录 = 不出现。新国家、新商品、新池的货都不会自动上线，
+       必须管理员在「商品与价格 → 官网可见性」里点开。
+    2. 池维度：某个池上架了该国家即可见；池级与平台级记录取并集。
+    3. 上架了但没报价：仍然出现，展示「暂无报价」且不可下单（这是管理员的有意决定）。
 
     ``with_price=False`` 时不返回任何金额与 offer，未登录用户拿不到价格。
     """
     regions = _active_regions(db)
-    overrides = _listing_overrides(db)
+    listed = _listed_cells(db)
+    known_cells = _all_product_cells(db)
 
     # 先把每条线上"哪些国家有商品"统计出来，再决定每个格子要不要出现。
     priced: dict[str, dict[int, list]] = {line: {} for line in LINE_ORDER}
@@ -859,12 +904,12 @@ def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
     for line in sorted(LINE_ORDER, key=lambda code: LINE_ORDER[code]):
         entries: dict[int, dict] = {}
         for region in regions:
-            state = overrides.get((line, region.id))
-            if state == "unlisted":
-                continue  # 人工下架：即使有价也不出现
-            has_offer = bool(priced.get(line, {}).get(region.id))
-            if not has_offer and state != "listed":
-                continue  # 默认规则：没报价、也没被强制上架 → 不出现
+            key = (line, region.id)
+            if key not in listed:
+                continue  # 人工上架制：没上架就不出现
+            has_offer = region.id in priced.get(line, {})
+            if not has_offer and key in known_cells:
+                continue  # 商品被停用：跟随下架，不展示"暂无报价"的假入口
             entries[region.id] = {
                 "id": region.id,
                 "name": region.name,
@@ -872,7 +917,7 @@ def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
                 "min_price": None,
                 "in_stock": False,
                 "offers": [],
-                "listed_by_admin": state == "listed",
+                "listed_by_admin": True,
             }
         groups[line] = {
             "code": line,
@@ -959,6 +1004,23 @@ def public_catalog_detail(code: str, db: Session = Depends(get_db), _: None = De
 def catalog_for_signed_in_user(db: Session = Depends(get_db), _: User = Depends(current_user)):
     """登录后可见的目录：与公开接口同结构，多出价格与可下单的 offer。"""
     return _catalog_payload(db, with_price=True)
+
+
+@router.get("/catalog/cities")
+def catalog_city_options(
+    product_id: int = Query(ge=1),
+    db: Session = Depends(get_db),
+    _: User = Depends(current_user),
+):
+    """某个商品可指定的城市码与 IP 段（可选精细化选项）。
+
+    必须注册在 ``/catalog/{code}`` 之前，否则 "cities" 会被当成产品线代码。
+    未配置城市时返回 supported=False，前端只显示"自动分配"。
+    """
+    product = db.get(Product, product_id)
+    if not product or not product.is_active:
+        raise HTTPException(status_code=404, detail="产品不存在或已下架")
+    return customer_options(db, product)
 
 
 @router.get("/catalog/{code}")
@@ -1050,6 +1112,7 @@ def create_order_on_behalf(
     order_payload = OrderIn(
         product_id=payload.product_id, region_id=payload.region_id, quantity=payload.quantity,
         billing_days=payload.billing_days, payment_method=payload.payment_method, remark=payload.remark,
+        city_code=payload.city_code, ip_segment=payload.ip_segment,
     )
     try:
         order = build_order(

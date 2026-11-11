@@ -394,6 +394,9 @@ class OrderIn(BaseModel):
     billing_days: int | None = Field(default=None, gt=0)
     payment_method: str = "contact_manager"
     remark: str | None = Field(default=None, max_length=1000)
+    # 可选精细化选项：城市码 / IP 段。留空表示自动分配（见 docs/城市与IP段选择设计.md）。
+    city_code: str | None = Field(default=None, max_length=32)
+    ip_segment: str | None = Field(default=None, max_length=64)
 
 
 class OnBehalfOrderIn(BaseModel):
@@ -412,6 +415,8 @@ class OnBehalfOrderIn(BaseModel):
     discount_percent: float | None = Field(default=None, ge=0, le=90)
     remark: str | None = Field(default=None, max_length=1000)
     idempotency_key: str = Field(min_length=36, max_length=64)
+    city_code: str | None = Field(default=None, max_length=32)
+    ip_segment: str | None = Field(default=None, max_length=64)
 
 
 class RenewalIn(BaseModel):
@@ -449,6 +454,10 @@ class OrderOut(BaseModel):
     # 订单来源：self_service / sales_assisted / admin。列表页用它显示「代客」标记。
     created_via: str = "self_service"
     created_by_user_id: int | None = None
+    # 客户下单时指定的城市 / 号段快照；空表示自动分配。
+    requested_city_code: str | None = None
+    requested_city_name: str | None = None
+    requested_ip_segment: str | None = None
     renewal_completed_at: datetime | None
     remark: str | None
     created_at: datetime

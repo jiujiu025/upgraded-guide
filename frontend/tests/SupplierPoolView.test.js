@@ -4,7 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({
   getAdminCatalogProducts: vi.fn(), getAdminCatalogRegions: vi.fn(), getSupplierInventory: vi.fn(),
-  getSupplierOverview: vi.fn(), getSupplierProducts: vi.fn(), getSupplierQuotes: vi.fn(), getSupplierIpSegments: vi.fn(),
+  saveSupplierCredentialFor: vi.fn(), deleteSupplierCredentialFor: vi.fn(),
+  syncSupplierCitySegments: vi.fn(),
+  getSupplierOverview: vi.fn(), getSupplierPools: vi.fn(), getSupplierProducts: vi.fn(), getSupplierQuotes: vi.fn(), getSupplierIpSegments: vi.fn(),
   getSupplierRegions: vi.fn(), getSupplierRules: vi.fn(), getSupplierSyncRuns: vi.fn(),
   getCatalogPublications: vi.fn(), publishCatalogSnapshot: vi.fn(), withdrawCatalogPublication: vi.fn(),
   mapSupplierProduct: vi.fn(), mapSupplierRegion: vi.fn(), saveSupplierRule: vi.fn(),
@@ -20,6 +22,7 @@ vi.mock('vue-router', () => ({
 }))
 
 import SupplierPoolView from '../src/views/SupplierPoolView.vue'
+import { session } from '../src/api/session'
 
 const overview = {
   supplier: {
@@ -35,6 +38,17 @@ const overview = {
 function response(data) { return Promise.resolve({ data }) }
 function setLoadData(overrides = {}) {
   api.getSupplierOverview.mockImplementation(() => response(overrides.overview || overview))
+  api.getSupplierPools.mockImplementation(() => response(overrides.pools || {
+    items: [
+      { id: 1, code: 'global_proxy_pool', name: '资源池 1', status: 'active', strategy: 'priority_manual_fallback', suppliers: [
+        { id: 1, code: 'quanqiudaili', name: '全球代理', adapter_type: 'global_proxy', priority: 1, auto_purchase_enabled: false, api_key_configured: false, counts: { products: 0, countries: 0, cities: 0 }, last_sync_status: 'not_synced' },
+      ] },
+      { id: 2, code: 'global_proxy_pool_2', name: '资源池 2', status: 'active', strategy: 'priority_manual_fallback', suppliers: [
+        { id: 2, code: '985proxy', name: '985Proxy', adapter_type: 'nine_eight_five', priority: 1, auto_purchase_enabled: false, api_key_configured: false, counts: { products: 0, countries: 0, cities: 0 }, last_sync_status: 'not_synced' },
+      ] },
+    ],
+    purchase_enabled: false, min_margin_percent: 20,
+  }))
   api.getSupplierProducts.mockImplementation(() => response(overrides.products || []))
   api.getSupplierRegions.mockImplementation(() => response(overrides.regions || []))
   api.getSupplierInventory.mockImplementation(() => response(overrides.inventory || []))
@@ -55,6 +69,12 @@ beforeEach(() => {
   for (const name of ['mapSupplierProduct', 'mapSupplierRegion', 'saveSupplierRule', 'syncSupplierCities', 'syncSupplierCountries', 'syncSupplierInventory', 'syncSupplierProducts', 'syncSupplierQuotes']) {
     api[name].mockResolvedValue({ data: { status: 'success' } })
   }
+  api.saveSupplierCredentialFor.mockResolvedValue({ data: { configured: true, source: 'admin' } })
+  api.deleteSupplierCredentialFor.mockResolvedValue({ data: { configured: false } })
+  api.syncSupplierProducts.mockResolvedValue({ data: { counts: { products: 3 } } })
+  api.syncSupplierCountries.mockResolvedValue({ data: { count: 5 } })
+  api.syncSupplierCities.mockResolvedValue({ data: { count: 8 } })
+  api.syncSupplierCitySegments.mockResolvedValue({ data: { cities_seen: 8, segments_saved: 20, errors: [] } })
   api.publishCatalogSnapshot.mockResolvedValue({ data: { id: 1 } })
   api.withdrawCatalogPublication.mockResolvedValue({ data: { id: 1 } })
 })
@@ -65,6 +85,14 @@ describe('管理员资源池工作台', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('供应商 API Key 未配置')
+
+    // 双上游：两个资源池要同时出现，且各自显示成员与能力标签
+    const strip = wrapper.find('.pool-strip')
+    expect(strip.exists()).toBe(true)
+    expect(strip.text()).toContain('资源池 1')
+    expect(strip.text()).toContain('资源池 2')
+    expect(strip.text()).toContain('985Proxy')
+    expect(strip.text()).toContain('Key 未配置')
     expect(wrapper.text()).toContain('页面不会生成演示数据')
     expect(wrapper.text()).toContain('未同步')
     expect(wrapper.findAll('button').find((button) => button.text().includes('同步目录与报价')).attributes('disabled')).toBeDefined()
@@ -128,5 +156,49 @@ describe('管理员资源池工作台', () => {
     expect(wrapper.find('.publish-fields button').attributes('disabled')).toBeDefined()
     await wrapper.findAll('button').find((button) => button.text().includes('撤回')).trigger('click')
     expect(api.withdrawCatalogPublication).toHaveBeenCalledWith(4)
+  })
+})
+
+describe('资源池 Key 录入与即时同步', () => {
+  beforeEach(() => {
+    // 组件用 session.user 判断权限，localStorage 只是导航用的缓存
+    session.user = { role: 'super_admin', display_name: '超管' }
+  })
+
+  it('按资源池录入 Key：提交到对应供应商并刷新池状态', async () => {
+    const wrapper = mount(SupplierPoolView)
+    await flushPromises()
+
+    const poolTwo = wrapper.findAll('.pool-card').find((item) => item.text().includes('资源池 2'))
+    const openButton = poolTwo.findAll('.pool-actions button').find((item) => item.text().includes('录入 Key'))
+    expect(openButton).toBeTruthy()
+    await openButton.trigger('click')
+
+    const input = poolTwo.find('.pool-actions input')
+    await input.setValue('985-secret')
+    const saveButton = poolTwo.findAll('.pool-actions button').find((item) => item.text().includes('保存 Key'))
+    await saveButton.trigger('click')
+    await flushPromises()
+
+    expect(api.saveSupplierCredentialFor).toHaveBeenCalledWith(2, '985-secret')
+    expect(api.getSupplierPools).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('Key 已保存')
+  })
+
+  it('保存 Key 后点「立即同步」依次拉取商品/国家/城市/号段', async () => {
+    const wrapper = mount(SupplierPoolView)
+    await flushPromises()
+
+    const poolOne = wrapper.findAll('.pool-card').find((item) => item.text().includes('资源池 1'))
+    const syncButton = poolOne.findAll('.pool-actions button').find((item) => item.text().includes('立即同步'))
+    expect(syncButton).toBeTruthy()
+    await syncButton.trigger('click')
+    await flushPromises()
+
+    expect(api.syncSupplierProducts).toHaveBeenCalled()
+    expect(api.syncSupplierCountries).toHaveBeenCalledWith(3)
+    expect(api.syncSupplierCities).toHaveBeenCalledWith(3)
+    expect(api.syncSupplierCitySegments).toHaveBeenCalledWith({ product_type_id: 3 })
+    expect(wrapper.text()).toContain('同步完成')
   })
 })

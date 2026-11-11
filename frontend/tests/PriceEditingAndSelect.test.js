@@ -13,6 +13,10 @@ const api = vi.hoisted(() => ({
   getManagedRetailPrices: vi.fn(),
   updateManagedCatalogProduct: vi.fn(),
   updateManagedRetailPrice: vi.fn(),
+  getManagedCities: vi.fn(),
+  createManagedCity: vi.fn(),
+  updateManagedCity: vi.fn(),
+  deleteManagedCity: vi.fn(),
 }))
 
 vi.mock('../src/api', () => api)
@@ -284,7 +288,7 @@ describe('官网可见性页签', () => {
     await offCell.trigger('click')
     await flushPromises()
     expect(api.updateCatalogListing).toHaveBeenCalledWith({
-      line_code: 'social', region_id: 2, status: 'listed',
+      line_code: 'social', region_id: 2, status: 'listed', pool_id: null,
     })
     wrapper.unmount()
   })
@@ -301,7 +305,7 @@ describe('官网可见性页签', () => {
     await flushPromises()
 
     expect(api.bulkUpdateCatalogListings).toHaveBeenCalledWith({
-      line_code: 'residential', region_ids: [1, 2], status: 'unlisted',
+      line_code: 'residential', region_ids: [1, 2], status: 'unlisted', pool_id: null,
     })
     wrapper.unmount()
   })

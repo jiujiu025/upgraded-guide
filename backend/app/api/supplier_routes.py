@@ -11,26 +11,29 @@ from app.api.deps import require_roles
 from app.core.config import get_settings
 from app.db import get_db
 from app.models import (
-    CatalogPublication, ProductSupplyRule, Supplier, SupplierInventorySnapshot, SupplierIpSegmentSnapshot,
-    SupplierProduct, SupplierQuote, SupplierRegion, SupplierSyncRun, User,
+    CatalogPublication, ProductSupplyRule, ResourcePool, ResourcePoolSupplier, Supplier,
+    SupplierInventorySnapshot, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion,
+    SupplierSyncRun, User,
 )
 from app.services.audit_service import write_audit
 from app.services.catalog_publication_service import PublicationError, publish_catalog, withdraw_catalog
+from app.services.city_catalog_sync import sync_city_segments
 from app.services.supplier_credentials import (
-    SupplierCredentialError, clear_api_key, credential_encryption_ready, credential_source, has_configured_api_key,
-    save_api_key,
+    SupplierCredentialError, clear_api_key, credential_encryption_ready, credential_source,
+    get_supplier, has_configured_api_key, save_api_key, supplier_key_status,
 )
 from app.services.supplier_service import (
     CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, begin_sync_run,
     configure_manual_supply_rule, ensure_pool_one, finish_sync_run, map_supplier_product,
-    map_supplier_region, RESOURCE_CATEGORY_CODES, save_inventory, save_ip_segment_snapshots, save_quotes, sync_products, sync_regions, sync_supplier_catalog,
+    map_supplier_region, RESOURCE_CATEGORY_CODES, save_inventory, save_ip_segment_snapshots, save_quotes,
+    sync_products, sync_regions, sync_supplier_catalog,
 )
 from app.suppliers.base import (
     InventoryItem, ProcurementDisabledError, SupplierBusinessError, SupplierCapabilityUnsupportedError,
     SupplierConfigurationError, SupplierError, SupplierInvalidResponseError, SupplierRateLimitError,
     SupplierTimeoutError, reject_procurement,
 )
-from app.suppliers.global_proxy import GlobalProxyReadOnlyAdapter
+from app.suppliers.global_proxy import NATIVE_PRODUCT_TYPE_ID, GlobalProxyReadOnlyAdapter
 from app.suppliers.factory import build_readonly_adapter
 
 router = APIRouter(prefix="/admin/suppliers", tags=["供应商只读接入"])
@@ -129,12 +132,7 @@ def api_key_configured(db: Session) -> bool:
     return has_configured_api_key(db)
 
 
-@router.put("/credential")
-async def update_supplier_credential(
-    request: Request,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("super_admin")),
-):
+async def _read_credential_body(request: Request) -> str:
     if request.headers.get("content-length", "").isdigit() and int(request.headers["content-length"]) > 8192:
         raise HTTPException(status_code=413, detail={"code": "SUPPLIER_CREDENTIAL_INVALID", "message": "凭据请求格式无效"})
     try:
@@ -149,8 +147,12 @@ async def update_supplier_credential(
     value = payload["api_key"].strip()
     if not value or len(value) > 4096:
         raise HTTPException(status_code=422, detail={"code": "SUPPLIER_CREDENTIAL_INVALID", "message": "凭据长度无效"})
+    return value
+
+
+def _save_credential(db: Session, user: User, value: str, supplier: Supplier | None) -> dict:
     try:
-        save_api_key(db, user, value)
+        save_api_key(db, user, value, supplier=supplier)
         db.commit()
     except SupplierCredentialError as exc:
         db.rollback()
@@ -159,6 +161,17 @@ async def update_supplier_credential(
         db.rollback()
         raise HTTPException(status_code=500, detail={"code": "SUPPLIER_CREDENTIAL_SAVE_FAILED", "message": "凭据保存失败，请重试"}) from None
     return {"configured": True, "source": "admin"}
+
+
+@router.put("/credential")
+async def update_supplier_credential(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin")),
+):
+    """兼容入口：默认供应商（资源池 1）的 Key。"""
+    value = await _read_credential_body(request)
+    return _save_credential(db, user, value, None)
 
 
 @router.delete("/credential")
@@ -176,6 +189,62 @@ def delete_supplier_credential(
         db.rollback()
         raise HTTPException(status_code=500, detail={"code": "SUPPLIER_CREDENTIAL_CLEAR_FAILED", "message": "凭据清除失败，请重试"}) from None
     return {"configured": api_key_configured(db), "source": credential_source(db)}
+
+
+def _credential_supplier(db: Session, supplier_id: int) -> Supplier:
+    supplier = get_supplier(db, supplier_id)
+    if supplier is None:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+    return supplier
+
+
+@router.get("/{supplier_id}/credential")
+def get_supplier_credential(
+    supplier_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("super_admin", "admin")),
+):
+    supplier = _credential_supplier(db, supplier_id)
+    ready, source = supplier_key_status(db, supplier)
+    return {
+        "supplier_id": supplier.id,
+        "configured": ready,
+        "source": source,
+        "encryption_ready": credential_encryption_ready(),
+    }
+
+
+@router.put("/{supplier_id}/credential")
+async def update_supplier_credential_by_id(
+    supplier_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin")),
+):
+    """按供应商录入 Key：每个池各自一把，互不覆盖。"""
+    supplier = _credential_supplier(db, supplier_id)
+    value = await _read_credential_body(request)
+    return _save_credential(db, user, value, supplier)
+
+
+@router.delete("/{supplier_id}/credential")
+def delete_supplier_credential_by_id(
+    supplier_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin")),
+):
+    supplier = _credential_supplier(db, supplier_id)
+    try:
+        clear_api_key(db, user, supplier=supplier)
+        db.commit()
+    except SupplierCredentialError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "SUPPLIER_CREDENTIAL_NOT_FOUND", "message": str(exc)}) from exc
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail={"code": "SUPPLIER_CREDENTIAL_CLEAR_FAILED", "message": "凭据清除失败，请重试"}) from None
+    ready, source = supplier_key_status(db, supplier)
+    return {"configured": ready, "source": source}
 
 
 def fail_sync_run(db: Session, user: User, run_id: int, error_code: str, message: str) -> None:
@@ -222,17 +291,93 @@ def list_suppliers(db: Session = Depends(get_db), _: User = Depends(require_role
     ensure_pool_one(db)
     db.commit()
     suppliers = db.scalars(select(Supplier).order_by(Supplier.id)).all()
-    return [{
-        "id": item.id,
-        "code": item.code,
-        "name": item.name,
-        "status": item.status,
-        "base_url": item.base_url,
-        "api_key_configured": api_key_configured(db),
-        "credential_source": credential_source(db),
-        "credential_encryption_ready": credential_encryption_ready(),
-        "auto_purchase_enabled": False,
-    } for item in suppliers]
+    rows = []
+    for item in suppliers:
+        ready, source = supplier_key_status(db, item)
+        rows.append({
+            "id": item.id,
+            "code": item.code,
+            "name": item.name,
+            "status": item.status,
+            "base_url": item.base_url,
+            "api_key_configured": ready,
+            "credential_source": source,
+            "credential_encryption_ready": credential_encryption_ready(),
+            "auto_purchase_enabled": bool(item.auto_purchase_enabled),
+        })
+    return rows
+
+
+@router.get("/pools")
+def list_supplier_pools(db: Session = Depends(get_db),
+                        _: User = Depends(require_roles("super_admin", "admin"))):
+    """后台资源池总览：有几家上游、各在哪个池、优先级、凭据与同步状态。
+
+    双上游阶段的核心诉求是"后台能一眼看到资源池 1 / 资源池 2"，所以这里返回
+    池 + 成员 + 每家自己的商品/国家/城市数与最近同步，不把两家混成一个数字。
+    """
+    ensure_pool_one(db)
+    db.commit()
+    pools = db.scalars(select(ResourcePool).order_by(ResourcePool.id)).all()
+    items = []
+    for pool in pools:
+        members = db.execute(
+            select(ResourcePoolSupplier, Supplier)
+            .join(Supplier, Supplier.id == ResourcePoolSupplier.supplier_id)
+            .where(ResourcePoolSupplier.pool_id == pool.id)
+            .order_by(ResourcePoolSupplier.priority, Supplier.id)
+        ).all()
+        supplier_views = []
+        for member, supplier in members:
+            last_run = db.scalar(
+                select(SupplierSyncRun).where(SupplierSyncRun.supplier_id == supplier.id)
+                .order_by(SupplierSyncRun.started_at.desc()).limit(1)
+            )
+            key_ready, key_source = supplier_key_status(db, supplier)
+            supplier_views.append({
+                "id": supplier.id,
+                "code": supplier.code,
+                "name": supplier.name,
+                "adapter_type": supplier.adapter_type,
+                "base_url": supplier.base_url,
+                "status": supplier.status,
+                "priority": member.priority,
+                "is_enabled": member.is_enabled,
+                "auto_purchase_enabled": bool(supplier.auto_purchase_enabled),
+                "api_key_configured": key_ready,
+                "credential_source": key_source,
+                "counts": {
+                    "products": db.scalar(select(func.count()).select_from(SupplierProduct)
+                                          .where(SupplierProduct.supplier_id == supplier.id)) or 0,
+                    "countries": db.scalar(select(func.count()).select_from(SupplierRegion).where(
+                        SupplierRegion.supplier_product_id.in_(
+                            select(SupplierProduct.id).where(SupplierProduct.supplier_id == supplier.id)
+                        ),
+                        SupplierRegion.city_name.is_(None),
+                    )) or 0,
+                    "cities": db.scalar(select(func.count()).select_from(SupplierRegion).where(
+                        SupplierRegion.supplier_product_id.in_(
+                            select(SupplierProduct.id).where(SupplierProduct.supplier_id == supplier.id)
+                        ),
+                        SupplierRegion.city_name.is_not(None),
+                    )) or 0,
+                },
+                "last_sync_at": (last_run.finished_at or last_run.started_at) if last_run else None,
+                "last_sync_status": last_run.status if last_run else "not_synced",
+            })
+        items.append({
+            "id": pool.id,
+            "code": pool.code,
+            "name": pool.name,
+            "status": pool.status,
+            "strategy": pool.strategy,
+            "suppliers": supplier_views,
+        })
+    return {
+        "items": items,
+        "purchase_enabled": bool(get_settings().supplier_auto_procurement_enabled),
+        "min_margin_percent": get_settings().min_order_margin_percent,
+    }
 
 
 @router.get("/pool-1")
@@ -347,7 +492,7 @@ def sync_supplier_catalog_endpoint(
 
 @router.post("/sync/countries")
 def sync_supplier_countries(
-    product_type_id: int = Query(default=2),
+    product_type_id: int = Query(default=NATIVE_PRODUCT_TYPE_ID),
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("super_admin", "admin")),
     adapter: GlobalProxyReadOnlyAdapter = Depends(get_global_proxy_adapter),
@@ -369,7 +514,7 @@ def sync_supplier_countries(
 
 @router.post("/sync/cities")
 def sync_supplier_cities(
-    product_type_id: int = Query(default=2),
+    product_type_id: int = Query(default=NATIVE_PRODUCT_TYPE_ID),
     country_code: str | None = Query(default=None, min_length=2, max_length=2),
     country_id: str | None = Query(default=None, pattern=r"^[0-9]+$"),
     db: Session = Depends(get_db),
@@ -385,6 +530,45 @@ def sync_supplier_cities(
         return {"count": len(records), "run_id": completed.id, "status": completed.status, "source_endpoint": CITIES_ENDPOINT}
     except ValueError as exc:
         fail_sync_run(db, user, run.id, "LOCAL_MAPPING_REQUIRED", str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SupplierError as exc:
+        fail_sync_run(db, user, run.id, exc.code, str(exc))
+        raise supplier_error(exc) from exc
+
+
+@router.post("/sync/city-segments")
+def sync_supplier_city_segments(
+    product_type_id: int = Query(default=NATIVE_PRODUCT_TYPE_ID, ge=1, le=20),
+    country_code: str | None = Query(default=None, max_length=80),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+    adapter: GlobalProxyReadOnlyAdapter = Depends(get_global_proxy_adapter),
+):
+    """把上游「城市 + IP 段」同步进客户可选的城市清单。
+
+    资源池 1 的 ipStrList 是按城市给段的（前两段），同步后客户在选购页就能直接选
+    该城市的真实号段，而不是手工维护的示例段。可重复执行；匹配不到已有城市码的
+    上游城市先落库为停用（待归属），不会直接出现在客户下拉里。
+    """
+    codes = [item.strip().upper() for item in (country_code or "").split(",") if item.strip()]
+    run = begin_sync_run(db, user, "city_segments")
+    try:
+        result = sync_city_segments(db, adapter, product_type_id=product_type_id,
+                                    country_codes=codes or None)
+        write_audit(db, user, "sync", "catalog_city_options",
+                    detail=f"类型=城市号段; 产品={product_type_id}; 国家={','.join(codes) or '全部'}; "
+                           f"城市={result.cities_seen}; 段={result.segments_saved}")
+        db.commit()
+        completed = finish_sync_run(
+            db, user, run.id,
+            "partial_failed" if result.errors else "success",
+            result.cities_seen, result.segments_saved,
+            error_code="CITY_SEGMENT_PARTIAL" if result.errors else None,
+            error_message="; ".join(result.errors) if result.errors else None,
+        )
+        return {**result.as_dict(), "run_id": completed.id, "status": completed.status}
+    except SupplierConfigurationError as exc:
+        fail_sync_run(db, user, run.id, "SUPPLIER_CONFIGURATION_ERROR", str(exc))
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SupplierError as exc:
         fail_sync_run(db, user, run.id, exc.code, str(exc))

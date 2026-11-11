@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.security import hash_password
 from app.db import get_db
 from app.main import app
-from app.models import AuditLog, Customer, Product, Region, RetailPriceRule, User
+from app.models import AuditLog, CatalogListing, Customer, Product, Region, ResourcePool, RetailPriceRule, User
 from app.models.base import Base
 from app.services.registration_service import registration_rate_limiter
 from app.services.session_service import create_session
@@ -50,6 +50,17 @@ def api():
     add_product(us, "social_media", 95)
     add_product(de, "static_residential", 85)  # 德国有住宅商品但没有价则，用来验证"有商品≠有报价"
 
+    # 人工上架制：迁移会把当时在售的格子落成平台级 listed，这里模拟同样状态。
+    pool_one = ResourcePool(code="global_proxy_pool", name="资源池 1", status="active",
+                            strategy="priority_manual_fallback")
+    pool_two = ResourcePool(code="global_proxy_pool_2", name="资源池 2", status="active",
+                            strategy="priority_manual_fallback")
+    db.add_all([pool_one, pool_two])
+    db.flush()
+    for line, region in (("residential", us), ("social", us), ("residential", de)):
+        db.add(CatalogListing(pool_id=None, line_code=line, region_id=region.id,
+                              status="listed", reason="测试回填"))
+
     admin = User(username="admin", password_hash=hash_password("Admin_123456"),
                  role="super_admin", display_name="管理员")
     sales = User(username="sales", password_hash=hash_password("Sales_123456"),
@@ -72,7 +83,8 @@ def api():
         "sales": {"Authorization": f"Bearer {create_access_token(sales.id, sales.role, sales_session.id, sales.auth_version)}"},
         "customer": {"Authorization": f"Bearer {create_access_token(customer_user.id, customer_user.role, customer_session.id, customer_user.auth_version)}"},
     }
-    state = {"db": db, "regions": {"US": us.id, "DE": de.id, "FR": fr.id}, "headers": headers}
+    state = {"db": db, "regions": {"US": us.id, "DE": de.id, "FR": fr.id}, "headers": headers,
+             "pools": {"one": pool_one.id, "two": pool_two.id}}
 
     def override_db():
         session = Session()
@@ -107,29 +119,95 @@ def catalog_countries(api, line_code="residential"):
     return {region["country_code"] for region in line["regions"]}
 
 
-def test_grid_derives_status_from_prices_by_default(api):
+def test_grid_is_manual_only_and_defaults_to_unlisted(api):
     body = grid(api)
     assert [line["code"] for line in body["lines"]] == ["residential", "social", "live"]
     # 三个启用国家 × 三条线
     assert body["summary"]["total"] == 9
+    assert body["scope"]["pool_id"] is None
 
-    # 美国有住宅商品 → 住宅线默认上架
+    # 美国住宅有商品且迁移时回填过平台级上架
     us = cell(api, "residential", "US")
     assert us["has_price"] is True
     assert us["status"] == "listed"
-    assert us["source"] == "default"
+    assert us["source"] == "global"
 
-    # 法国一点商品都没有 → 默认下架，这就是"缺价先下架"
+    # 法国一点商品都没有、也没有上架记录 → 不可见
     fr = cell(api, "residential", "FR")
     assert fr["has_price"] is False
     assert fr["status"] == "unlisted"
+    assert fr["source"] == "none"
     assert fr["visible"] is False
 
-    # 德国有商品行但零售价目表没有它的价：has_price 只看商品存在与否，所以仍计入上架
+    # 德国有商品行但零售价目表没有它的价：has_price 只看商品存在与否
     de = cell(api, "residential", "DE")
     assert de["has_price"] is True
 
     assert body["summary"]["missing_price"] == 6  # FR 三条 + DE 的社媒/直播 + US 的直播
+
+
+def test_new_priced_country_stays_hidden_until_listed(api):
+    """新增国家/商品不会自动上线：没有上架记录就不出现，这是人工上架制的核心。"""
+    # 给法国补一个真实商品 + 报价，但不上架
+    de_region = api["regions"]["FR"]
+    api["db"].add(Product(name="法国 静态住宅 30天", product_type="static_residential", price=88,
+                          billing_days=30, region_id=de_region, resource_category="static_residential",
+                          is_active=True, is_in_stock=True))
+    api["db"].commit()
+    assert "FR" not in catalog_countries(api)
+
+    # 管理员点一次上架才出现
+    response = api["client"].patch("/api/admin/catalog-management/listings",
+                                   json={"line_code": "residential", "region_id": de_region,
+                                         "status": "listed"},
+                                   headers=api["headers"]["admin"])
+    assert response.status_code == 200, response.text
+    assert "FR" in catalog_countries(api)
+
+
+def test_pool_level_listing_only_affects_that_pool(api):
+    fr = api["regions"]["FR"]
+    pool_two = api["pools"]["two"]
+    response = api["client"].patch("/api/admin/catalog-management/listings",
+                                   json={"line_code": "social", "region_id": fr, "pool_id": pool_two,
+                                         "status": "listed"},
+                                   headers=api["headers"]["admin"])
+    assert response.status_code == 200, response.text
+    assert response.json()["pool_id"] == pool_two
+
+    # 官网可见（任一池上架即对客户可见，具体由路由选池）
+    assert "FR" in catalog_countries(api, "social")
+
+    # 池 2 视图：本池记录优先
+    pool_view = api["client"].get(f"/api/admin/catalog-management/listings?pool_id={pool_two}",
+                                  headers=api["headers"]["admin"]).json()
+    cell_pool = next(item for item in pool_view["cells"]
+                     if item["line_code"] == "social" and item["country_code"] == "FR")
+    assert cell_pool["status"] == "listed" and cell_pool["source"] == "pool"
+    # 池 1 没有自己的记录，也没有平台级记录 → 不可见
+    pool_one_view = api["client"].get(f"/api/admin/catalog-management/listings?pool_id={api['pools']['one']}",
+                                      headers=api["headers"]["admin"]).json()
+    cell_other = next(item for item in pool_one_view["cells"]
+                      if item["line_code"] == "social" and item["country_code"] == "FR")
+    assert cell_other["status"] == "unlisted" and cell_other["source"] == "none"
+
+
+def test_pool_view_falls_back_to_platform_listing(api):
+    """平台级上架对所有池生效：池视图里显示 source=global。"""
+    pool_view = api["client"].get(f"/api/admin/catalog-management/listings?pool_id={api['pools']['two']}",
+                                  headers=api["headers"]["admin"]).json()
+    us = next(item for item in pool_view["cells"]
+              if item["line_code"] == "residential" and item["country_code"] == "US")
+    assert us["status"] == "listed" and us["source"] == "global"
+
+
+def test_unknown_pool_is_rejected(api):
+    assert api["client"].get("/api/admin/catalog-management/listings?pool_id=999",
+                             headers=api["headers"]["admin"]).status_code == 404
+    assert api["client"].patch("/api/admin/catalog-management/listings",
+                               json={"line_code": "residential", "region_id": api["regions"]["US"],
+                                     "pool_id": 999, "status": "listed"},
+                               headers=api["headers"]["admin"]).status_code == 404
 
 
 def test_unlisting_a_priced_country_hides_it_from_the_site(api):
@@ -140,7 +218,7 @@ def test_unlisting_a_priced_country_hides_it_from_the_site(api):
                                          "status": "unlisted", "reason": "上游无货"},
                                    headers=api["headers"]["admin"])
     assert response.status_code == 200, response.text
-    assert response.json()["source"] == "manual"
+    assert response.json()["source"] == "global"
 
     assert "US" not in catalog_countries(api)
     # 其它线不受影响

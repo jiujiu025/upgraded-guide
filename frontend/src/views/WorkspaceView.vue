@@ -1288,6 +1288,13 @@ onMounted(load);
                   <dt>地区</dt>
                   <dd>{{ detail.region_name }}</dd>
                 </div>
+                <div v-if="detail.requested_city_code || detail.requested_ip_segment">
+                  <dt>指定城市</dt>
+                  <dd>
+                    {{ detail.requested_city_name || detail.requested_city_code
+                    }}<template v-if="detail.requested_ip_segment"> · 号段 {{ detail.requested_ip_segment }}</template>
+                  </dd>
+                </div>
                 <div>
                   <dt>数量</dt>
                   <dd>{{ detail.quantity }} 条</dd>
@@ -2145,6 +2152,13 @@ onMounted(load);
               </div>
               <div v-if="order.source_type === 'resource_pool'" class="resource-order-note"><ShieldOff :size="14" />资源池 1 订单 · 当前待付款和人工采购审核，系统不会自动采购或开通</div>
               <dl class="admin-order-meta">
+                <div v-if="order.requested_city_code || order.requested_ip_segment">
+                  <dt>指定城市</dt>
+                  <dd>
+                    {{ order.requested_city_name || order.requested_city_code
+                    }}<template v-if="order.requested_ip_segment"> · 号段 {{ order.requested_ip_segment }}</template>
+                  </dd>
+                </div>
                 <div>
                   <dt>数量 / 周期</dt>
                   <dd>{{ order.quantity }} 条 / {{ order.billing_days }} 天</dd>

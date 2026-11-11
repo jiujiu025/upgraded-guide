@@ -39,11 +39,20 @@ class Settings(BaseSettings):
     # 公开只读接口（产品列表、算价预览）的每 IP 每分钟上限：这两个口不需要登录，
     # 不设限就等于把算价逻辑开放给任何人刷。
     public_rate_limit: int = 60
+    # 资源池路由的最低毛利率（百分比）：供应商成本超过客户价 ×(1-该值) 时不自动采购，
+    # 转人工并告警。先做成配置项，路由上线后改为后台可改的运行时设置。
+    min_order_margin_percent: int = 20
     # 代客下单的最大折扣（百分比）。30 表示最多 7 折；0 表示完全不允许折扣。
     # 折扣只有管理员能设置，销售下单只能按标价。
     max_order_discount_percent: int = 30
     rate_limit_window_seconds: int = 60
     global_proxy_api_key: SecretStr | None = None
+    # 985Proxy（第二个上游）：正式 https://open-api.985proxy.com，沙箱 sandbox-open-api.985proxy.com。
+    # 默认指向沙箱，正式上线前改 env；未配 Key 时资源池页显示"未配置"，不会去请求上游。
+    nineeightfive_api_key: SecretStr | None = None
+    nineeightfive_base_url: str = "https://sandbox-open-api.985proxy.com"
+    # 静态住宅通道标识，在上游后台建通道时生成；空值表示还没建通道。
+    nineeightfive_zone: str | None = None
     supplier_secret_encryption_key: SecretStr | None = None
     payment_secret_encryption_key: SecretStr | None = None
     global_proxy_base_url: str = "https://admin.quanqiudaili.com"

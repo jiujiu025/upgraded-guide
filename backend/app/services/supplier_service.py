@@ -15,6 +15,25 @@ from app.suppliers.base import InventoryItem, QuoteItem, SupplierInvalidResponse
 
 SUPPLIER_CODE = "quanqiudaili"
 POOL_CODE = "global_proxy_pool"
+
+# 两家上游的静态档案。接第三家时在这里加一条，不要在每个同步函数里写 if。
+# adapter_type 决定用哪个适配器（见 app/suppliers/factory.py）：
+#   global_proxy         = 旧上游（原生静态住宅，购买同步返回 IP）
+#   nine_eight_five       = 985Proxy（预下单/支付/轮询/钱包）
+SUPPLIER_PROFILES: dict[str, dict] = {
+    "quanqiudaili": {
+        "name": "全球代理",
+        "adapter_type": "global_proxy",
+        "base_url": "https://admin.quanqiudaili.com",
+        "secret_ref": "env:GLOBAL_PROXY_API_KEY",
+    },
+    "985proxy": {
+        "name": "985Proxy",
+        "adapter_type": "nine_eight_five",
+        "base_url": "https://sandbox-open-api.985proxy.com",
+        "secret_ref": "env:NINEEIGHTFIVE_API_KEY",
+    },
+}
 PRODUCTS_ENDPOINT = "/externalapi/conpons/getProductList"
 COUNTRIES_ENDPOINT = "/externalapi/inventory/countryList"
 CITIES_ENDPOINT = "/externalapi/inventory/cityList"
@@ -35,9 +54,11 @@ RESOURCE_CATEGORY_CODES = {
     "live_stream_mobile": "直播专线（手机）",
     "live_stream_pc": "直播专线（电脑）",
 }
+# 上游 product_type_id → 本地可上架分类。
+# 业务确认（2026-11-10）：官网只卖「静态住宅（原生）」，对应上游产品 3；
+# 产品 2 是普通非原生，只用于比价与历史数据，不参与发布，避免把非原生货卖成原生。
 PUBLISHABLE_PRODUCT_CATEGORIES = {
-    "2": "static_residential",
-    "3": "static_residential_native",
+    "3": "static_residential",
 }
 
 
@@ -45,31 +66,66 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def ensure_pool_one(db: Session) -> tuple[Supplier, ResourcePool]:
-    supplier = db.scalar(select(Supplier).where(Supplier.code == SUPPLIER_CODE))
-    if not supplier:
-        supplier = Supplier(
-            code=SUPPLIER_CODE,
-            name="全球代理",
-            adapter_type="global_proxy_readonly",
-            base_url="https://admin.quanqiudaili.com",
-            secret_ref="env:GLOBAL_PROXY_API_KEY",
-            status="active",
-            auto_purchase_enabled=False,
-        )
-        db.add(supplier)
-        db.flush()
-    pool = db.scalar(select(ResourcePool).where(ResourcePool.code == POOL_CODE))
-    if not pool:
-        pool = ResourcePool(code=POOL_CODE, name="资源池 1", status="active", strategy="priority_manual_fallback")
-        db.add(pool)
-        db.flush()
+def ensure_supplier(db: Session, code: str = SUPPLIER_CODE, **overrides) -> Supplier:
+    """按 code 幂等创建供应商。第二家上游接入时不再复用同一个常量。
+
+    overrides 只在首次创建时生效；已存在的供应商不会被同步任务改回默认值
+    （后台可能手工改过 base_url 或停用过）。
+    """
+    supplier = db.scalar(select(Supplier).where(Supplier.code == code))
+    if supplier:
+        profile = SUPPLIER_PROFILES.get(code, {})
+        # 旧值自愈：2026-11-10 前叫 global_proxy_readonly，适配器已支持购买。
+        if profile.get("adapter_type") and supplier.adapter_type == "global_proxy_readonly":
+            supplier.adapter_type = profile["adapter_type"]
+            db.flush()
+        return supplier
+    profile = {**SUPPLIER_PROFILES.get(code, {}), **overrides}
+    supplier = Supplier(
+        code=code,
+        name=profile.get("name", code),
+        adapter_type=profile.get("adapter_type", "manual"),
+        base_url=profile.get("base_url", ""),
+        secret_ref=profile.get("secret_ref", f"env:{code.upper()}_API_KEY"),
+        status="active",
+        auto_purchase_enabled=bool(profile.get("auto_purchase_enabled", False)),
+    )
+    db.add(supplier)
+    db.flush()
+    return supplier
+
+
+def ensure_pool(db: Session, code: str = POOL_CODE, *, name: str | None = None,
+                strategy: str = "priority_manual_fallback") -> ResourcePool:
+    pool = db.scalar(select(ResourcePool).where(ResourcePool.code == code))
+    if pool:
+        return pool
+    pool = ResourcePool(code=code, name=name or code, status="active", strategy=strategy)
+    db.add(pool)
+    db.flush()
+    return pool
+
+
+def link_pool_supplier(db: Session, pool: ResourcePool, supplier: Supplier,
+                       priority: int = 1) -> ResourcePoolSupplier:
     member = db.scalar(select(ResourcePoolSupplier).where(
         ResourcePoolSupplier.pool_id == pool.id,
         ResourcePoolSupplier.supplier_id == supplier.id,
     ))
-    if not member:
-        db.add(ResourcePoolSupplier(pool_id=pool.id, supplier_id=supplier.id, priority=1, is_enabled=True))
+    if member:
+        return member
+    member = ResourcePoolSupplier(pool_id=pool.id, supplier_id=supplier.id,
+                                  priority=priority, is_enabled=True)
+    db.add(member)
+    db.flush()
+    return member
+
+
+def ensure_pool_one(db: Session) -> tuple[Supplier, ResourcePool]:
+    """兼容入口：默认供应商 + 资源池 1。旧代码与现有测试都走这里。"""
+    supplier = ensure_supplier(db)
+    pool = ensure_pool(db, name="资源池 1")
+    link_pool_supplier(db, pool, supplier, priority=1)
     return supplier, pool
 
 
