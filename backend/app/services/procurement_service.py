@@ -25,6 +25,7 @@ from app.models import (
     CatalogCityOption, Customer, CustomerLine, Node, Order, Procurement, Product, Region, Supplier,
 )
 from app.services.order_service import claim_delivery_slot, notify_order_parties
+from app.services.settings_service import auto_procurement_enabled
 from app.services.subscription_service import issue_token
 from app.services.supplier_service import ensure_supplier
 from app.suppliers.base import SupplierError
@@ -107,7 +108,8 @@ def _fail(db: Session, record: Procurement, code: str, message: str, customer: C
 def auto_procure_order(db: Session, order: Order, *, trigger: str = "payment") -> Procurement | None:
     """付款成功后尝试自动采购。不满足条件时静默返回 None，不影响原有流程。"""
     settings = get_settings()
-    if not settings.supplier_auto_procurement_enabled:
+    # 后台开关优先（可随时掐断），没有记录才看环境变量
+    if not auto_procurement_enabled(db):
         return None
     if order.order_type != "purchase" or order.source_type == "resource_pool":
         return None

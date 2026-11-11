@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.models import Supplier
 from app.services.supplier_credentials import resolve_api_key
 from app.suppliers.global_proxy import GlobalProxyAdapter
+from app.suppliers.nineeightfive import NineEightFiveAdapter
 
 
 def build_readonly_adapter(db: Session, supplier: Supplier | None = None) -> GlobalProxyAdapter:
@@ -26,3 +27,18 @@ def build_readonly_adapter(db: Session, supplier: Supplier | None = None) -> Glo
         backoff_base_seconds=settings.supplier_retry_backoff_seconds,
         max_retry_delay_seconds=settings.supplier_retry_max_delay_seconds,
     )
+
+
+def build_supplier_adapter(db: Session, supplier: Supplier | None = None):
+    """按供应商的 adapter_type 造适配器：两家上游的协议、鉴权、状态码都不一样。
+
+    资源池 2（985）目前只实现了只读部分（库存/号段/余额），下单链路等 zone 与沙箱。
+    """
+    if supplier is not None and supplier.adapter_type == "nine_eight_five":
+        settings = get_settings()
+        return NineEightFiveAdapter(
+            api_key=resolve_api_key(db, supplier),
+            base_url=supplier.base_url or settings.nineeightfive_base_url,
+            timeout_seconds=settings.supplier_http_timeout_seconds,
+        )
+    return build_readonly_adapter(db, supplier)

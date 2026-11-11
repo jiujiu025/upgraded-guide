@@ -182,3 +182,88 @@ def sync_city_segments(
             result.segments_saved += count
         db.flush()
     return result
+
+
+def sync_city_segments_985(
+    db: Session,
+    adapter,
+    *,
+    country_codes: list[str] | None = None,
+    static_proxy_type: str = "premium",
+    fetch_segments: bool = True,
+    max_segment_cities: int = 20,
+) -> "CitySegmentSyncResult":
+    """资源池 2（985Proxy）：按库存把国家/城市写进客户可选城市清单。
+
+    与资源池 1 的差别：
+    - 985 的城市名是英文（`Los Angeles`），走同一张别名表映射到 LAX/NYC；
+    - 号段要单独按 (国家, 城市) 拉，城市多时请求会成倍增加，所以只给前 N 个城市拉段，
+      其余先只落城市、段留空（客户选到该城市时由线上实时查或后续补同步）。
+
+    幂等：重复执行不会产生重复城市；匹配不上别名的一律停用待归属，不直接对客户开放。
+    """
+    result = CitySegmentSyncResult()
+    try:
+        rows = adapter.list_inventory(static_proxy_type=static_proxy_type)
+    except Exception as exc:  # noqa: BLE001 - 上游异常统一进 errors，不中断同步
+        result.errors.append(f"读取库存失败：{exc}")
+        return result
+
+    wanted = {code.upper() for code in country_codes} if country_codes else None
+    segment_budget = max(0, max_segment_cities)
+    seen: set[tuple[str, str]] = set()
+
+    for row in rows:
+        code = str(row.get("country") or "").upper()
+        city_name = str(row.get("city") or "").strip()
+        if not code or not city_name:
+            continue
+        if wanted and code not in wanted:
+            continue
+        key = (code, city_name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        canonical = CITY_ALIASES.get(city_name.lower())
+        city_code = canonical or _fallback_code(city_name)
+        option = db.scalar(select(CatalogCityOption).where(
+            CatalogCityOption.country_code == code,
+            CatalogCityOption.city_code == city_code,
+        ))
+        segments: list[str] = []
+        if fetch_segments and row.get("can_spec") and segment_budget > 0:
+            try:
+                segments = adapter.list_ip_segments(country=code, city=city_name,
+                                                    static_proxy_type=static_proxy_type)
+                segment_budget -= 1
+            except Exception as exc:  # noqa: BLE001 - 单个城市失败不影响其它城市
+                result.errors.append(f"{code}/{city_name} 号段读取失败：{exc}")
+
+        if option is None:
+            option = CatalogCityOption(
+                resource_category=CATEGORY,
+                country_code=code,
+                city_code=city_code,
+                city_name=city_name,
+                ip_segments="",
+                is_enabled=bool(canonical),
+                sort_order=500,
+                note=None if canonical else "待归属：985 城市名，确认后启用",
+                data_source="supplier_985",
+            )
+            db.add(option)
+            db.flush()
+            result.created_pending += 1
+        else:
+            result.matched += 1
+            if option.data_source == "manual":
+                continue
+
+        if segments:
+            merged, saved = _merge_segments(option.ip_segments or "", segments)
+            option.ip_segments = merged
+            result.segments_saved += saved
+
+    result.cities_seen = len(seen)
+    return result

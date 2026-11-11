@@ -199,6 +199,11 @@ export const getAdminCatalogProducts = () => client.get('/products')
 export const getAdminCatalogRegions = () => client.get('/regions')
 export const getSupplierOverview = () => client.get('/admin/suppliers/overview')
 export const getSupplierPools = () => client.get('/admin/suppliers/pools')
+// 自动采购总开关：后台点一下立即生效，不需要重启 api
+export const setAutoProcurement = (enabled) => client.put('/admin/suppliers/auto-procurement', { enabled })
+// 资源池 2（985Proxy）：拉库存与号段写进客户可选城市
+export const syncSupplier985 = (supplierId, params = {}) =>
+  client.post(`/admin/suppliers/${supplierId}/sync-985`, null, { params })
 export const getSupplierProducts = () => client.get('/admin/suppliers/products')
 export const getSupplierRegions = () => client.get('/admin/suppliers/regions')
 export const getSupplierInventory = () => client.get('/admin/suppliers/inventory')

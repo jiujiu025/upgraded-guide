@@ -17,11 +17,12 @@ from app.models import (
 )
 from app.services.audit_service import write_audit
 from app.services.catalog_publication_service import PublicationError, publish_catalog, withdraw_catalog
-from app.services.city_catalog_sync import sync_city_segments
+from app.services.city_catalog_sync import sync_city_segments, sync_city_segments_985
 from app.services.supplier_credentials import (
     SupplierCredentialError, clear_api_key, credential_encryption_ready, credential_source,
     get_supplier, has_configured_api_key, save_api_key, supplier_key_status,
 )
+from app.services.settings_service import AUTO_PROCUREMENT_KEY, get_flag, set_flag
 from app.services.supplier_service import (
     CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, begin_sync_run,
     configure_manual_supply_rule, ensure_pool_one, finish_sync_run, map_supplier_product,
@@ -33,6 +34,7 @@ from app.suppliers.base import (
     SupplierConfigurationError, SupplierError, SupplierInvalidResponseError, SupplierRateLimitError,
     SupplierTimeoutError, reject_procurement,
 )
+from app.suppliers.factory import build_supplier_adapter
 from app.suppliers.global_proxy import NATIVE_PRODUCT_TYPE_ID, GlobalProxyReadOnlyAdapter
 from app.suppliers.factory import build_readonly_adapter
 
@@ -373,11 +375,36 @@ def list_supplier_pools(db: Session = Depends(get_db),
             "strategy": pool.strategy,
             "suppliers": supplier_views,
         })
+    purchase_enabled, purchase_source = get_flag(db, AUTO_PROCUREMENT_KEY)
     return {
         "items": items,
-        "purchase_enabled": bool(get_settings().supplier_auto_procurement_enabled),
+        "purchase_enabled": purchase_enabled,
+        # runtime=后台改的；env=还没在后台改过，取环境变量默认值
+        "purchase_source": purchase_source,
         "min_margin_percent": get_settings().min_order_margin_percent,
     }
+
+
+class AutoProcurementIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+@router.put("/auto-procurement")
+def update_auto_procurement(
+    payload: AutoProcurementIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    """后台开关：付款后是否自动向上游采购。
+
+    打开就是真扣上游余额，所以每次改动都写审计；关闭立即生效，不需要重启容器。
+    """
+    set_flag(db, AUTO_PROCUREMENT_KEY, payload.enabled, user)
+    db.commit()
+    value, source = get_flag(db, AUTO_PROCUREMENT_KEY)
+    return {"enabled": value, "source": source}
 
 
 @router.get("/pool-1")
@@ -567,6 +594,55 @@ def sync_supplier_city_segments(
             error_message="; ".join(result.errors) if result.errors else None,
         )
         return {**result.as_dict(), "run_id": completed.id, "status": completed.status}
+    except SupplierConfigurationError as exc:
+        fail_sync_run(db, user, run.id, "SUPPLIER_CONFIGURATION_ERROR", str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SupplierError as exc:
+        fail_sync_run(db, user, run.id, exc.code, str(exc))
+        raise supplier_error(exc) from exc
+
+
+@router.post("/{supplier_id}/sync-985")
+def sync_pool_985(
+    supplier_id: int,
+    country_code: str | None = Query(default=None, max_length=80),
+    static_proxy_type: str = Query(default="premium", pattern="^(premium|shared)$"),
+    fetch_segments: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    """资源池 2（985Proxy）：拉库存 → 写入客户可选城市（含号段）。
+
+    先查一次钱包余额，Key 错误或实名未通过会在这里就报出来，不用等同步跑一半才失败。
+    """
+    supplier = db.get(Supplier, supplier_id)
+    if supplier is None:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+    if supplier.adapter_type != "nine_eight_five":
+        raise HTTPException(status_code=409, detail="该资源池不是 985Proxy")
+
+    adapter = build_supplier_adapter(db, supplier)
+    run = begin_sync_run(db, user, "cities_985")
+    try:
+        wallet = adapter.wallet_balance()
+        codes = [item.strip().upper() for item in (country_code or "").split(",") if item.strip()]
+        result = sync_city_segments_985(
+            db, adapter, country_codes=codes or None,
+            static_proxy_type=static_proxy_type, fetch_segments=fetch_segments,
+        )
+        write_audit(db, user, "sync", "catalog_city_options",
+                    detail=f"来源=985; 类型={static_proxy_type}; 城市={result.cities_seen}; "
+                           f"段={result.segments_saved}; 国家={','.join(codes) or '全部'}")
+        db.commit()
+        completed = finish_sync_run(
+            db, user, run.id,
+            "partial_failed" if result.errors else "success",
+            result.cities_seen, result.segments_saved,
+            error_code="CITY_985_PARTIAL" if result.errors else None,
+            error_message="; ".join(result.errors) if result.errors else None,
+        )
+        return {**result.as_dict(), "run_id": completed.id, "status": completed.status,
+                "wallet": wallet}
     except SupplierConfigurationError as exc:
         fail_sync_run(db, user, run.id, "SUPPLIER_CONFIGURATION_ERROR", str(exc))
         raise HTTPException(status_code=409, detail=str(exc)) from exc

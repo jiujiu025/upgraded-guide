@@ -122,6 +122,22 @@ class CustomerLine(TimestampMixin, Base):
     order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True, index=True)
 
 
+class RuntimeSetting(TimestampMixin, Base):
+    """可在后台改、立即生效的开关（不需要重启容器）。
+
+    环境变量适合"部署时定死"的配置；但"付款后要不要自动扣上游余额"这种开关，
+    运营需要能随时掐断，重启 api 就太重了。这里只存少量布尔/短字符串开关，
+    读取时优先本表，没有记录才回退到 settings 里的默认值。
+    """
+    __tablename__ = "runtime_settings"
+
+    # 基类的 TimestampMixin 已经提供了 id 主键，这里用 key 做唯一业务键
+    key: Mapped[str] = mapped_column(String(60), nullable=False, index=True, unique=True)
+    value: Mapped[str] = mapped_column(String(200), nullable=False)
+    # 审计字段，不加外键（与 orders.created_by_user_id 同一理由）
+    updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class Procurement(TimestampMixin, Base):
     """一次上游采购尝试：某张订单的第 N 条线路 → 上游订单 → 客户线路。
 

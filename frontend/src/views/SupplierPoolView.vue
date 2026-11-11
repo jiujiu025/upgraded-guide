@@ -12,7 +12,7 @@ import { logout as endSession } from '../api'
 import {
   getAdminCatalogProducts, getAdminCatalogRegions, getCatalogPublications, getSupplierInventory, getSupplierOverview,
   getSupplierIpSegments, getSupplierPools, getSupplierProducts, getSupplierQuotes, getSupplierRegions,
-  getSupplierRules, getSupplierSyncRuns,
+  getSupplierRules, getSupplierSyncRuns, setAutoProcurement, syncSupplier985,
   checkSupplierInventory, deleteSupplierCredential, deleteSupplierCredentialFor, mapSupplierProduct,
   mapSupplierRegion, publishCatalogSnapshot, saveSupplierCredential, saveSupplierCredentialFor, saveSupplierRule,
   syncSupplierCities, syncSupplierCatalog, syncSupplierCitySegments, syncSupplierCountries, syncSupplierInventory,
@@ -35,6 +35,7 @@ const keyOpen = ref(0)
 const keyDrafts = reactive({})
 const keyBusy = reactive({})
 const poolSyncBusy = ref(0)
+const switchBusy = ref(false)
 const supplierProducts = ref([])
 const supplierRegions = ref([])
 const inventory = ref([])
@@ -202,6 +203,24 @@ function errorText(requestError, fallback) {
   return requestError?.userMessage || fallback
 }
 
+async function toggleProcurement() {
+  if (switchBusy.value) return
+  const next = !poolOverview.value.purchase_enabled
+  if (next && typeof window !== 'undefined'
+      && !window.confirm('打开后客户付款会自动扣上游余额下单，确认开启？')) return
+  switchBusy.value = true
+  error.value = ''
+  try {
+    const { data } = await setAutoProcurement(next)
+    poolOverview.value = { ...poolOverview.value, purchase_enabled: data.enabled, purchase_source: data.source }
+    feedback.value = data.enabled ? '自动采购已开启' : '自动采购已关闭'
+  } catch (requestError) {
+    error.value = errorText(requestError, '开关切换失败，请重试')
+  } finally {
+    switchBusy.value = false
+  }
+}
+
 async function loadPools() {
   const { data } = await getSupplierPools()
   poolOverview.value = data
@@ -246,12 +265,21 @@ async function clearPoolKey(member) {
   }
 }
 
-/** 保存 Key 后一键同步：商品 → 国家 → 城市 → 城市号段，全部即时执行。 */
+/** 保存 Key 后一键同步。两家上游的目录接口不一样，按 adapter_type 分派。 */
 async function syncPoolNow(member) {
   if (poolSyncBusy.value) return
   poolSyncBusy.value = member.id
   error.value = ''
   try {
+    if (member.adapter_type === 'nine_eight_five') {
+      const { data } = await syncSupplier985(member.id, { static_proxy_type: 'premium' })
+      await loadPools()
+      const wallet = data.wallet?.balance ?? data.wallet?.wallet_balance ?? null
+      feedback.value = `985 同步完成：城市 ${data.cities_seen}、号段 ${data.segments_saved}` +
+        (wallet !== null ? `，上游余额 ${wallet}` : '') +
+        ((data.errors || []).length ? `（${data.errors.length} 项失败）` : '')
+      return
+    }
     const products = await syncSupplierProducts()
     const countries = await syncSupplierCountries(3)
     const cities = await syncSupplierCities(3)
@@ -662,7 +690,7 @@ onMounted(load)
                         {{ member.api_key_configured ? '替换 Key' : '录入 Key' }}
                       </button>
                       <button
-                        v-if="member.adapter_type === 'global_proxy'"
+                        v-if="member.adapter_type === 'global_proxy' || member.adapter_type === 'nine_eight_five'"
                         class="primary-action"
                         type="button"
                         :disabled="poolSyncBusy === member.id"
@@ -675,9 +703,32 @@ onMounted(load)
                 <li v-if="!pool.suppliers.length" class="pool-empty">这个池还没有成员</li>
               </ul>
             </article>
+            <div class="pool-toggle">
+              <div class="pool-toggle-copy">
+                <b>自动采购</b>
+                <small>
+                  {{ poolOverview.purchase_enabled
+                    ? '客户付款后自动向上游下单并生成线路（会扣上游余额）'
+                    : '客户付款后不自动下单，由人工交付' }}
+                  · {{ poolOverview.purchase_source === 'runtime' ? '后台设置' : '环境变量默认' }}
+                </small>
+              </div>
+              <button
+                class="switch"
+                :class="{ on: poolOverview.purchase_enabled }"
+                type="button"
+                role="switch"
+                :aria-checked="poolOverview.purchase_enabled"
+                :disabled="switchBusy"
+                @click="toggleProcurement"
+              >
+                <span></span>
+              </button>
+            </div>
             <p class="pool-note">
-              采购总开关：{{ poolOverview.purchase_enabled ? '已开启' : '已关闭' }} · 最低毛利率：{{ poolOverview.min_margin_percent ?? 20 }}%（毛利护栏）
-              <br />Key 保存后点「立即同步」会按 商品 → 国家 → 城市 → 城市号段 依次拉取，完成即可在选购页看到真实城市与 IP 段。
+              最低毛利率：{{ poolOverview.min_margin_percent ?? 20 }}%（毛利护栏）
+              <br />资源池 1 的「立即同步」按 商品 → 国家 → 城市 → 城市号段 依次拉取；
+              资源池 2（985）只拉库存、城市与号段。
               <br />官网按池上架/下架在「商品与价格 → 官网可见性」，用「生效范围」切换到具体资源池。
             </p>
           </section>
@@ -946,6 +997,15 @@ onMounted(load)
 .pool-tags em{font-style:normal;padding:3px 6px;border-radius:4px;background:#f0f4f2;color:#6a7d75;font-size:9px;white-space:nowrap}
 .pool-tags em[data-ok="true"]{background:#e4f4ec;color:#1f6b53}
 .pool-empty{padding:14px;color:#82918c;font-size:11px;text-align:center}
+.pool-toggle{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid #dbe4df;border-radius:6px;background:#fff}
+.pool-toggle-copy{display:grid;gap:3px}
+.pool-toggle-copy b{font-size:12px;color:#243b33}
+.pool-toggle-copy small{font-size:10px;color:#7b8d87;line-height:1.6}
+.switch{width:44px;height:24px;flex:0 0 auto;border-radius:12px;background:#cfdad4;position:relative;transition:background .18s;cursor:pointer}
+.switch span{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0002;transition:transform .18s}
+.switch.on{background:#2f9c85}
+.switch.on span{transform:translateX(20px)}
+.switch:disabled{opacity:.55;cursor:progress}
 .pool-note{grid-column:1/-1;margin:0;color:#7b8d87;font-size:10px;line-height:1.7}
 .pool-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
 .pool-actions input{flex:1;min-width:150px;height:32px;padding:0 9px;border:1px solid #cfdad4;border-radius:4px;background:#fff;color:#334a40;font:inherit;font-size:10px}
