@@ -171,3 +171,36 @@ def test_unsupported_period_falls_back_to_manual(db, monkeypatch):
     assert record.status == "manual"
     assert record.error_code == "UNSUPPORTED_PERIOD"
     assert adapter.calls == 0
+
+
+def test_manual_retry_endpoint_guards(db, monkeypatch):
+    """人工重试：没收款不许开；已经买过的不重复买。"""
+    from fastapi import BackgroundTasks, HTTPException
+
+    from app.api.routes import retry_order_procurement
+
+    session, order = db
+    admin = User(username="root", password_hash="x", role="admin", display_name="管理员")
+    session.add(admin)
+    session.commit()
+    enable_procurement(monkeypatch)
+
+    # 未收款：拒绝
+    order.payment_status = "unpaid"
+    session.commit()
+    with pytest.raises(HTTPException) as exc:
+        retry_order_procurement(order.id, BackgroundTasks(), db=session, user=admin)
+    assert exc.value.status_code == 409
+
+    # 已收款、没有成功记录：入队
+    order.payment_status = "paid"
+    session.commit()
+    result = retry_order_procurement(order.id, BackgroundTasks(), db=session, user=admin)
+    assert result["status"] == "queued"
+
+    # 已有成功记录：不重复下单
+    adapter = FakeAdapter()
+    monkeypatch.setattr(procurement_service, "build_readonly_adapter", lambda *a, **k: adapter)
+    procurement_service.auto_procure_order(session, order)
+    again = retry_order_procurement(order.id, BackgroundTasks(), db=session, user=admin)
+    assert again["status"] == "already_delivered"

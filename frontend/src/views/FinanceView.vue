@@ -351,9 +351,9 @@ onMounted(load)
                 <p v-if="acceptance?.accepted" class="acceptance-limit">当前单笔线上收款上限 ¥{{ ((acceptance.online_limit_cents || 0) / 100).toFixed(2) }}</p>
                 <ul v-if="acceptance?.blockers?.length"><li v-for="item in acceptance.blockers" :key="item">{{ item }}</li></ul>
               </div>
+              <div v-if="apiHealth" class="api-result field-wide" :data-state="apiHealth.status"><b>{{ apiHealth.status === 'reachable' ? '域名可连接' : apiHealth.status === 'not_configured' ? '未配置' : '连接异常' }}</b><span>{{ apiHealth.message }}</span><small><template v-if="apiHealth.elapsed_ms">耗时 {{ apiHealth.elapsed_ms }}ms</template><template v-if="apiHealth.http_status"> · HTTP {{ apiHealth.http_status }}</template></small></div>
               <div class="payment-actions field-wide"><button class="primary-button" :disabled="saving" @click="saveConfig"><Check :size="15" />{{ saving ? '保存中' : '保存配置' }}</button><button class="secondary-button" :disabled="testing" @click="testPaymentApi"><RefreshCw :size="15" :class="{ rotate: testing }" />{{ testing ? '检查中' : '检查 API 连通性' }}</button></div>
               <div v-if="paymentStatus" class="inline-hint field-wide">{{ paymentStatus }}</div>
-              <div v-if="apiHealth" class="api-result field-wide" :data-state="apiHealth.status"><b>{{ apiHealth.status === 'reachable' ? '域名可连接' : apiHealth.status === 'not_configured' ? '未配置' : '连接异常' }}</b><span>{{ apiHealth.message }}</span><small v-if="apiHealth.http_status">HTTP {{ apiHealth.http_status }}</small></div>
             </div>
           </section>
         </template>

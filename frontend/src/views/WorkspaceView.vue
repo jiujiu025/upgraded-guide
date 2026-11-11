@@ -46,6 +46,8 @@ import {
   getCustomerOrders,
   getCustomerRenewals,
   getManagedLine,
+  payWalletOrderOnline,
+  payWalletOrderWithBalance,
   getNotifications,
   getSalesCustomers,
   getSalesDashboard,
@@ -818,6 +820,59 @@ const canCompleteRenewal = (order) =>
   Boolean(order.renewal_line_id) &&
   !order.renewal_completed_at;
 
+const detailPaying = ref("");
+const detailPayNotice = ref("");
+
+// 幂等键每次点击都换一个：同一笔订单重复点支付时后端会按订单幂等，
+// 前端不需要自己防重，但键不能复用（否则第二次点击会拿到第一次的结果）。
+function payNonce() {
+  return `order-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function refreshDetailQuietly() {
+  if (!detail.value?.id) return;
+  detail.value = (await getCustomerOrder(detail.value.id)).data;
+}
+
+/** 支付成功后轮询订单：自动采购是后台任务，正常几秒内就能拿到线路。 */
+async function pollDelivery(orderId, tries = 8) {
+  const settled = ["delivered", "partially_delivered", "completed", "cancelled", "refunded"];
+  for (let index = 0; index < tries; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    try {
+      const { data } = await getCustomerOrder(orderId);
+      detail.value = data;
+      if (settled.includes(data.status)) {
+        detailPayNotice.value =
+          data.status === "cancelled" || data.status === "refunded"
+            ? "订单已关闭，如已扣款请联系客服处理"
+            : "线路已开通，可在「我的线路」查看 IP 与连接信息";
+        return;
+      }
+    } catch {
+      // 轮询失败不打断：后端还在开通，下一次再试
+    }
+  }
+  detailPayNotice.value = "支付成功，开通仍在处理中，稍后刷新本页即可";
+}
+
+async function payDetailWithBalance() {
+  if (!detail.value || detailPaying.value) return;
+  detailPaying.value = "balance";
+  error.value = "";
+  detailPayNotice.value = "";
+  try {
+    await payWalletOrderWithBalance(detail.value.id, { idempotency_key: payNonce() });
+    detailPayNotice.value = "余额已扣款，正在向上游开通线路…";
+    await refreshDetailQuietly();
+    await pollDelivery(detail.value.id);
+  } catch (requestError) {
+    error.value = requestError.userMessage || "余额支付失败，请检查余额后重试";
+  } finally {
+    detailPaying.value = "";
+  }
+}
+
 const detailPayable = computed(
   () =>
     workspace.value !== "admin" &&
@@ -1330,12 +1385,39 @@ onMounted(load);
                   <dd>{{ detail.remark || "—" }}</dd>
                 </div>
               </dl>
-              <div class="demo-alert">
-                <CircleDollarSign :size="18" />
-                <template v-if="detailPayable"
-                  >该订单待支付，可在账户余额页用余额或在线支付完成付款。</template
+              <div v-if="detailPayable" class="detail-pay">
+                <div class="detail-pay-head">
+                  <span>应付金额</span>
+                  <strong>{{ money(detail.total_amount) }}</strong>
+                </div>
+                <div class="detail-pay-actions">
+                  <button
+                    class="button"
+                    type="button"
+                    :disabled="Boolean(detailPaying)"
+                    @click="payDetailWithBalance"
+                  >
+                    {{ detailPaying === "balance" ? "支付中…" : "余额支付" }}
+                  </button>
+                  <button
+                    class="outline-action"
+                    type="button"
+                    :disabled="Boolean(detailPaying)"
+                    @click="router.push(walletPath)"
+                  >
+                    去钱包页（充值 / 在线支付）
+                  </button>
+                </div>
+                <small
+                  >支付成功后系统会自动向上游开通线路，几秒内出现在「我的线路」。</small
                 >
-                <template v-else>订单状态以后端记录为准。</template>
+              </div>
+              <p v-if="detailPayNotice" class="detail-pay-notice">
+                <CircleDollarSign :size="15" />{{ detailPayNotice }}
+              </p>
+              <div v-if="!detailPayable && !detailPayNotice" class="demo-alert">
+                <CircleDollarSign :size="18" />
+                订单状态以后端记录为准。
               </div>
               <div class="detail-actions">
                 <button

@@ -15,7 +15,7 @@ from app.core.client_ip import get_client_ip
 from app.core.timeutil import local_date_of, local_day_range_utc
 from app.db import get_db
 from app.models import (
-    AuthSession, CatalogListing, Customer, CustomerLine, HealthIncident, Node, Notification, Order, PaymentOrder, PaymentRefund, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
+    AuthSession, CatalogListing, Customer, CustomerLine, HealthIncident, Node, Notification, Order, PaymentOrder, PaymentRefund, Procurement, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
     SalesInviteCode, SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
 )
 from app.schemas.common import (
@@ -1819,6 +1819,38 @@ def admin_confirm_order(order_id: int, background_tasks: BackgroundTasks, db: Se
     except Exception:
         db.rollback()
         raise
+
+
+@router.post("/admin/orders/{order_id}/retry-procurement")
+def retry_order_procurement(
+    order_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    """人工再试一次自动开通。
+
+    只有在「已收款、还没有成功采购记录」时才会真的去上游下单——采购是扣钱动作，
+    不能因为点了一下就重复买。已经有成功记录的直接返回结果，不重复下单。
+    """
+    order = db.get(Order, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="订单不存在")
+    if order.order_type != "purchase":
+        raise HTTPException(status_code=409, detail="只有购买订单可以自动开通")
+    if order.source_type == "resource_pool":
+        raise HTTPException(status_code=409, detail="资源池订单不走这条开通链路")
+    if order.payment_status != "paid":
+        raise HTTPException(status_code=409, detail="订单还没收款，不能开通")
+    done = db.scalar(select(Procurement).where(
+        Procurement.order_id == order.id, Procurement.status == "succeeded",
+    ))
+    if done is not None:
+        return {"status": "already_delivered", "procurement_id": done.id, "line_id": done.line_id}
+    background_tasks.add_task(run_auto_procure_in_background, order.id)
+    write_audit(db, user, "retry_procurement", "order", order.id, "人工触发自动开通")
+    db.commit()
+    return {"status": "queued"}
 
 
 def _resolve_delivery_node(db: Session, payload: DeliverOrderIn, region_id: int):

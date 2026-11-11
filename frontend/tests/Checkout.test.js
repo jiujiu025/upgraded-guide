@@ -59,12 +59,12 @@ describe('结算页', () => {
     await flushPromises()
 
     await wrapper.find('textarea').setValue('回归测试备注')
-    await wrapper.findAll('button').find((button) => button.text().includes('创建待处理订单')).trigger('click')
+    await wrapper.findAll('button').find((button) => button.text().includes('提交订单并去支付')).trigger('click')
     await flushPromises()
 
     expect(api.createCustomerOrder).toHaveBeenCalledWith({
       ...selection,
-      payment_method: 'contact_manager',
+      payment_method: 'balance',
       remark: '回归测试备注',
     })
     expect(router.push).toHaveBeenCalledWith('/client/orders/91?created=1')
@@ -76,11 +76,11 @@ describe('结算页', () => {
     const wrapper = mountCheckout()
     await flushPromises()
 
-    await wrapper.findAll('button').find((button) => button.text().includes('创建待处理订单')).trigger('click')
+    await wrapper.findAll('button').find((button) => button.text().includes('提交订单并去支付')).trigger('click')
     await flushPromises()
 
     expect(wrapper.text()).toContain('产品库存不足')
-    expect(wrapper.text()).toContain('创建待处理订单')
+    expect(wrapper.text()).toContain('提交订单并去支付')
     expect(router.push).not.toHaveBeenCalled()
   })
 
@@ -94,7 +94,7 @@ describe('结算页', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('隔离测试产品')
-    expect(wrapper.text()).toContain('登录后创建订单')
+    expect(wrapper.text()).toContain('登录后提交订单')
     expect(wrapper.text()).toContain('¥228.00')
   })
 })

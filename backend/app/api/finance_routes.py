@@ -1,4 +1,6 @@
+import time
 from collections import defaultdict
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
@@ -420,20 +422,32 @@ def update_payment_config(
 def check_payment_api(db: Session = Depends(get_db), actor: User = Depends(require_roles("super_admin"))):
     config = db.get(PaymentChannelConfig, 1)
     if not config or not config.merchant_id or not config.encrypted_secret:
-        return {"status": "not_configured", "message": "商户号或密钥尚未配置；未发送任何凭据"}
+        return {"status": "not_configured", "message": "商户号或密钥尚未配置；未发送任何凭据", "elapsed_ms": 0}
+    started = time.perf_counter()
+    # 超时保持 6 秒：本机实测走代理约 2 秒、直连约 4.2 秒，压到 4 秒会把
+    # 慢一点的正常网络误判成超时。前端 axios 是 10 秒，这里留足余量。
+    # 不传 trust_env：各部署环境是否挂代理差异太大，硬编码直连反而更慢。
     try:
-        response = httpx.get(PAYMENT_API_URL, timeout=6, follow_redirects=False, headers={"Accept": "application/json"})
+        with httpx.Client(timeout=6, follow_redirects=False) as client:
+            response = client.get(PAYMENT_API_URL, headers={"Accept": "application/json"})
+        elapsed = int((time.perf_counter() - started) * 1000)
         reachable = response.status_code < 500
         status = "reachable" if reachable else "provider_error"
         message = "官方支付 API 域名可连接；本检查不验证商户密钥、支付方式或真实收款能力" if reachable else "支付 API 返回服务端错误；未验证商户密钥"
         code = response.status_code
     except httpx.TimeoutException:
-        status, message, code = "timeout", "连接官方支付 API 超时；未发送商户凭据", None
+        elapsed = int((time.perf_counter() - started) * 1000)
+        status = "timeout"
+        message = "连接官方支付 API 超时；未发送商户凭据。请确认这台服务器能直接出网访问 pay.suisuizhifu.com"
+        code = None
     except httpx.HTTPError:
+        elapsed = int((time.perf_counter() - started) * 1000)
         status, message, code = "connection_failed", "无法连接官方支付 API；未发送商户凭据", None
-    write_audit(db, actor, "payment_api_connectivity_check", "payment_channel", 1, f"状态={status}; HTTP={code or '无响应'}")
+    write_audit(db, actor, "payment_api_connectivity_check", "payment_channel", 1,
+                f"状态={status}; HTTP={code or '无响应'}; 耗时={elapsed}ms")
     db.commit()
-    return {"status": status, "message": message, "http_status": code, "credential_validated": False}
+    return {"status": status, "message": message, "http_status": code,
+            "elapsed_ms": elapsed, "credential_validated": False}
 
 
 @router.get("/wallet")
@@ -635,6 +649,7 @@ async def suisui_payment_notify(request: Request, response: Response, db: Sessio
     item.status = "paid"
     item.platform_trade_no = parameters.get("trade_no", "")[:100] or None
     item.paid_at = _now_utc()
+    paid_ok = False
     if item.purpose == "wallet_recharge":
         apply_wallet_delta(db, item.user_id, item.amount_cents, "online_recharge",
                            f"payment:{item.idempotency_key}", None, item.id, remark="在线充值到账")
@@ -644,7 +659,12 @@ async def suisui_payment_notify(request: Request, response: Response, db: Sessio
             item.status = "manual_review"
         else:
             _record_paid_order(db, item, customer, None)
+            paid_ok = True
     db.commit()
+    # 在线支付到账后也要自动开通：回调不能等上游（支付平台有超时重试），
+    # 这里起一个后台线程去采购，失败由 procurements 记下来转人工。
+    if paid_ok and order is not None and order.order_type == "purchase":
+        asyncio.create_task(asyncio.to_thread(run_auto_procure_in_background, order.id))
     return Response(content="success", media_type="text/plain")
 
 
