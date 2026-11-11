@@ -10,6 +10,11 @@ x-api-environment: &api-environment
   FRONTEND_ORIGIN: https://1.ipip99.com
   RATE_LIMIT_BACKEND: redis
   REDIS_URL: redis://redis:6379/0
+  # 付款后自动采购：默认关。置 true 就是真的扣上游余额，必须先配好 Key 并小额验证。
+  # 注意这两个必须显式映射——compose 的 environment 是白名单，.env.production 里
+  # 多写的变量不会自动进容器，漏了就会一直按默认值跑（曾经因此以为开关没生效）。
+  SUPPLIER_AUTO_PROCUREMENT_ENABLED: ${SUPPLIER_AUTO_PROCUREMENT_ENABLED:-false}
+  SUPPLIER_AUTO_DELIVER_AFTER_PROCURE: ${SUPPLIER_AUTO_DELIVER_AFTER_PROCURE:-true}
   # 连接池按"单个副本 × 预期并发"调；pre_ping 在 app/db.py 里强制开启，
   # 这几项只决定大小和寿命，不改语义。
   DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
