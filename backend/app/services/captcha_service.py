@@ -26,9 +26,9 @@ import math
 import random
 import secrets
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from threading import Lock
-from typing import Sequence
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -90,7 +90,7 @@ def _cipher() -> AESGCM:
     material = get_settings().jwt_secret_key
     if hasattr(material, "get_secret_value"):
         material = material.get_secret_value()
-    return AESGCM(hashlib.sha256(f"99ipxin:captcha-key:{material}".encode("utf-8")).digest())
+    return AESGCM(hashlib.sha256(f"99ipxin:captcha-key:{material}".encode()).digest())
 
 
 def _seal(payload: dict) -> str:

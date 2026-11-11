@@ -89,7 +89,7 @@ def test_captcha_token_does_not_leak_answers(api):
     decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
     # 密文里不该出现答案明文的痕迹（JSON 片段或数字数组的 ASCII 形式）。
     assert b'"a"' not in decoded
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         json.loads(decoded[12:].decode("utf-8"))
 
 
