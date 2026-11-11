@@ -48,6 +48,7 @@ import {
   getManagedLine,
   payWalletOrderOnline,
   payWalletOrderWithBalance,
+  retryAdminProcurement,
   getNotifications,
   getSalesCustomers,
   getSalesDashboard,
@@ -2293,6 +2294,17 @@ onMounted(load);
                   @click="openDelivery(order)"
                 >
                   手动交付</button
+                ><button
+                  v-if="
+                    ['pending_delivery', 'partially_delivered'].includes(
+                      order.status,
+                    ) && order.order_type !== 'renewal' && order.source_type !== 'resource_pool'
+                  "
+                  class="text-action"
+                  :disabled="busy"
+                  @click="retryProcurement(order)"
+                >
+                  自动开通</button
                 ><button
                   v-if="canCompleteRenewal(order)"
                   class="button button-small"

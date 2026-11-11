@@ -193,6 +193,8 @@ export const updateAdminUserAccess = (id, payload) => client.patch(`/admin/users
 export const getManagedLine = (id) => client.get(`/lines/${id}`)
 export const confirmAdminOrder = (id) => client.post(`/admin/orders/${id}/confirm`)
 export const deliverAdminOrder = (id, payload) => client.post(`/admin/orders/${id}/deliver`, payload)
+// 人工重新发起自动开通：已收款、没有成功采购记录时才会真的去上游下单
+export const retryAdminProcurement = (id) => client.post(`/admin/orders/${id}/retry-procurement`)
 export const cancelAdminOrder = (id) => client.post(`/admin/orders/${id}/cancel`)
 export const completeAdminRenewal = (id) => client.post(`/admin/orders/${id}/complete-renewal`, { manually_confirmed: true })
 export const getAdminCatalogProducts = () => client.get('/products')
