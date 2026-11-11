@@ -63,6 +63,11 @@
 
 这样官网的产品结构不用动，城市和号段都收在「可选高级选项」里。
 
+> **2026-11-10 已落地**：客户可在下单页选城市码与号段（不选则自动分配），后台
+> 「商品与价格 → 城市与号段」维护清单，订单落 `requested_city_code/city_name/ip_segment`。
+> 实现与接口见 `docs/城市与IP段选择设计.md`。本节描述的 `city` 隐藏参数、段被占完
+> 时退款不替换的原则，都按该文档实现。
+
 ### 2.2 周期只支持 30 / 60 / 90 / 180 天
 
 文档原文：「时长 单位天 仅支持 30、60、90、180」。
@@ -210,6 +215,9 @@ delivered ◄── 写回 IP/账密/到期日 ─────┘               
 | `customer_lines` 补字段 | 现在有 `static_ip`/`node_link`，985 返回的是 `IP:PORT + username/password`，要能存代理账密 |
 | 配置项 | `NINEEIGHTFIVE_API_KEY`、`NINEEIGHTFIVE_ZONE`、`NINEEIGHTFIVE_API_BASE`（沙箱/正式）、单笔/每日采购上限 |
 | 城市 | 若采纳 7.1 的自动选城市，同步表要存 `city` + `stock` 排行 |
+
+> 接第二家上游（985 + 现有全球代理）时，城市/号段怎么进资源池、路由按什么排序、
+> 两家能力不对等怎么处理，见 `docs/双上游资源池设计.md`。本文只覆盖 985 单条链路。
 
 技术债提醒：`supplier_service.py` 里 `SUPPLIER_CODE = "quanqiudaili"`、`POOL_CODE = "global_proxy_pool"`
 是**写死的常量**，同步函数也按单一供应商实现。接第二家之前要把这两个抽成参数，
