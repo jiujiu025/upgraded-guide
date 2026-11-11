@@ -158,19 +158,34 @@ def auto_procure_order(db: Session, order: Order, *, trigger: str = "payment") -
         db.commit()
         return record
 
-    record = Procurement(
-        order_id=order.id, line_index=0, supplier_id=supplier.id, supplier_code=supplier.code,
-        status="pending", request_payload=json.dumps(request, ensure_ascii=False),
-    )
-    try:
-        db.add(record)
+    # 失败过的单子要能重试：唯一键是 (order_id, line_index)，不能新建第二行，
+    # 复用同一行并把状态改回 pending。succeeded / pending 直接返回，不再下单。
+    existing = db.scalar(select(Procurement).where(
+        Procurement.order_id == order.id, Procurement.line_index == 0,
+    ))
+    if existing is not None:
+        if existing.status in {"succeeded", "pending"}:
+            return existing
+        existing.status = "pending"
+        existing.error_code = None
+        existing.error_message = None
+        existing.request_payload = json.dumps(request, ensure_ascii=False)
         db.commit()
-    except IntegrityError:
-        # 并发触发：另一个请求已经在买，直接读它的结果
-        db.rollback()
-        return db.scalar(select(Procurement).where(
-            Procurement.order_id == order.id, Procurement.line_index == 0,
-        ))
+        record = existing
+    else:
+        record = Procurement(
+            order_id=order.id, line_index=0, supplier_id=supplier.id, supplier_code=supplier.code,
+            status="pending", request_payload=json.dumps(request, ensure_ascii=False),
+        )
+        try:
+            db.add(record)
+            db.commit()
+        except IntegrityError:
+            # 并发触发：另一个请求已经在买，直接读它的结果
+            db.rollback()
+            return db.scalar(select(Procurement).where(
+                Procurement.order_id == order.id, Procurement.line_index == 0,
+            ))
 
     adapter = build_readonly_adapter(db, supplier)
     segments = None
@@ -186,7 +201,11 @@ def auto_procure_order(db: Session, order: Order, *, trigger: str = "payment") -
             remark=order.order_no,
         )
     except SupplierError as exc:
-        # 超时/限流都不重试：上游没有幂等键，重试等于重复扣款
+        # 超时/限流都不重试：上游没有幂等键，重试等于重复扣款。
+        # 上游原始响应落到 response_payload，运维才能判断是余额不足还是参数问题。
+        payload = getattr(exc, "payload", None)
+        if payload:
+            record.response_payload = json.dumps(payload, ensure_ascii=False)[:2000]
         return _fail(db, record, getattr(exc, "code", "SUPPLIER_ERROR"), str(exc), customer, order)
     except Exception as exc:  # noqa: BLE001 - 采购是外部调用，任何异常都要落库转人工
         return _fail(db, record, "UNEXPECTED", f"{type(exc).__name__}: {exc}", customer, order)

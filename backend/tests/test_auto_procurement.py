@@ -204,3 +204,23 @@ def test_manual_retry_endpoint_guards(db, monkeypatch):
     procurement_service.auto_procure_order(session, order)
     again = retry_order_procurement(order.id, BackgroundTasks(), db=session, user=admin)
     assert again["status"] == "already_delivered"
+
+
+def test_failed_procurement_can_be_retried(db, monkeypatch):
+    """失败过的单子复用同一行重试：唯一键是 (order_id, line_index)，不能新建第二行。"""
+    session, order = db
+    enable_procurement(monkeypatch)
+
+    broken = FakeAdapter(error=SupplierBusinessError("余额不足"))
+    monkeypatch.setattr(procurement_service, "build_readonly_adapter", lambda *a, **k: broken)
+    first = procurement_service.auto_procure_order(session, order)
+    assert first.status == "failed"
+
+    good = FakeAdapter()
+    monkeypatch.setattr(procurement_service, "build_readonly_adapter", lambda *a, **k: good)
+    second = procurement_service.auto_procure_order(session, order)
+
+    assert second.id == first.id
+    assert second.status == "succeeded"
+    assert second.error_code is None
+    assert good.calls == 1

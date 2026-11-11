@@ -182,7 +182,12 @@ class GlobalProxyAdapter:
             or payload["code"] != 1
         ):
             if isinstance(payload, dict) and payload.get("code") == 0:
-                raise SupplierBusinessError("供应商返回业务错误")
+                # 上游的 msg 是排查唯一线索（余额不足 / 城市必填 / 未实名都在这里），
+                # 不能只回一句"业务错误"；原始响应挂到异常上，采购记录会落库。
+                message = str(payload.get("msg") or "").strip() or "上游拒绝，未给出原因"
+                error = SupplierBusinessError(f"上游拒绝：{message}")
+                error.payload = payload
+                raise error
             raise SupplierInvalidResponseError("供应商响应结构无效")
         return payload["data"]
 
