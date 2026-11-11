@@ -5,6 +5,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowRight, Check, Loader2, Minus, Plus, ShoppingCart } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { createCustomerOrder, getCatalog, previewOrder } from '../api'
+import { buildProductViews, pickDefaultProduct } from '../utils/buyProducts'
 import CitySegmentPicker from './CitySegmentPicker.vue'
 
 const router = useRouter()
@@ -19,7 +20,8 @@ const citySupported = ref(false)
 const cityMeta = ref({ items: [] })
 const catalog = ref({ lines: [] })
 const form = reactive({
-  lineCode: '',
+  // 客户看到的是 4 个产品（直播拆手机/电脑），lineCode 由产品派生
+  productCode: '',
   regionId: null,
   productId: null,
   billingDays: 30,
@@ -30,11 +32,12 @@ const form = reactive({
 let previewTimer
 
 const lines = computed(() => catalog.value.lines || [])
-const line = computed(() => lines.value.find((item) => item.code === form.lineCode) || null)
-const regions = computed(() => line.value?.regions || [])
+const products = computed(() => buildProductViews(lines.value))
+const product = computed(() => products.value.find((item) => item.code === form.productCode) || null)
+const regions = computed(() => product.value?.regions || [])
 const region = computed(() => regions.value.find((item) => item.id === form.regionId) || null)
 const offers = computed(() => region.value?.offers || [])
-const periods = computed(() => line.value?.periods || [])
+const periods = computed(() => product.value?.periods || [])
 const offer = computed(() => offers.value.find((item) => item.product_id === form.productId) || null)
 const cityLabel = computed(() => {
   if (!cityChoice.value.cityCode) return ''
@@ -46,15 +49,14 @@ const specStep = computed(() => (citySupported.value ? '④' : '③'))
 const canSubmit = computed(() => Boolean(offer.value?.in_stock) && Boolean(preview.value) && !submitting.value)
 
 function regionPrice(entry) {
-  const list = entry.offers || []
-  if (!list.length) return null
-  return Math.min(...list.map((item) => item.unit_price))
+  return typeof entry?.min_price === 'number' ? entry.min_price : null
 }
 
-function pickLine(code) {
-  form.lineCode = code
-  const target = lines.value.find((item) => item.code === code)
-  const regionWithOffer = (target?.regions || []).find((item) => (item.offers || []).length) || target?.regions?.[0]
+function pickProduct(code) {
+  form.productCode = code
+  const target = products.value.find((item) => item.code === code)
+  const regionWithOffer = (target?.regions || []).find((item) => item.offers.some((offer) => offer.in_stock))
+    || target?.regions?.[0]
   form.regionId = regionWithOffer?.id ?? null
   form.billingDays = target?.periods?.[0] || 30
   syncProduct()
@@ -65,7 +67,7 @@ function pickRegion(id) {
   syncProduct()
 }
 
-// 同一地区可能有多个规格（直播：手机/电脑），默认选第一个有货的。
+// 产品已经决定了规格（直播的手机/电脑是两个产品），这里只需取该国家下的那一个 offer。
 function syncProduct() {
   const list = region.value?.offers || []
   const preferred = list.find((item) => item.in_stock) || list[0]
@@ -78,13 +80,13 @@ async function load() {
   try {
     const { data } = await getCatalog()
     catalog.value = data
-    // 从产品详情页带 ?product=<id> 过来时直接定位到该规格，省得再点一遍。
+    // 从产品详情页带 ?product=<id> 过来时直接定位到该产品与国家，省得再点一遍。
     const wanted = Number(route.query?.product || 0)
     if (wanted) {
-      for (const item of lines.value) {
+      for (const item of products.value) {
         for (const entry of item.regions) {
-          if ((entry.offers || []).some((offer) => offer.product_id === wanted)) {
-            pickLine(item.code)
+          if (entry.offers.some((offer) => offer.product_id === wanted)) {
+            pickProduct(item.code)
             pickRegion(entry.id)
             form.productId = wanted
             return
@@ -92,8 +94,8 @@ async function load() {
         }
       }
     }
-    const first = lines.value.find((item) => item.regions.some((region) => (region.offers || []).length)) || lines.value[0]
-    if (first) pickLine(first.code)
+    const first = pickDefaultProduct(products.value)
+    if (first) pickProduct(first.code)
   } catch (requestError) {
     error.value = requestError.userMessage || '产品目录加载失败，请稍后重试'
   } finally {
@@ -173,18 +175,20 @@ onMounted(load)
       <div class="buy-layout">
         <div class="buy-main">
           <section class="buy-block">
-            <h2>① 选择产品线</h2>
-            <div class="line-grid">
+            <h2>① 选择产品</h2>
+            <div class="line-grid product-grid">
               <button
-                v-for="item in lines"
+                v-for="item in products"
                 :key="item.code"
                 type="button"
-                :class="{ selected: form.lineCode === item.code }"
-                @click="pickLine(item.code)"
+                :disabled="!item.regionCount"
+                :class="{ selected: form.productCode === item.code }"
+                @click="pickProduct(item.code)"
               >
                 <b>{{ item.name }}</b>
-                <small>{{ item.region_count }} 个国家/地区</small>
-                <em v-if="item.min_price !== null">¥{{ item.min_price }} / 30天起</em>
+                <small>{{ item.desc }}</small>
+                <small>{{ item.regionCount }} 个国家/地区</small>
+                <em v-if="item.minPrice !== null">¥{{ item.minPrice }} / 30天起</em>
                 <em v-else>暂无报价</em>
               </button>
             </div>
@@ -221,24 +225,9 @@ onMounted(load)
           </section>
 
           <section class="buy-block">
-            <h2>{{ specStep }} 规格、周期与数量</h2>
-            <div v-if="!offers.length" class="inline-empty">该国家在当前产品线下暂无报价，换一个国家试试。</div>
+            <h2>{{ specStep }} 确认周期与数量</h2>
+            <div v-if="!offers.length" class="inline-empty">该国家在当前产品下暂无报价，换一个国家试试。</div>
             <template v-else>
-              <div v-if="offers.length > 1" class="spec-list">
-                <button
-                  v-for="item in offers"
-                  :key="item.product_id"
-                  type="button"
-                  :disabled="!item.in_stock"
-                  :class="{ selected: form.productId === item.product_id }"
-                  @click="form.productId = item.product_id"
-                >
-                  <b>{{ item.spec }}</b>
-                  <span>¥{{ item.unit_price }} / 30天</span>
-                  <small v-if="!item.in_stock">暂时无货</small>
-                </button>
-              </div>
-
               <div class="buy-controls">
                 <label>使用周期
                   <select v-model.number="form.billingDays">
@@ -263,9 +252,9 @@ onMounted(load)
 
         <aside class="buy-summary">
           <p class="buy-eyebrow">订单预览</p>
-          <h2>{{ line?.name || '—' }}</h2>
+          <h2>{{ product?.name || '—' }}</h2>
           <div class="summary-line"><span>地区</span><b>{{ region?.name || '—' }}</b></div>
-          <div class="summary-line"><span>规格</span><b>{{ offer?.spec || '标准' }}</b></div>
+          <div v-if="offer?.spec" class="summary-line"><span>规格</span><b>{{ offer.spec }}</b></div>
           <div v-if="cityLabel" class="summary-line"><span>城市</span><b>{{ cityLabel }}</b></div>
           <div v-if="cityChoice.ipSegment" class="summary-line"><span>IP 段</span><b>{{ cityChoice.ipSegment }}</b></div>
           <div class="summary-line"><span>周期</span><b>{{ form.billingDays }} 天</b></div>

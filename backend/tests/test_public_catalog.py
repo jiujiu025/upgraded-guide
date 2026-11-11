@@ -114,7 +114,10 @@ def test_public_catalog_has_three_lines_and_no_prices(api):
         assert line["min_price"] is None
         for region in line["regions"]:
             assert region["min_price"] is None
-            assert region["offers"] == []
+            # 未登录也要能选产品/国家/规格，所以 offer 结构照发，只把金额抹掉。
+            assert region["offers"]
+            assert all(offer["unit_price"] is None for offer in region["offers"])
+            assert all(offer["product_id"] and offer["billing_days"] for offer in region["offers"])
 
 
 def test_public_catalog_detail_hides_price_too(api):
@@ -122,7 +125,12 @@ def test_public_catalog_detail_hides_price_too(api):
     assert response.status_code == 200
     body = response.json()
     assert body["min_price"] is None
-    assert all(not region["offers"] for region in body["regions"])
+    assert all(
+        region["min_price"] is None
+        and region["offers"]
+        and all(offer["unit_price"] is None for offer in region["offers"])
+        for region in body["regions"]
+    )
     assert body["periods"] == [30, 90, 180, 360]
 
 

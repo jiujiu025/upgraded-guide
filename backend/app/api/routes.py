@@ -940,11 +940,13 @@ def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
             group["periods"].add(days)
         group["in_stock"] = group["in_stock"] or bool(product.is_in_stock)
         entry["in_stock"] = entry["in_stock"] or bool(product.is_in_stock)
-        if not with_price:
-            continue
-        price = float(product.price)
-        group["min_price"] = price if group["min_price"] is None else min(group["min_price"], price)
-        entry["min_price"] = price if entry["min_price"] is None else min(entry["min_price"], price)
+        # 未登录也要能选「产品 → 国家 → 规格」，所以 offer 结构照发，只把金额抹掉。
+        # 网页上本来就公开展示有哪些产品和国家，这里不构成信息泄露；
+        # 金额相关的聚合（min_price）仍然只在 with_price=True 时计算。
+        price = float(product.price) if with_price else None
+        if price is not None:
+            group["min_price"] = price if group["min_price"] is None else min(group["min_price"], price)
+            entry["min_price"] = price if entry["min_price"] is None else min(entry["min_price"], price)
         entry["offers"].append({
             "product_id": product.id,
             "billing_days": product.billing_days,

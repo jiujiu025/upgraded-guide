@@ -1,17 +1,20 @@
 <script setup>
+// 官网 /buy：先选产品（4 个），再选国家，最后确认周期与数量。
+// 目录来自 /api/public/catalog：未登录也能选产品与国家，只是金额由后端脱敏。
 import { computed, onMounted, ref, watch } from 'vue'
 import { ArrowRight, Check, Minus, Plus, RefreshCw, Search } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
-import { getPublicProducts, getPublicRegions, previewOrder } from '../api'
+import { getPublicCatalog, previewOrder } from '../api'
+import { buildProductViews, pickDefaultProduct } from '../utils/buyProducts'
 import { session } from '../api/session'
 import CitySegmentPicker from './CitySegmentPicker.vue'
 import PageIntro from './PageIntro.vue'
 
 const router = useRouter()
 const route = useRoute()
-const products = ref([])
-const regions = ref([])
+const catalog = ref({ lines: [] })
 const query = ref('')
+const selectedProductCode = ref('')
 const selectedRegionId = ref(null)
 const selectedProductId = ref(null)
 const quantity = ref(1)
@@ -26,31 +29,37 @@ const previewing = ref(false)
 const error = ref('')
 let previewTimer
 
-const selectedRegion = computed(() => regions.value.find((item) => item.id === selectedRegionId.value))
-const availableProducts = computed(() => products.value.filter((item) => item.region_id === selectedRegionId.value))
-const selectedProduct = computed(() => availableProducts.value.find((item) => item.id === selectedProductId.value))
+const products = computed(() => buildProductViews(catalog.value.lines || []))
+const product = computed(() => products.value.find((item) => item.code === selectedProductCode.value) || null)
+const regions = computed(() => product.value?.regions || [])
 const regionMatches = computed(() => regions.value.filter((item) => item.name.includes(query.value.trim())))
-const periods = computed(() => {
-  // 周期与价格全部由后端下发（线性定价：90天=3×、180天=6×、360天=12×），前端不再自己乘系数
-  const fromBackend = selectedProduct.value?.periods ?? []
-  if (fromBackend.length) return fromBackend.map((item) => item.billing_days)
-  return selectedProduct.value ? [selectedProduct.value.billing_days] : []
-})
-const priceOf = (days) => selectedProduct.value?.periods?.find((item) => item.billing_days === days)?.unit_price ?? null
-const productLabel = (product) => {
-  if (!product.is_in_stock) return '暂时无货'
-  // 未登录不显示价格（后端 catalog 已脱敏，这里不再引用商品价格字段）
-  if (!signedIn.value) return '登录后查看价格'
-  return (product.periods?.length ?? 0) > 1
-    ? `¥${product.price} 起`
-    : `¥${product.price} / ${product.billing_days} 天`
+const selectedRegion = computed(() => regions.value.find((item) => item.id === selectedRegionId.value) || null)
+const offers = computed(() => selectedRegion.value?.offers || [])
+const selectedOffer = computed(() => offers.value.find((item) => item.product_id === selectedProductId.value) || null)
+const periods = computed(() => product.value?.periods || [])
+
+// 产品卡片上的价格：未登录不显示（catalog 已脱敏，min_price 本来就是 null）。
+function productPrice(item) {
+  if (!item.regionCount) return '暂无可售国家'
+  if (item.minPrice === null) return signedIn.value ? '暂无报价' : '登录后查看价格'
+  return `¥${item.minPrice} / 30天起`
+}
+
+function pickProduct(code) {
+  selectedProductCode.value = code
+  query.value = ''
+  const target = products.value.find((item) => item.code === code)
+  const firstRegion = target?.regions.find((item) => item.offers.some((offer) => offer.in_stock))
+    || target?.regions?.[0]
+  selectRegion(firstRegion?.id ?? null)
+  billingDays.value = target?.periods?.[0] || 30
 }
 
 function selectRegion(id) {
   selectedRegionId.value = id
-  const first = products.value.find((item) => item.region_id === id && item.is_in_stock)
-  selectedProductId.value = first?.id ?? products.value.find((item) => item.region_id === id)?.id ?? null
   cityChoice.value = { cityCode: '', ipSegment: '' }
+  const list = regions.value.find((item) => item.id === id)?.offers || []
+  selectedProductId.value = (list.find((item) => item.in_stock) || list[0])?.product_id ?? null
 }
 
 // 上次选择存在 sessionStorage 里，可能被其他版本写坏或被手动改过。
@@ -65,27 +74,44 @@ function readSavedSelection() {
   }
 }
 
+// 按 product_id 反查它属于哪个产品与国家：详情页 ?product= 和上次选择都用这一套。
+function locateProduct(productId) {
+  for (const item of products.value) {
+    for (const entry of item.regions) {
+      if (entry.offers.some((offer) => offer.product_id === productId)) {
+        selectedProductCode.value = item.code
+        selectRegion(entry.id)
+        selectedProductId.value = productId
+        return true
+      }
+    }
+  }
+  return false
+}
+
 async function loadCatalog() {
   loading.value = true
   error.value = ''
   try {
-    const [productResponse, regionResponse] = await Promise.all([getPublicProducts(), getPublicRegions()])
-    products.value = productResponse.data
-    regions.value = regionResponse.data
+    const { data } = await getPublicCatalog()
+    catalog.value = data
     const saved = readSavedSelection()
-    // 详情页「开始选购」带着 ?product=<id> 过来，优先级最高：直接选中该 SKU 与它的地区。
-    const queryProduct = products.value.find((item) => String(item.id) === String(route.query.product || ''))
-    const queryRegion = regions.value.find((item) => item.name === route.query.region)
-    const initialRegion = (queryProduct && regions.value.find((item) => item.id === queryProduct.region_id))
-      || regions.value.find((item) => item.id === saved?.region_id)
-      || queryRegion
-      || regions.value[0]
-    selectRegion(initialRegion?.id ?? null)
-    const savedProduct = availableProducts.value.find((item) => item.id === saved?.product_id)
-    if (queryProduct) selectedProductId.value = queryProduct.id
-    else if (savedProduct) selectedProductId.value = savedProduct.id
+    // 详情页「开始选购」带着 ?product=<id> 过来，优先级最高。
+    const queryProduct = Number(route.query.product || 0)
+    if (queryProduct && locateProduct(queryProduct)) {
+      // 已定位
+    } else if (saved?.product_id && locateProduct(Number(saved.product_id))) {
+      // 用上次的选择
+    } else {
+      const first = pickDefaultProduct(products.value)
+      if (first) pickProduct(first.code)
+    }
     quantity.value = Math.min(100, Math.max(1, Number(saved?.quantity) || 1))
-    billingDays.value = Number(saved?.billing_days) || selectedProduct.value?.billing_days || 30
+    if (periods.value.length && !periods.value.includes(Number(saved?.billing_days))) {
+      billingDays.value = periods.value[0]
+    } else if (saved?.billing_days) {
+      billingDays.value = Number(saved.billing_days)
+    }
     if (saved?.city_code || saved?.ip_segment) {
       cityChoice.value = { cityCode: saved?.city_code || '', ipSegment: saved?.ip_segment || '' }
     }
@@ -94,12 +120,12 @@ async function loadCatalog() {
 
 async function refreshPreview() {
   if (!signedIn.value) { preview.value = null; previewing.value = false; return }
-  if (!selectedProduct.value || !selectedRegion.value) { preview.value = null; return }
+  if (!selectedProductId.value || !selectedRegion.value) { preview.value = null; return }
   previewing.value = true
   error.value = ''
   try {
     const payload = {
-      product_id: selectedProduct.value.id,
+      product_id: selectedProductId.value,
       region_id: selectedRegion.value.id,
       quantity: quantity.value,
       billing_days: billingDays.value,
@@ -114,11 +140,13 @@ async function refreshPreview() {
 
 watch([selectedProductId, quantity, billingDays], () => {
   clearTimeout(previewTimer)
-  if (selectedProduct.value && !periods.value.includes(billingDays.value)) billingDays.value = selectedProduct.value.billing_days
+  if (selectedProductId.value && periods.value.length && !periods.value.includes(billingDays.value)) {
+    billingDays.value = periods.value[0]
+  }
   previewTimer = setTimeout(refreshPreview, 280)
 })
-// 换商品后旧城市可能不属于新国家：清空，等选择器重新加载。
-watch(selectedProductId, () => { cityChoice.value = { cityCode: '', ipSegment: '' } })
+// 换产品/换国家后旧城市可能不属于新国家：清空，等选择器重新加载。
+watch([selectedProductCode, selectedRegionId], () => { cityChoice.value = { cityCode: '', ipSegment: '' } })
 watch(cityChoice, () => {
   clearTimeout(previewTimer)
   previewTimer = setTimeout(refreshPreview, 280)
@@ -127,4 +155,126 @@ function goLogin() { router.push({ path: '/login', query: { redirect: route.full
 onMounted(loadCatalog)
 </script>
 
-<template><div class="buy-page"><PageIntro title="选择你的线路" desc="产品、库存和价格均来自当前业务系统，最终金额以后端预览为准。" /><section class="section light buy-layout"><div v-if="loading" class="state-panel">正在读取产品和地区…</div><div v-else-if="error && !regions.length" class="state-panel error-state"><p>{{ error }}</p><button class="outline-action" @click="loadCatalog"><RefreshCw :size="15" />重试</button></div><template v-else><div class="buy-main"><div class="step-rail"><span class="active">01 <b>地区</b></span><i></i><span :class="{ active: selectedProduct }">02 <b>产品</b></span><i></i><span :class="{ active: preview }">03 <b>周期与数量</b></span></div><div class="buy-block"><div class="block-head"><div><p class="eyebrow dark">STEP 01</p><h2>你要连接哪里？</h2></div><label class="search-box"><Search :size="16" /><input v-model="query" placeholder="搜索国家或地区" /></label></div><div v-if="regionMatches.length" class="region-picker"><button v-for="region in regionMatches" :key="region.id" :class="{ selected: selectedRegionId === region.id }" @click="selectRegion(region.id)"><span>{{ region.country_code }}</span>{{ region.name }}<Check v-if="selectedRegionId === region.id" :size="15" /></button></div><p v-else class="inline-empty">没有匹配的地区</p></div><div class="buy-block"><div class="block-head"><div><p class="eyebrow dark">STEP 02</p><h2>选择当前地区的产品</h2></div></div><div v-if="availableProducts.length" class="type-picker"><button v-for="product in availableProducts" :key="product.id" :disabled="!product.is_in_stock" :class="{ selected: selectedProductId === product.id }" @click="selectedProductId = product.id"><span>{{ product.product_type }}</span><b>{{ product.name }}</b><small>{{ productLabel(product) }}</small></button></div><p v-else class="inline-empty">该地区暂无可选产品，请选择其他地区。</p></div><div class="buy-block"><div class="block-head"><div><p class="eyebrow dark">STEP 03</p><h2>确认数量与周期</h2></div></div><div class="order-controls"><label>线路数量 <span class="counter"><button :disabled="quantity <= 1" @click="quantity--"><Minus :size="14" /></button><b>{{ quantity }}</b><button :disabled="quantity >= 100" @click="quantity++"><Plus :size="14" /></button></span></label><label>使用周期 <select v-model="billingDays"><option v-for="days in periods" :key="days" :value="days">{{ days }} 天</option></select></label></div></div><div v-if="signedIn" v-show="citySupported" class="buy-block"><div class="block-head"><div><p class="eyebrow dark">STEP 04</p><h2>选择城市与 IP 段（可选）</h2></div></div><CitySegmentPicker v-if="selectedProduct" v-model="cityChoice" :product-id="selectedProduct.id" @ready="citySupported = Boolean($event.supported)" /></div></div><aside class="order-summary"><p class="eyebrow dark">ORDER PREVIEW</p><h3>{{ selectedProduct?.name || '请选择产品' }}</h3><div class="summary-line"><span>地区</span><b>{{ selectedRegion?.name || '—' }}</b></div><div class="summary-line"><span>数量</span><b>{{ quantity }} 条线路</b></div><div class="summary-line"><span>周期</span><b>{{ billingDays }} 天</b></div><div v-if="cityChoice.cityCode" class="summary-line"><span>城市</span><b>{{ cityChoice.cityCode }}</b></div><div v-if="cityChoice.ipSegment" class="summary-line"><span>IP 段</span><b>{{ cityChoice.ipSegment }}</b></div><div class="summary-line"><span>单价</span><b>{{ !signedIn ? '登录可见' : preview ? `¥${preview.unit_price.toFixed(2)}` : '—' }}</b></div><div class="summary-line"><span>折合</span><b>{{ !signedIn ? '登录可见' : preview ? `¥${(preview.unit_price / preview.billing_days).toFixed(2)} / 天` : '—' }}</b></div><div class="summary-total"><span>后端预览总额</span><strong>{{ !signedIn ? '登录后显示' : previewing ? '计算中…' : preview ? `¥${preview.total_amount.toFixed(2)}` : '—' }}</strong></div><p v-if="error" class="summary-error">{{ error }}</p><p class="demo-note">价格由后端实时计算。余额与在线支付尚未接通，提交后仅生成待处理订单。</p><button v-if="signedIn" class="button full-button" :disabled="!preview || previewing" @click="router.push('/checkout')">确认并继续 <ArrowRight :size="16" /></button><button v-else class="button full-button" @click="goLogin">登录后查看价格 <ArrowRight :size="16" /></button></aside></template></section></div></template>
+<template>
+  <div class="buy-page">
+    <PageIntro title="选择你的线路" desc="产品、库存和价格均来自当前业务系统，最终金额以后端预览为准。" />
+    <section class="section light buy-layout">
+      <div v-if="loading" class="state-panel">正在读取产品和地区…</div>
+      <div v-else-if="error && !products.length" class="state-panel error-state">
+        <p>{{ error }}</p>
+        <button class="outline-action" @click="loadCatalog"><RefreshCw :size="15" />重试</button>
+      </div>
+      <template v-else>
+        <div class="buy-main">
+          <div class="step-rail">
+            <span class="active">01 <b>产品</b></span><i></i>
+            <span :class="{ active: selectedRegion }">02 <b>国家</b></span><i></i>
+            <span :class="{ active: preview }">03 <b>周期与数量</b></span>
+          </div>
+
+          <div class="buy-block">
+            <div class="block-head">
+              <div><p class="eyebrow dark">STEP 01</p><h2>选择产品</h2></div>
+            </div>
+            <div v-if="products.length" class="type-picker">
+              <button
+                v-for="item in products"
+                :key="item.code"
+                type="button"
+                :disabled="!item.regionCount"
+                :class="{ selected: selectedProductCode === item.code }"
+                :title="item.desc"
+                @click="pickProduct(item.code)"
+              >
+                <span>{{ item.regionCount }} 个国家 / 地区</span>
+                <b>{{ item.name }}</b>
+                <small>{{ productPrice(item) }}</small>
+              </button>
+            </div>
+            <p v-else class="inline-empty">当前没有可售产品，请联系管理员。</p>
+          </div>
+
+          <div class="buy-block">
+            <div class="block-head">
+              <div><p class="eyebrow dark">STEP 02</p><h2>选择国家 / 地区</h2></div>
+              <label class="search-box"><Search :size="16" /><input v-model="query" placeholder="搜索国家或地区" /></label>
+            </div>
+            <div v-if="regionMatches.length" class="region-picker">
+              <button
+                v-for="region in regionMatches"
+                :key="region.id"
+                :class="{ selected: selectedRegionId === region.id }"
+                @click="selectRegion(region.id)"
+              >
+                <span>{{ region.country_code }}</span>{{ region.name }}
+                <em v-if="region.min_price !== null">¥{{ region.min_price }}</em>
+                <Check v-if="selectedRegionId === region.id" :size="15" />
+              </button>
+            </div>
+            <p v-else class="inline-empty">{{ product ? '该产品暂无可售国家，换一个产品试试。' : '请先选择产品。' }}</p>
+          </div>
+
+          <div class="buy-block">
+            <div class="block-head">
+              <div><p class="eyebrow dark">STEP 03</p><h2>确认数量与周期</h2></div>
+            </div>
+            <div class="order-controls">
+              <label>线路数量
+                <span class="counter">
+                  <button :disabled="quantity <= 1" @click="quantity--"><Minus :size="14" /></button>
+                  <b>{{ quantity }}</b>
+                  <button :disabled="quantity >= 100" @click="quantity++"><Plus :size="14" /></button>
+                </span>
+              </label>
+              <label>使用周期
+                <select v-model="billingDays">
+                  <option v-for="days in periods" :key="days" :value="days">{{ days }} 天</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div v-if="signedIn" v-show="citySupported" class="buy-block">
+            <div class="block-head">
+              <div><p class="eyebrow dark">STEP 04</p><h2>选择城市与 IP 段（可选）</h2></div>
+            </div>
+            <CitySegmentPicker
+              v-if="selectedProductId"
+              v-model="cityChoice"
+              :product-id="selectedProductId"
+              @ready="citySupported = Boolean($event.supported)"
+            />
+          </div>
+        </div>
+
+        <aside class="order-summary">
+          <p class="eyebrow dark">ORDER PREVIEW</p>
+          <h3>{{ product?.name || '请选择产品' }}</h3>
+          <div class="summary-line"><span>地区</span><b>{{ selectedRegion?.name || '—' }}</b></div>
+          <div class="summary-line"><span>数量</span><b>{{ quantity }} 条线路</b></div>
+          <div class="summary-line"><span>周期</span><b>{{ billingDays }} 天</b></div>
+          <div v-if="cityChoice.cityCode" class="summary-line"><span>城市</span><b>{{ cityChoice.cityCode }}</b></div>
+          <div v-if="cityChoice.ipSegment" class="summary-line"><span>IP 段</span><b>{{ cityChoice.ipSegment }}</b></div>
+          <div class="summary-line">
+            <span>单价</span>
+            <b>{{ !signedIn ? '登录可见' : preview ? `¥${preview.unit_price.toFixed(2)}` : '—' }}</b>
+          </div>
+          <div class="summary-line">
+            <span>折合</span>
+            <b>{{ !signedIn ? '登录可见' : preview ? `¥${(preview.unit_price / preview.billing_days).toFixed(2)} / 天` : '—' }}</b>
+          </div>
+          <div class="summary-total">
+            <span>后端预览总额</span>
+            <strong>{{ !signedIn ? '登录后显示' : previewing ? '计算中…' : preview ? `¥${preview.total_amount.toFixed(2)}` : '—' }}</strong>
+          </div>
+          <p v-if="error" class="summary-error">{{ error }}</p>
+          <p class="demo-note">价格由后端实时计算。余额与在线支付尚未接通，提交后仅生成待处理订单。</p>
+          <button v-if="signedIn" class="button full-button" :disabled="!preview || previewing || !selectedOffer" @click="router.push('/checkout')">
+            确认并继续 <ArrowRight :size="16" />
+          </button>
+          <button v-else class="button full-button" @click="goLogin">登录后查看价格 <ArrowRight :size="16" /></button>
+        </aside>
+      </template>
+    </section>
+  </div>
+</template>
