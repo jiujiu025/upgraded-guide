@@ -17,6 +17,7 @@ from app.main import app
 from app.models import Customer, User
 from app.models.base import Base
 from app.services.registration_service import registration_rate_limiter
+from captcha_utils import captcha_fields
 
 
 LONG_PASSWORD = "Aa1!" + "x" * 96  # 100 字符 = 100 字节，满足复杂度但超 72 字节
@@ -63,7 +64,7 @@ def token(client, username, password):
 
 
 def register_payload(username, password):
-    return {"username": username, "password": password, "name": "测试用户", "email": f"{username}@example.com"}
+    return {"username": username, "password": password, "name": "测试用户", "email": f"{username}@example.com", **captcha_fields()}
 
 
 def test_register_rejects_password_over_72_bytes(api):

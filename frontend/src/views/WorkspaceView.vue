@@ -2,6 +2,7 @@
 import BrandLogo from "../components/BrandLogo.vue";
 import OrderOnBehalfDialog from "../components/OrderOnBehalfDialog.vue";
 import ClientBuyPanel from "../components/ClientBuyPanel.vue";
+import DeliveryLinkInput from "../components/DeliveryLinkInput.vue";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
   Activity,
@@ -181,14 +182,12 @@ const customerRenewalConfirmation = ref(null);
 const deliveryConfirmation = ref(null);
 const renewalConfirmation = ref(null);
 const delivery = reactive({
+  // 节点 ID 不再是必填：贴了链接后端会按链接自动关联或创建节点
   node_id: "",
   static_ip: "",
   expires_at: "",
   customer_note: "",
   node_link: "",
-  subscription_url: "",
-  node_qr_data: "",
-  subscription_qr_data: "",
 });
 
 const workspace = computed(() => route.meta.workspace);
@@ -944,14 +943,15 @@ function openDelivery(order) {
     expires_at: "",
     customer_note: "",
     node_link: "",
-    subscription_url: "",
-    node_qr_data: "",
-    subscription_qr_data: "",
   });
 }
 async function submitDelivery() {
-  if (!delivery.node_id || !delivery.expires_at) {
-    error.value = "请填写节点 ID 和到期时间";
+  if (!delivery.expires_at) {
+    error.value = "请填写到期时间";
+    return;
+  }
+  if (!delivery.node_link.trim() && !delivery.node_id) {
+    error.value = "请粘贴节点链接，或指定已有节点 ID";
     return;
   }
   const expiresAt = new Date(delivery.expires_at);
@@ -960,17 +960,10 @@ async function submitDelivery() {
     return;
   }
   const payload = {
-    node_id: Number(delivery.node_id),
+    node_id: delivery.node_id ? Number(delivery.node_id) : null,
     expires_at: expiresAt.toISOString(),
   };
-  for (const key of [
-    "static_ip",
-    "customer_note",
-    "node_link",
-    "subscription_url",
-    "node_qr_data",
-    "subscription_qr_data",
-  ])
+  for (const key of ["static_ip", "customer_note", "node_link"])
     payload[key] = delivery[key].trim() || null;
   const order = orders.value.find((item) => item.id === deliveryOrderId.value);
   if (!order) {
@@ -1495,21 +1488,26 @@ onMounted(load);
               <dl v-else class="credential-list">
                 <div>
                   <dt>节点链接</dt>
-                  <dd>{{ detail.node_link || "—" }}</dd>
+                  <dd class="credential-copy">{{ detail.node_link || "—" }}</dd>
                 </div>
                 <div>
                   <dt>订阅地址</dt>
-                  <dd>{{ detail.subscription_url || "—" }}</dd>
-                </div>
-                <div>
-                  <dt>节点二维码数据</dt>
-                  <dd>{{ detail.node_qr_data || "—" }}</dd>
-                </div>
-                <div>
-                  <dt>订阅二维码数据</dt>
-                  <dd>{{ detail.subscription_qr_data || "—" }}</dd>
+                  <dd class="credential-copy">{{ detail.subscription_url || "—" }}</dd>
                 </div>
               </dl>
+              <div
+                v-if="detail.node_qr_url || detail.subscription_qr_url"
+                class="qr-grid"
+              >
+                <figure v-if="detail.node_qr_url">
+                  <img :src="detail.node_qr_url" alt="节点二维码" loading="lazy" />
+                  <figcaption>节点二维码：手机扫码直接导入客户端</figcaption>
+                </figure>
+                <figure v-if="detail.subscription_qr_url">
+                  <img :src="detail.subscription_qr_url" alt="订阅二维码" loading="lazy" />
+                  <figcaption>订阅二维码：导入后自动同步全部线路</figcaption>
+                </figure>
+              </div>
               <div class="software-grid">
                 <span
                   >Clash
@@ -2244,42 +2242,26 @@ onMounted(load);
                 @submit.prevent="submitDelivery"
               >
                 <h3>交付线路</h3>
-                <label
-                  >节点 ID *<input
-                    v-model="delivery.node_id"
-                    type="number"
-                    min="1"
-                    required /></label
-                ><label>静态 IP<input v-model="delivery.static_ip" /></label
-                ><label
-                  >到期时间 *<input
-                    v-model="delivery.expires_at"
-                    type="datetime-local"
-                    required /></label
-                ><label
-                  >客户备注<input
-                    v-model="delivery.customer_note"
-                    maxlength="1000" /></label
-                ><label
-                  >节点链接<input
-                    v-model="delivery.node_link"
-                    autocomplete="off" /></label
-                ><label
-                  >订阅地址<input
-                    v-model="delivery.subscription_url"
-                    autocomplete="off" /></label
-                ><label
-                  >节点二维码数据<textarea
-                    v-model="delivery.node_qr_data"
-                    autocomplete="off"
-                  ></textarea></label
-                ><label
-                  >订阅二维码数据<textarea
-                    v-model="delivery.subscription_qr_data"
-                    autocomplete="off"
-                  ></textarea>
-                </label>
-                <p>交付凭证仅提交至后端，不会写入浏览器日志或通知正文。</p>
+                <DeliveryLinkInput v-model="delivery.node_link" :disabled="busy" />
+                <div class="delivery-grid">
+                  <label>静态 IP<input v-model="delivery.static_ip" /></label>
+                  <label
+                    >到期时间 *<input
+                      v-model="delivery.expires_at"
+                      type="datetime-local"
+                      required /></label
+                  ><label class="wide">客户备注<input v-model="delivery.customer_note" maxlength="1000" /></label>
+                </div>
+                <details class="delivery-advanced">
+                  <summary>改用已有节点 ID</summary>
+                  <label
+                    >节点 ID<input
+                      v-model="delivery.node_id"
+                      type="number"
+                      min="1"
+                      placeholder="不贴链接时才需要填" /></label>
+                </details>
+                <p>二维码与 Clash 订阅由后端按链接生成，客户在「我的线路」里扫码或复制订阅地址即可使用。</p>
                 <div>
                   <button
                     class="button button-small"
@@ -2642,7 +2624,7 @@ onMounted(load);
           </div>
         </dl>
         <div class="renewal-confirm-warning">
-          交付后客户可立即读取线路。节点链接、订阅地址等凭据仅在已填写时提交。
+          交付后客户可立即读取线路。二维码与 Clash 订阅地址由后端按节点链接自动生成。
         </div>
         <p v-if="error" class="renewal-confirm-error" role="alert">
           {{ error }}

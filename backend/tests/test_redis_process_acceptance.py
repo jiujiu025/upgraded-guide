@@ -13,12 +13,18 @@ def _request_in_process(endpoint: str, identity: str, result_queue) -> None:
     from fastapi.testclient import TestClient
 
     from app.main import app
+    from app.services.captcha_service import issue_challenge
 
-    payload = ({"username": "missing-acceptance", "password": "Invalid_123!"}
-               if endpoint == "login" else {
-                   "username": identity, "password": "Register_123!",
-                   "name": "隔离验收客户", "email": f"{identity}@example.invalid",
-               })
+    if endpoint == "login":
+        payload = {"username": "missing-acceptance", "password": "Invalid_123!"}
+    else:
+        # 子进程自己出题、自己解：验证码是进程内状态，跨进程传 token 会被判"已使用"。
+        challenge = issue_challenge()
+        payload = {
+            "username": identity, "password": "Register_123!",
+            "name": "隔离验收客户", "email": f"{identity}@example.invalid",
+            "captcha_token": challenge.token, "captcha_selection": sorted(challenge.answers),
+        }
     path = "/api/auth/login" if endpoint == "login" else "/api/public/register"
     with TestClient(app) as client:
         result_queue.put(client.post(path, json=payload).status_code)

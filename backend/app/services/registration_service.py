@@ -135,6 +135,15 @@ def enforce_invite_check_rate_limit(request: Request) -> None:
     _enforce(request, "invite_check", settings.registration_rate_limit)
 
 
+def enforce_captcha_rate_limit(request: Request) -> None:
+    """注册图形验证码出题接口的限流。
+
+    出题不消耗答案、也不落库，看起来"免费"，但它是注册唯一的前置门槛：
+    不设限，脚本可以囤一堆 token 慢慢试；设了限，换 IP 的成本就上来了。
+    """
+    _enforce(request, "captcha", settings.captcha_rate_limit)
+
+
 def enforce_public_rate_limit(request: Request) -> None:
     """公开只读接口（产品列表、算价预览）的每 IP 限流。
 

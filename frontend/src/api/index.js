@@ -68,6 +68,8 @@ export const getCatalogDetail = (code) => client.get(`/catalog/${encodeURICompon
 export const getCatalogCities = (productId) => client.get('/catalog/cities', { params: { product_id: productId } })
 export const getPublicProduct = (id) => client.get(`/public/products/${id}`)
 export const getPublicRegions = () => client.get('/public/regions')
+// 注册图形验证码：拿九宫格题目（图形是 SVG，答案在 token 里，前端读不出来）
+export const getCaptcha = () => client.get('/public/captcha')
 export const previewOrder = (payload) => client.post('/public/orders/preview', payload)
 export const login = async (payload) => { const result = await client.post('/auth/login', payload); setSession(result.data); return result }
 export const register = async (payload) => { const result = await client.post('/public/register', payload); setSession(result.data); return result }

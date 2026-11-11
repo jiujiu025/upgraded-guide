@@ -19,7 +19,7 @@ from app.models import (
     SalesInviteCode, SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
 )
 from app.schemas.common import (
-    AssignCustomerIn, CompleteRenewalIn, CreateSalesUserIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
+    AssignCustomerIn, CaptchaChallengeOut, CompleteRenewalIn, CreateSalesUserIn, CustomerIn, CustomerLineNoteIn, CustomerLineOut, CustomerOut,
     DeliverOrderIn, InviteCodeCreateIn, InviteCodeOut, InviteCodePublicOut, LineIn, LineOut, LoginIn, NotificationOut, OnBehalfOrderIn, OrderIn, RegisterIn,
     OrderOut, OrderPageOut, OrderPreviewIn, OrderPreviewOut, PasswordRecoveryIn, ProductOut, PublicProductOut,
     RegionOut, RenewalIn, TokenOut, UpdateSalesUserIn, UserOut,
@@ -28,6 +28,8 @@ from app.schemas.common import (
 from app.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, counts_by, like_pattern, page_payload, paginate
 from app.services.audit_service import write_audit
 from app.services.city_option_service import CitySelectionError, customer_options, resolve_choice
+from app.services.proxy_link import ProxyLinkError, parse_link
+from app.services.subscription_service import issue_token
 from app.services.customer_scope import get_customer_profile, scoped_customer_ids
 from app.services.customer_email import ensure_unique_customer_email
 from app.services.customer_view import balance_cents_of, customer_view, customer_views
@@ -45,8 +47,9 @@ from app.services.invite_code_service import (
 )
 from app.data.site_catalog import CATEGORY_TO_LINE, LINE_LABELS, LINE_ORDER, LINE_SUBTITLES, LIVE_SPEC_LABELS
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
-from app.services.registration_service import (enforce_invite_check_rate_limit, enforce_login_rate_limit, enforce_password_recovery_rate_limit,
-    enforce_public_rate_limit, enforce_registration_rate_limit)
+from app.services.registration_service import (enforce_captcha_rate_limit, enforce_invite_check_rate_limit, enforce_login_rate_limit,
+    enforce_password_recovery_rate_limit, enforce_public_rate_limit, enforce_registration_rate_limit)
+from app.services.captcha_service import CaptchaError, issue_challenge, verify_challenge
 from app.services.session_service import (SessionError, create_session, csrf_token, find_refresh,
     revoke_session, revoke_user_sessions, rotate_session, validate_session)
 from app.tasks.notify import notify_admins
@@ -219,6 +222,7 @@ def customer_line_payload(db: Session, line: CustomerLine, cache: dict | None = 
     """
     if cache is None:
         cache = {}
+    token = issue_token(line.customer_id)
     products = cache.setdefault("products", {})
     nodes = cache.setdefault("nodes", {})
     regions = cache.setdefault("regions", {})
@@ -257,6 +261,10 @@ def customer_line_payload(db: Session, line: CustomerLine, cache: dict | None = 
         "clash_import": line.subscription_url,
         "v2ray_import": line.node_link,
         "nekobox_import": line.subscription_url,
+        # 二维码由后端按需渲染 SVG：客户扫的是链接本身，不依赖任何第三方图片服务。
+        # token 是客户级签名，同一个人所有线路共用一个订阅地址。
+        "node_qr_url": f"/api/sub/{token}/node/{line.id}.svg" if line.node_link else None,
+        "subscription_qr_url": f"/api/sub/{token}/qr.svg" if line.subscription_url else None,
     }
 
 
@@ -711,6 +719,18 @@ def mark_all_notifications_read(db: Session = Depends(get_db), user: User = Depe
 
 
 # 官网公开购买接口：仅返回销售所需字段。
+@router.get("/public/captcha", response_model=CaptchaChallengeOut)
+def public_captcha(request: Request, _: None = Depends(enforce_captcha_rate_limit)):
+    """注册用的九宫格点选题。
+
+    答案存在加密 token 里，响应只给图形、目标名字和目标个数。图形是服务端现画的
+    SVG，不含任何文本语义——扒 DOM 也抄不到答案（见 captcha_service 模块说明）。
+    """
+    if not _origin_allowed(request):
+        raise HTTPException(status_code=403, detail="请求来源无效")
+    return issue_challenge().public_view()
+
+
 @router.post("/public/register", response_model=TokenOut, status_code=201)
 def public_register(
     payload: RegisterIn,
@@ -724,9 +744,16 @@ def public_register(
     邀请码是唯一例外：客户走销售的码注册，归属写进 customers.sales_id。
     失效码不拒绝注册——归属是商家的内部状态，不是客户的错（设计见
     docs/销售邀请码客户归属设计.md §3.1）。
+
+    图形验证码先于一切业务校验：它在最前面，用户名是否位占用、邮箱是否重复这些
+    可以被探测的信号，就不能绕过验证码白拿。
     """
     if not _origin_allowed(request):
         raise HTTPException(status_code=403, detail="请求来源无效")
+    try:
+        verify_challenge(payload.captcha_token, payload.captcha_selection)
+    except CaptchaError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     password_hash = hash_password(payload.password)
     if db.scalar(select(User.id).where(User.username == payload.username)):
         raise HTTPException(status_code=400, detail="无法完成注册，请检查提交信息")
@@ -1790,6 +1817,43 @@ def admin_confirm_order(order_id: int, db: Session = Depends(get_db), user: User
         raise
 
 
+def _resolve_delivery_node(db: Session, payload: DeliverOrderIn, region_id: int):
+    """交付时确定节点：贴了链接就按链接解析，同一个 server/端口/协议 直接复用。
+
+    复用是为了避免每交付一条线路就多一行 nodes——同一个出口卖给多个客户时，
+    节点信息本来就一样，重复建行只会让后台节点列表越滚越长。
+    """
+    parsed = None
+    if payload.node_link:
+        try:
+            parsed = parse_link(payload.node_link)
+        except ProxyLinkError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if payload.node_id:
+        node = db.scalar(select(Node).where(Node.id == payload.node_id, Node.is_enabled.is_(True)))
+        if node is None:
+            raise HTTPException(status_code=400, detail="指定的节点不存在或已停用")
+        return node, parsed
+    node = db.scalar(select(Node).where(
+        Node.server == parsed.server,
+        Node.port == parsed.port,
+        Node.protocol == parsed.protocol,
+        Node.region_id == region_id,
+    ))
+    if node is None:
+        node = Node(
+            name=(parsed.name or f"{parsed.protocol}-{parsed.server}")[:120],
+            server=parsed.server,
+            port=parsed.port,
+            protocol=parsed.protocol,
+            region_id=region_id,
+            is_enabled=True,
+        )
+        db.add(node)
+        db.flush()
+    return node, parsed
+
+
 @router.post("/admin/orders/{order_id}/deliver", response_model=CustomerLineOut)
 def admin_deliver_order(order_id: int, payload: DeliverOrderIn, db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
     order = db.get(Order, order_id)
@@ -1804,13 +1868,22 @@ def admin_deliver_order(order_id: int, payload: DeliverOrderIn, db: Session = De
     ensure_payment_settled(order)
     customer = db.scalar(select(Customer).where(Customer.id == order.customer_id, Customer.is_deleted.is_(False)))
     product = db.scalar(select(Product).where(Product.id == order.product_id, Product.is_active.is_(True)))
-    node = db.scalar(select(Node).where(Node.id == payload.node_id, Node.is_enabled.is_(True)))
     now = utcnow()
-    if not customer or not customer.user_id or not product or not node:
-        raise HTTPException(status_code=400, detail="客户、产品或节点不可用")
+    if not customer or not customer.user_id or not product:
+        raise HTTPException(status_code=400, detail="客户或产品不可用")
+    if not payload.node_id and not payload.node_link:
+        raise HTTPException(status_code=422, detail="请粘贴节点链接，或指定已有节点")
     order_region_id = order.region_id or product.region_id
+    node, _parsed = _resolve_delivery_node(db, payload, order_region_id)
     if node.region_id != order_region_id or product.region_id != order_region_id:
         raise HTTPException(status_code=400, detail="节点、产品与订单地区不一致")
+    # 订阅地址是客户级的：同一个客户所有线路共用一个地址，换线路不用换订阅。
+    # 只有贴了节点链接才给订阅——只填 node_id 时订阅里没有任何节点，给了反而让客户点开是空配置。
+    public_base = (get_settings().frontend_origin or "").rstrip("/")
+    subscription_url = payload.subscription_url or (
+        f"{public_base}/api/sub/{issue_token(customer.id)}"
+        if public_base and payload.node_link else None
+    )
     if payload.expires_at.replace(tzinfo=None) <= now:
         raise HTTPException(status_code=422, detail="到期时间必须晚于当前时间")
     try:
@@ -1819,7 +1892,7 @@ def admin_deliver_order(order_id: int, payload: DeliverOrderIn, db: Session = De
             raise HTTPException(status_code=409, detail="订单交付数量已满或状态不允许交付")
         db.expire(order)
         db.refresh(order)
-        line = CustomerLine(customer_id=customer.id, node_id=node.id, product_id=product.id, order_id=order.id, static_ip=payload.static_ip, started_at=now, expires_at=payload.expires_at.replace(tzinfo=None), customer_note=payload.customer_note, node_link=payload.node_link, subscription_url=payload.subscription_url, node_qr_data=payload.node_qr_data, subscription_qr_data=payload.subscription_qr_data)
+        line = CustomerLine(customer_id=customer.id, node_id=node.id, product_id=product.id, order_id=order.id, static_ip=payload.static_ip, started_at=now, expires_at=payload.expires_at.replace(tzinfo=None), customer_note=payload.customer_note, node_link=payload.node_link, subscription_url=subscription_url, node_qr_data=payload.node_qr_data or payload.node_link, subscription_qr_data=payload.subscription_qr_data or subscription_url)
         db.add(line)
         db.flush()
         if order.region_id is None:

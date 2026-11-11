@@ -34,3 +34,19 @@
 .link-action{color:#2c6f60;font-weight:650;text-decoration:underline;text-underline-offset:3px;font-size:12px}
 
 .line-subtitle{margin:6px 0 0;font-size:13px;font-weight:650;color:#2c6f60;letter-spacing:.01em}
+
+/* 交付线路：链接输入 + 静态 IP/到期时间/备注 两列，高级项折叠 */
+.delivery-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.delivery-grid>label{display:grid;gap:5px;font-size:11px;color:#637872}
+.delivery-grid>label.wide{grid-column:1/-1}
+.delivery-advanced{grid-column:1/-1;border:1px dashed #d3dfd9;border-radius:6px;padding:9px 11px;background:#fff}
+.delivery-advanced summary{cursor:pointer;color:#5c7268;font-size:11px}
+.delivery-advanced label{display:grid;gap:5px;margin-top:8px;font-size:11px;color:#637872}
+@media(max-width:768px){.delivery-grid{grid-template-columns:1fr}}
+
+/* 客户中心线路详情：节点与订阅二维码并排展示 */
+.qr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:16px 0 4px}
+.qr-grid figure{margin:0;display:grid;justify-items:center;gap:8px;padding:14px;border:1px solid #dce4e1;border-radius:6px;background:#fff}
+.qr-grid img{width:100%;max-width:170px;height:auto;display:block}
+.qr-grid figcaption{font-size:10px;color:#71837d;text-align:center;line-height:1.5}
+.credential-copy{font:11px/1.6 ui-monospace,monospace;word-break:break-all}

@@ -28,6 +28,23 @@ class TokenOut(BaseModel):
     user: UserOut
 
 
+class CaptchaTileOut(BaseModel):
+    """九宫格里的一格。svg 是内联图形，前端转成 data URI 塞进 <img>。"""
+
+    index: int
+    svg: str
+
+
+class CaptchaChallengeOut(BaseModel):
+    """一道点选题。答案只存在服务端的加密 token 里，响应里没有。"""
+
+    token: str
+    target: str
+    count: int
+    expires_in: int
+    tiles: list[CaptchaTileOut]
+
+
 class RegisterIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -38,6 +55,10 @@ class RegisterIn(BaseModel):
     phone: str | None = Field(default=None, max_length=40)
     # 销售邀请码：走谁的码注册，客户就归谁。可选；失效码不影响注册成功。
     invite_code: str | None = Field(default=None, max_length=12)
+    # 图形验证码：先 GET /public/captcha 拿题，答案随注册一起提交。
+    # 这里放宽成可选，是为了在路由里回一句中文提示；缺字段直接 422 会给出英文校验信息。
+    captcha_token: str | None = Field(default=None, max_length=4096)
+    captcha_selection: list[int] | None = Field(default=None, max_length=9)
 
     @field_validator("invite_code")
     @classmethod
@@ -381,6 +402,9 @@ class CustomerLineOut(BaseModel):
     clash_import: str | None = None
     v2ray_import: str | None = None
     nekobox_import: str | None = None
+    # 二维码图片地址（后端按需渲染 SVG），前端直接当 <img src> 用
+    node_qr_url: str | None = None
+    subscription_qr_url: str | None = None
 
 
 class CustomerLineNoteIn(BaseModel):
@@ -478,14 +502,28 @@ class OrderPageOut(BaseModel):
 
 
 class DeliverOrderIn(BaseModel):
-    node_id: int
+    """交付入参：贴一条分享链接就够，node_id 交给后端按链接自动找或建。
+
+    两种方式二选一：
+    - node_link：粘贴 vless/vmess/trojan/ss/hysteria2/tuic 链接，后端解析后自动关联节点；
+    - node_id：老流程，手工指定已有节点（后台仍支持）。
+
+    两个都给时以 node_id 为准，但链接会写进线路，客户拿到的就是这条链接。
+    """
+    node_id: int | None = Field(default=None, gt=0)
+    node_link: str | None = Field(default=None, max_length=4000)
     static_ip: str | None = None
     expires_at: datetime
     customer_note: str | None = Field(default=None, max_length=1000)
-    node_link: str | None = None
     subscription_url: str | None = None
     node_qr_data: str | None = None
     subscription_qr_data: str | None = None
+
+    @field_validator("node_link")
+    @classmethod
+    def _strip_link(cls, value: str | None) -> str | None:
+        text = (value or "").strip()
+        return text or None
 
 
 class CompleteRenewalIn(BaseModel):

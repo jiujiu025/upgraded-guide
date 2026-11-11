@@ -21,6 +21,7 @@ from app.main import app
 from app.models import AuditLog, Customer, Notification, SalesInviteCode, User
 from app.models.base import Base, utcnow
 from app.services.registration_service import registration_rate_limiter
+from captcha_utils import captcha_fields
 
 MAX_ACTIVE_CODES = 10
 
@@ -67,7 +68,8 @@ def auth(token_value):
 
 
 def register_payload(username, invite_code=None):
-    payload = {"username": username, "password": "Register_123456", "name": f"客户{username}", "email": f"{username}@example.com"}
+    payload = {"username": username, "password": "Register_123456", "name": f"客户{username}",
+               "email": f"{username}@example.com", **captcha_fields()}
     if invite_code is not None:
         payload["invite_code"] = invite_code
     return payload

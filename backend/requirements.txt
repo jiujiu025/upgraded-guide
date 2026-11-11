@@ -11,3 +11,5 @@ psycopg[binary]==3.3.6
 redis==6.4.0
 cryptography==50.0.0
 httpx==0.28.1
+segno==1.6.1
+PyYAML==6.0.2

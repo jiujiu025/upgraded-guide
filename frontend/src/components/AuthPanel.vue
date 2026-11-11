@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { clearSession, session } from '../api/session'
 import { getAuthMe, getCustomerMe, getInviteCodeCheck, login, logout as endSession, register } from '../api'
 import BrandLogo from './BrandLogo.vue'
+import ImageCaptcha from './ImageCaptcha.vue'
 
 const props = defineProps({ portal: { type: String, default: 'customer' } })
 const route = useRoute()
@@ -30,6 +31,8 @@ onMounted(async () => {
 const show = ref(false)
 const busy = ref(false)
 const error = ref('')
+// 图形验证码：后端强制校验，前端只负责把 token 与选中的格子原样交回去。
+const captchaRef = ref(null)
 const portalCopy = computed(() => ({
   customer: { eyebrow: 'CUSTOMER PORTAL', headline: '把每一次连接，', highlight: '留在自己的业务里。', description: '登录玖玖IP客户中心，查看订单、线路交付和订阅信息。', title: '欢迎回来', hint: '使用客户账号登录客户中心。' },
   admin: { eyebrow: 'ADMIN CONSOLE', headline: '运营管理，', highlight: '从专属入口开始。', description: '管理员账号请通过此入口进入运营工作台。', title: '管理员登录', hint: '仅管理员和超级管理员账号可进入。' },
@@ -95,6 +98,8 @@ function validateRegister() {
 async function submitRegister() {
   const validationError = validateRegister()
   if (validationError) { error.value = validationError; return }
+  const captcha = captchaRef.value?.answer()
+  if (!captcha) { error.value = '请先点选图片完成安全验证'; return }
   error.value = ''
   busy.value = true
   try {
@@ -105,11 +110,15 @@ async function submitRegister() {
       email: registerForm.email.trim().toLowerCase(),
       phone: registerForm.phone.trim() || null,
       invite_code: inviteCode.value.trim().toUpperCase() || null,
+      captcha_token: captcha.token,
+      captcha_selection: captcha.selection,
     })
     await establishCustomerSession()
   } catch (requestError) {
     clearSession()
     error.value = requestError.userMessage || requestError.message || '注册失败，请检查填写内容后重试'
+    // 验证码是一次性的：这道题在服务端已经用掉或作废了，换一题再试。
+    captchaRef.value?.refresh()
   } finally { busy.value = false }
 }
 </script>
@@ -140,6 +149,9 @@ async function submitRegister() {
           <p v-else-if="inviteChecked && inviteCode" class="invite-hint invite-hint-muted">邀请码已失效，仍可正常注册，稍后由管理员为您分配服务人员。</p>
           <label class="field full-field"><span>密码</span><div class="input-wrap"><LockKeyhole :size="17" /><input v-model="registerForm.password" :type="show ? 'text' : 'password'" autocomplete="new-password" maxlength="128" placeholder="至少 10 位，包含四类字符" required /><button type="button" class="input-action" :aria-label="show ? '隐藏密码' : '显示密码'" @click="show = !show"><EyeOff v-if="show" :size="16" /><Eye v-else :size="16" /></button></div></label>
           <label class="field full-field"><span>确认密码</span><div class="input-wrap"><LockKeyhole :size="17" /><input v-model="registerForm.confirmPassword" :type="show ? 'text' : 'password'" autocomplete="new-password" maxlength="128" placeholder="再次输入密码" required /></div></label>
+          <div class="captcha-field">
+            <ImageCaptcha ref="captchaRef" />
+          </div>
         </div>
         <p class="password-hint">密码须包含大写字母、小写字母、数字和特殊字符。</p>
         <p v-if="error" class="form-error" role="alert">{{ error }}</p>
@@ -161,6 +173,7 @@ async function submitRegister() {
 <style scoped>
 .register-card { width: 100%; }
 .register-grid .field, .input-wrap { min-width: 0; }
+.captcha-field { grid-column: 1 / -1; margin-top: 4px; }
 .input-wrap input { min-height: 0; padding: 0; }
 .recovery-link { justify-self: end; color: #397e73; font-size: 12px; }
 .invite-hint { margin: 10px 0 0; font-size: 12px; color: #2f7a6d; }

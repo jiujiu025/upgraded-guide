@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # 公开只读接口（产品列表、算价预览）的每 IP 每分钟上限：这两个口不需要登录，
     # 不设限就等于把算价逻辑开放给任何人刷。
     public_rate_limit: int = 60
+    # 注册图形验证码的出题接口每 IP 每分钟上限。一道题 180 秒有效，正常客户点几下
+    # 刷新到不了 30 次；这个口不设限等于免费送题库给脚本。
+    captcha_rate_limit: int = 30
     # 资源池路由的最低毛利率（百分比）：供应商成本超过客户价 ×(1-该值) 时不自动采购，
     # 转人工并告警。先做成配置项，路由上线后改为后台可改的运行时设置。
     min_order_margin_percent: int = 20
@@ -129,6 +132,8 @@ class Settings(BaseSettings):
             raise ValueError("线路到期宽限小时数必须在 0 到 720 之间")
         if not 1 <= self.public_rate_limit <= 6000:
             raise ValueError("公开接口限流必须在每分钟 1 到 6000 次之间")
+        if not 1 <= self.captcha_rate_limit <= 600:
+            raise ValueError("验证码出题限流必须在每分钟 1 到 600 次之间")
         if not 0 <= self.max_order_discount_percent <= 90:
             raise ValueError("代客下单最大折扣必须在 0 到 90% 之间")
         self._parse_frontend_origins()

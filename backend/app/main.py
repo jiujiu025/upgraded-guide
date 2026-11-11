@@ -14,6 +14,7 @@ from app.api.task_admin_routes import router as task_admin_router
 from app.api.outreach_routes import router as outreach_router
 from app.api.finance_export_routes import router as finance_export_router
 from app.api.notification_channel_routes import router as notification_channel_router
+from app.api.subscription_routes import router as subscription_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
 from app.core.request_logging import RequestLoggingMiddleware
@@ -62,6 +63,8 @@ app.include_router(task_admin_router, prefix="/api")
 app.include_router(outreach_router, prefix="/api")
 app.include_router(finance_export_router, prefix="/api")
 app.include_router(notification_channel_router, prefix="/api")
+# 客户订阅：Clash / v2rayN / 小火箭 直接拉取，靠 token 鉴权，不走登录态
+app.include_router(subscription_router, prefix="/api")
 
 
 @app.get("/healthz")

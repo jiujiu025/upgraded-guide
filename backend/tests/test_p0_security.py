@@ -18,6 +18,7 @@ from app.models.base import utcnow
 from app.services.health_service import check_node
 from app.services.order_service import claim_delivery_slot
 from app.services.registration_service import registration_rate_limiter
+from captcha_utils import captcha_fields
 
 
 @pytest.fixture()
@@ -426,6 +427,7 @@ def register_payload(username: str) -> dict:
         "name": f"注册客户 {username}",
         "email": f"{username}@example.com",
         "phone": "13800000000",
+        **captcha_fields(),
     }
 
 

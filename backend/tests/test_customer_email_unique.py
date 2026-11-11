@@ -15,6 +15,7 @@ from app.main import app
 from app.models import Customer, User
 from app.models.base import Base
 from app.services.session_service import create_session
+from captcha_utils import captcha_fields
 
 
 @pytest.fixture()
@@ -58,7 +59,7 @@ def test_create_customer_rejects_duplicate_email(api):
 def test_registration_rejects_duplicate_email(api):
     response = api["client"].post("/api/public/register", json={
         "username": "newuser01", "password": "StrongPass_123", "name": "注册客户",
-        "email": "TAKEN@test.com", "phone": None,
+        "email": "TAKEN@test.com", "phone": None, **captcha_fields(),
     })
     assert response.status_code == 400
     assert "邮箱" in response.json()["detail"]
