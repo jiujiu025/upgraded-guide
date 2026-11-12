@@ -14,11 +14,14 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/opt/99ipxin}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 ENV_FILE="${ENV_FILE:-.env.production}"
-HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:18081/readyz}"
+WEB_HEALTH_URL="${WEB_HEALTH_URL:-http://127.0.0.1:18081/healthz}"
 LOG_DIR="${LOG_DIR:-$PROJECT_DIR/deploy/logs}"
 STATE_FILE="$LOG_DIR/last-success-ref"
 HEALTH_RETRIES="${HEALTH_RETRIES:-40}"
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-3}"
+# 这台服务器的容器 DNS 访问不了公网，compose bake 构建会 EAI_AGAIN。
+# 默认用 docker build --network=host；换到网络正常的环境可设 BUILD_NETWORK_HOST=0。
+BUILD_NETWORK_HOST="${BUILD_NETWORK_HOST:-1}"
 
 cd "$PROJECT_DIR"
 mkdir -p "$LOG_DIR"
