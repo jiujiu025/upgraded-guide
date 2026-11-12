@@ -1,0 +1,21 @@
+[Unit]
+Description=99ipxin PostgreSQL 每日备份
+Documentation=file:///opt/99ipxin/docs/数据库定时备份与恢复演练.md
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+WorkingDirectory=/opt/99ipxin
+Environment=TMPDIR=/secure/99ipxin-backups/tmp
+ExecStartPre=/bin/mkdir -p /secure/99ipxin-backups -m 0700
+ExecStartPre=/bin/mkdir -p /secure/99ipxin-backups/tmp -m 0700
+ExecStart=/usr/bin/python3 /opt/99ipxin/scripts/backup_postgres.py --env-file /opt/99ipxin/.env.production --compose-file /opt/99ipxin/docker-compose.prod.yml --backup-dir /secure/99ipxin-backups --keep-daily 14 --keep-weekly 8
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal

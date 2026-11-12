@@ -195,6 +195,12 @@ export const confirmAdminOrder = (id) => client.post(`/admin/orders/${id}/confir
 export const deliverAdminOrder = (id, payload) => client.post(`/admin/orders/${id}/deliver`, payload)
 // 人工重新发起自动开通：已收款、没有成功采购记录时才会真的去上游下单
 export const retryAdminProcurement = (id) => client.post(`/admin/orders/${id}/retry-procurement`)
+// 采购记录（只读）：不含上游账号密码，重试仍走上面的订单接口
+export const getProcurements = (params = {}) => client.get('/admin/procurements', { params })
+export const getProcurement = (id) => client.get(`/admin/procurements/${id}`)
+// 全局操作审计（只读）：按人/动作/资源/时间回溯
+export const getAuditLogs = (params = {}) => client.get('/admin/audit-logs', { params })
+export const getAuditSummary = (days = 7) => client.get('/admin/audit-logs/summary', { params: { days } })
 export const cancelAdminOrder = (id) => client.post(`/admin/orders/${id}/cancel`)
 export const completeAdminRenewal = (id) => client.post(`/admin/orders/${id}/complete-renewal`, { manually_confirmed: true })
 export const getAdminCatalogProducts = () => client.get('/products')
@@ -225,6 +231,7 @@ export const publishCatalogSnapshot = (payload) => client.post('/admin/suppliers
 export const withdrawCatalogPublication = (id) => client.post(`/admin/suppliers/publications/${id}/withdraw`)
 export const syncSupplierProducts = () => client.post('/admin/suppliers/sync/products')
 export const syncSupplierCatalog = () => client.post('/admin/suppliers/sync/catalog')
+export const importSellableCatalog = (payload) => client.post('/admin/suppliers/catalog/import-sellable', payload)
 export const syncSupplierCountries = (productTypeId = 2) => client.post(`/admin/suppliers/sync/countries?product_type_id=${encodeURIComponent(productTypeId)}`)
 export const syncSupplierCities = (productTypeId = 2) => client.post(`/admin/suppliers/sync/cities?product_type_id=${encodeURIComponent(productTypeId)}`)
 // 资源池1：按城市拉真实 IP 段，合并进客户可选城市清单（原生=3）

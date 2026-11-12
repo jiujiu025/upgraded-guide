@@ -11,6 +11,9 @@ RUN groupadd --system app && useradd --system --gid app --home-dir /app app
 COPY --chown=app:app alembic.ini ./
 COPY --chown=app:app alembic ./alembic
 COPY --chown=app:app app ./app
+# 运维脚本（支付自检、通道体检）要能在容器里直接跑：生产只装了运行时依赖，
+# 宿主机再搭一套 python 环境反而更容易把密钥拷来拷去。
+COPY --chown=app:app scripts ./scripts
 
 USER app
 EXPOSE 8000

@@ -660,6 +660,9 @@ async def suisui_payment_notify(request: Request, response: Response, db: Sessio
         else:
             _record_paid_order(db, item, customer, None)
             paid_ok = True
+            # 在线支付回调没有登录用户，按系统动作记一条到账审计
+            write_audit(db, None, "payment_notify", "order", order.id,
+                        f"在线支付到账；金额分={item.amount_cents}; 平台单号={item.platform_trade_no or '无'}")
     db.commit()
     # 在线支付到账后也要自动开通：回调不能等上游（支付平台有超时重试），
     # 这里起一个后台线程去采购，失败由 procurements 记下来转人工。

@@ -26,6 +26,7 @@ from app.models import (
 )
 from app.services.order_service import claim_delivery_slot, notify_order_parties
 from app.services.settings_service import auto_procurement_enabled
+from app.services.audit_service import write_audit
 from app.services.subscription_service import issue_token
 from app.services.supplier_service import ensure_supplier
 from app.suppliers.base import SupplierError
@@ -94,6 +95,8 @@ def _fail(db: Session, record: Procurement, code: str, message: str, customer: C
     record.status = "failed"
     record.error_code = code
     record.error_message = message[:500]
+    # 系统动作也要留痕：失败原因必须能在审计里查到，不能只躺在 procurements 表里
+    write_audit(db, None, "procure_fail", "order", order.id, f"采购失败：{code} {message[:200]}")
     db.commit()
     if customer is not None:
         notify_order_parties(
@@ -246,6 +249,8 @@ def auto_procure_order(db: Session, order: Order, *, trigger: str = "payment") -
 
     record.status = "succeeded"
     record.line_id = created[0] if created else None
+    write_audit(db, None, "procure_success", "order", order.id,
+                f"上游单号={result.order_number}; 线路={','.join(str(item) for item in created)}")
     db.commit()
 
     if customer is not None:

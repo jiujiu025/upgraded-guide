@@ -1,0 +1,13 @@
+[Unit]
+Description=99ipxin PostgreSQL 每日备份定时器（03:30 Asia/Shanghai）
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+# 服务器停机错过的那次，开机后补跑
+Persistent=true
+# 避免和其他主机同一秒拍 DB
+RandomizedDelaySec=300
+Unit=99ipxin-pgbackup.service
+
+[Install]
+WantedBy=timers.target

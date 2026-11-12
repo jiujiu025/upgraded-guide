@@ -1,0 +1,10 @@
+[Unit]
+Description=99ipxin 备份新鲜度巡检（最近一次成功备份是否超过 30 小时）
+Requires=99ipxin-pgbackup.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /opt/99ipxin/scripts/backup_postgres.py --check-only --backup-dir /secure/99ipxin-backups --max-age-hours 30
+StandardOutput=journal
+StandardError=journal

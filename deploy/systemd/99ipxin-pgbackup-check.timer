@@ -1,0 +1,10 @@
+[Unit]
+Description=99ipxin 备份新鲜度巡检定时器（每天 09:00 Asia/Shanghai）
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 Asia/Shanghai
+Persistent=true
+Unit=99ipxin-pgbackup-check.service
+
+[Install]
+WantedBy=timers.target

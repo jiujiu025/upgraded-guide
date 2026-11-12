@@ -163,7 +163,25 @@ server {
 
 ## 备份与恢复
 
-首次迁移是空库；以后每次升级前先记录 `alembic current`，备份本项目 PostgreSQL，并核对备份退出码和非零文件大小。不要备份其他项目数据库。以下命令在服务器 Linux shell 运行，备份文件名由运维人员指定；`umask 077` 保证新文件不被其他用户读取。备份应加密并转移到受控的异机位置，制定保留期和恢复演练计划。
+首次迁移是空库；以后每次升级前先记录 `alembic current`，备份本项目 PostgreSQL，并核对备份退出码、非零文件大小和校验结果。不要备份其他项目数据库。
+
+自动备份由 `scripts/backup_postgres.py` 承担：每天 03:30 导出 `pg_dump -Fc`，导出后立刻用 `pg_restore --list` 校验核心表，写 sha256，再按「近 14 天全留 + 更早按周 8 份」裁剪；每天 09:00 还有一次新鲜度巡检。失败时保留现场、不裁剪旧备份。部署、监控、故障处置与恢复演练的完整步骤见 `docs/数据库定时备份与恢复演练.md`，本手册只保留日常核对命令。
+
+```sh
+systemctl list-timers | grep 99ipxin                            # 两个定时器都在
+python3 /opt/99ipxin/scripts/backup_postgres.py --check-only    # 退出码 0 才算有新鲜备份
+ls -l /secure/99ipxin-backups | tail -5
+```
+
+升级前补一份「升级前」备份（同样走脚本，只是立即执行）：
+
+```sh
+umask 077
+python3 /opt/99ipxin/scripts/backup_postgres.py \
+  --env-file /opt/99ipxin/.env.production --backup-dir /secure/99ipxin-backups
+```
+
+脚本不可用时（例如服务器 Python 异常）退回手工命令，并当天补一次恢复演练：
 
 ```sh
 umask 077

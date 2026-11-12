@@ -1,6 +1,6 @@
 import {
-  Activity, Bell, Box, CircleDollarSign, Database, MessageSquare, PackageSearch, Tags,
-  ShieldCheck, Timer, UserCog, Users,
+  Activity, Bell, Box, CircleDollarSign, Database, MessageSquare, PackageSearch, ReceiptText, Tags,
+  ScrollText, ShieldCheck, Timer, UserCog, Users,
 } from 'lucide-vue-next'
 
 export function getAdminNavigation(role) {
@@ -12,9 +12,11 @@ export function getAdminNavigation(role) {
     ['商品与价格', '/admin/catalog', Tags],
     ['线路健康', '/admin/health', Activity],
     ['定时任务', '/admin/tasks', Timer],
+    ['操作审计', '/admin/audit', ScrollText],
     ['通知渠道', '/admin/notifications', Bell],
     ['全量会话', '/admin/inbox', MessageSquare],
     ['资源池', '/admin/resource-pool', Database],
+    ['采购记录', '/admin/procurements', ReceiptText],
     ['安全中心', '/admin/security', ShieldCheck],
     ...(role === 'super_admin' ? [['销售管理', '/admin/sales-management', UserCog]] : []),
   ]

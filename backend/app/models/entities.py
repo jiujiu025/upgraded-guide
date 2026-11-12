@@ -268,7 +268,9 @@ class HealthIncident(TimestampMixin, Base):
 
 class AuditLog(TimestampMixin, Base):
     __tablename__ = "audit_logs"
-    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # 系统动作（支付回调、定时任务、自动采购）没有操作人，actor_id 允许为空；
+    # 查询侧用 outer join，这类记录显示为「系统」。审计里最需要回溯的恰恰是它们。
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     action: Mapped[str] = mapped_column(String(80), index=True)
     resource_type: Mapped[str] = mapped_column(String(50))
     resource_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
