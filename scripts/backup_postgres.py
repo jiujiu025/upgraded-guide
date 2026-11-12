@@ -393,7 +393,7 @@ def run_backup(args: argparse.Namespace) -> BackupResult:
             listed = _run(pg_restore_list_command(
                 compose_file=args.compose_file, env_file=args.env_file, project=args.project,
                 service=args.service,
-            ) + ["-"],  # 从 stdin 读 dump，避免容器需要看到宿主机文件
+            ),  # 不带文件名时 pg_restore 从 stdin 读；传 "-" 会被当成普通文件名
                 stdin_path=dump_path, timeout=args.timeout)
             if listed.returncode != 0:
                 raise BackupError(

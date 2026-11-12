@@ -87,6 +87,10 @@ build_and_start() {
 }
 
 backup_before_migrate() {
+  if [[ "${SKIP_BACKUP:-0}" == "1" ]]; then
+    log "WARN: SKIP_BACKUP=1，跳过发布前备份（仅限已手工备份的首次引导）"
+    return 0
+  fi
   if [[ -x scripts/backup_postgres.py ]]; then
     log "发布前备份"
     python3 scripts/backup_postgres.py || die "发布前备份失败；已停止发布（不要在没有备份的情况下迁移）"
@@ -137,15 +141,19 @@ fi
 PREVIOUS_REF="$(git rev-parse HEAD)"
 log "当前版本 $(git rev-parse --short HEAD)"
 
-git fetch --tags --prune origin
+# 服务器上的 origin 只配了 main 的 refspec；不显式拉全部分支，
+# 部署 codex 分支时 origin/<branch> 永远停在旧提交。
+git fetch --tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
 git cat-file -e "${TARGET_REF}^{commit}" 2>/dev/null || die "目标版本不存在：$TARGET_REF"
-
-if [[ "$MODE" == "deploy" ]]; then
-  backup_before_migrate
-fi
 
 git checkout --detach "$TARGET_REF"
 log "已切到 $(git rev-parse --short HEAD)"
+
+# 备份必须在切到目标版本之后：备份脚本本身也是随版本发布的，
+# 首次部署时旧版本里还没有 scripts/backup_postgres.py。
+if [[ "$MODE" == "deploy" ]]; then
+  backup_before_migrate
+fi
 
 if ! build_and_start; then
   rollback_to "$PREVIOUS_REF" "构建/迁移/启动失败" || exit 1
