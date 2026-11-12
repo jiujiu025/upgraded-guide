@@ -91,14 +91,12 @@ jobs:
           echo "发布目标：$ref"
 
       - name: 上传发布脚本
-        env:
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           set -euo pipefail
-          remote_path="${DEPLOY_PATH:-/opt/99ipxin}"
-          ssh deploy-target "mkdir -p '$remote_path/deploy'"
-          scp deploy/auto-deploy.sh "deploy-target:$remote_path/deploy/auto-deploy.sh"
-          ssh deploy-target "chmod 700 '$remote_path/deploy/auto-deploy.sh'"
+          # 传到 /tmp 而不是仓库目录：仓库里的同名文件是受版本控制的，
+          # 覆盖它会让发布脚本的“工作区必须干净”检查直接失败。
+          scp deploy/auto-deploy.sh "deploy-target:/tmp/99ipxin-auto-deploy.sh"
+          ssh deploy-target "sed -i 's/\r$//' /tmp/99ipxin-auto-deploy.sh && chmod 700 /tmp/99ipxin-auto-deploy.sh"
 
       - name: 执行发布（备份 → 构建 → 迁移 → 重启 → 健康检查 → 失败回滚）
         env:
@@ -107,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           remote_path="${DEPLOY_PATH:-/opt/99ipxin}"
-          ssh deploy-target "cd '$remote_path' && PROJECT_DIR='$remote_path' ./deploy/auto-deploy.sh '$TARGET_REF'"
+          ssh deploy-target "cd '$remote_path' && PROJECT_DIR='$remote_path' bash /tmp/99ipxin-auto-deploy.sh '$TARGET_REF'"
 
       - name: 发布失败时给出回滚命令
         if: failure()
