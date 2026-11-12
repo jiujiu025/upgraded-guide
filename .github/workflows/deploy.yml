@@ -1,0 +1,117 @@
+name: Deploy production
+
+# 自动部署：main 或当前生产分支 codex/admin-layout-finance-deploy 有新提交时发布；
+# 也可以在 Actions 页面手动指定 branch / tag / commit。
+# 生产服务器实际部署的是 codex 分支，合并到 main 之前先保留两条触发线；
+# 以后统一走 main 时，把 codex 分支从 triggers 里删掉即可。
+on:
+  push:
+    branches: [main, codex/admin-layout-finance-deploy]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 要发布的 branch / tag / commit（留空则用当前提交）
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: 发布到生产服务器
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 检查部署密钥是否齐全
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::缺少 secret $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "在仓库 Settings → Secrets and variables → Actions 里补齐后再试。"
+            exit 1
+          fi
+
+      - name: 配置 SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST_KEY: ${{ secrets.DEPLOY_HOST_KEY }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          port="${DEPLOY_PORT:-22}"
+          if [ -n "${DEPLOY_HOST_KEY:-}" ]; then
+            printf '%s\n' "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$port" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          fi
+          cat > ~/.ssh/config <<EOF
+          Host deploy-target
+            HostName $DEPLOY_HOST
+            User ${{ secrets.DEPLOY_USER }}
+            Port $port
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: 目标版本
+        id: target
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          ref="${INPUT_REF:-$GITHUB_SHA}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "发布目标：$ref"
+
+      - name: 上传发布脚本
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          remote_path="${DEPLOY_PATH:-/opt/99ipxin}"
+          ssh deploy-target "mkdir -p '$remote_path/deploy'"
+          scp deploy/auto-deploy.sh "deploy-target:$remote_path/deploy/auto-deploy.sh"
+          ssh deploy-target "chmod 700 '$remote_path/deploy/auto-deploy.sh'"
+
+      - name: 执行发布（备份 → 构建 → 迁移 → 重启 → 健康检查 → 失败回滚）
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          TARGET_REF: ${{ steps.target.outputs.ref }}
+        run: |
+          set -euo pipefail
+          remote_path="${DEPLOY_PATH:-/opt/99ipxin}"
+          ssh deploy-target "cd '$remote_path' && PROJECT_DIR='$remote_path' ./deploy/auto-deploy.sh '$TARGET_REF'"
+
+      - name: 发布失败时给出回滚命令
+        if: failure()
+        run: |
+          echo "::warning::发布失败。脚本已尝试自动回滚；如仍失败，在服务器执行："
+          echo "  cd ${DEPLOY_PATH:-/opt/99ipxin} && ./deploy/auto-deploy.sh --rollback"
+          echo "若迁移已改表且回滚代码不兼容，按 docs/数据库定时备份与恢复演练.md 用发布前备份恢复。"
