@@ -9,6 +9,8 @@
     python scripts/backfill_product_pricing.py --dry-run
     python scripts/backfill_product_pricing.py --apply
     python scripts/backfill_product_pricing.py --apply --normalize-periods
+    python scripts/backfill_product_pricing.py --verify            # 只读复核，有差异 exit 1
+    python scripts/backfill_product_pricing.py --apply --verify    # 写完后立刻复核
 """
 import argparse
 import sys
@@ -81,12 +83,26 @@ def plan_period_normalization(db) -> list[tuple[RetailPriceRule, Decimal]]:
     return changes
 
 
+def collect_diffs(db, *, normalize_periods: bool) -> dict[str, int]:
+    """复核当前库与目标口径的差距。只在 --verify 时调用。"""
+    overrides, _skipped = plan_categories(db)
+    price_changes = plan_display_prices(db, {})
+    period_changes = plan_period_normalization(db) if normalize_periods else []
+    return {
+        "uncategorized": len(overrides),
+        "display_price": len(price_changes),
+        "period_rows": len(period_changes),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="回填商品分类与展示价")
     parser.add_argument("--apply", action="store_true", help="真正写库；不加则只预览")
     parser.add_argument("--dry-run", action="store_true", help="只预览（默认行为，显式声明用）")
     parser.add_argument("--normalize-periods", action="store_true",
                         help="同时把价目表长周期旧价刷成线性值（休眠数据）")
+    parser.add_argument("--verify", action="store_true",
+                        help="复核：分类/展示价/长周期行仍有差异时退出码 1")
     args = parser.parse_args()
     print(f"=== 定价数据回填（{'APPLY' if args.apply else 'DRY-RUN'}）===")
 
@@ -118,6 +134,13 @@ def main() -> int:
 
         if not args.apply:
             print("DRY-RUN 未写库；确认无误后加 --apply 执行。")
+            if args.verify:
+                diffs = collect_diffs(db, normalize_periods=args.normalize_periods)
+                print(f"[复核] {diffs}")
+                if any(diffs.values()):
+                    print("复核未通过：库内仍有差异。")
+                    return 1
+                print("复核通过：分类、展示价与长周期行均已收敛。")
             return 0
 
         # 1) 先落分类（含没有价格变化、但需要归类的商品）
@@ -133,6 +156,14 @@ def main() -> int:
             rule.unit_price = expected
         db.commit()
         print("已提交。")
+
+        if args.verify:
+            diffs = collect_diffs(db, normalize_periods=args.normalize_periods)
+            print(f"[复核] {diffs}")
+            if any(diffs.values()):
+                print("复核未通过：库内仍有差异，请检查是否有并发改价。")
+                return 1
+            print("复核通过：分类、展示价与长周期行均已收敛。")
         return 0
     finally:
         db.close()

@@ -112,7 +112,7 @@ def test_flatten_inventory_ignores_garbage():
 
 
 def test_sync_985_writes_cities_and_segments(db):
-    """985 同步：能匹配别名的城市启用，匹配不上的停用待归属，号段合并进已有的行。"""
+    """985 同步：城市与号段落库，但一律不开放（采购链路未接入）。"""
     from app.services.city_catalog_sync import sync_city_segments_985
     from app.models import CatalogCityOption
 
@@ -132,6 +132,8 @@ def test_sync_985_writes_cities_and_segments(db):
     assert result.cities_seen == 2
     assert result.segments_saved == 2
     lax = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_code == "LAX"))
-    assert lax is not None and lax.is_enabled is True and "1.1.1" in lax.ip_segments
+    # 985 目前只有只读接口，采购走池 1；开放给客户就会选到“下单必然失败”的段。
+    assert lax is not None and lax.is_enabled is False and "1.1.1" in lax.ip_segments
+    assert "未接入" in (lax.note or "")
     pending = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_name == "Nowhereville"))
     assert pending is not None and pending.is_enabled is False

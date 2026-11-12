@@ -19,9 +19,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import CatalogCityOption
-from app.services.city_option_service import MAX_SEGMENTS, segments_text
+from app.services.city_option_service import MAX_SEGMENTS, POOL_ONE_SOURCE, segments_text
 
-SUPPLIER_SOURCE = "supplier_global_proxy"
+SUPPLIER_SOURCE = POOL_ONE_SOURCE
 CATEGORY = "static_residential"
 # ip_segments 是 String(500)，按实际长度截断，别让同步把行写爆。
 MAX_SEGMENT_TEXT_LENGTH = 480
@@ -60,6 +60,7 @@ class CitySegmentSyncResult:
     matched: int = 0
     created_pending: int = 0
     segments_saved: int = 0
+    disabled_stale: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -69,6 +70,7 @@ class CitySegmentSyncResult:
             "matched": self.matched,
             "created_pending": self.created_pending,
             "segments_saved": self.segments_saved,
+            "disabled_stale": self.disabled_stale,
             "errors": self.errors[:20],
         }
 
@@ -122,6 +124,7 @@ def sync_city_segments(
         except Exception as exc:  # 单个国家失败不影响其它国家
             result.errors.append(f"{code}: {type(exc).__name__}")
             continue
+        seen_codes: set[str] = set()
         for city in cities:
             name = (city.city_name or "").strip()
             if not name:
@@ -137,8 +140,9 @@ def sync_city_segments(
                     if len(batch) < segment_page_size:
                         break
             except Exception as exc:
+                # 号段拉取失败不等于城市不可买：城市仍可由上游按城市分配，
+                # 这里保留城市、只记错误，避免把“暂时查不到段”误判成“已下架”。
                 result.errors.append(f"{code}/{name}: {type(exc).__name__}")
-                continue
 
             canonical = CITY_ALIASES.get(name.lower())
             option = None
@@ -180,6 +184,20 @@ def sync_city_segments(
             if merged != option.ip_segments:
                 option.ip_segments = merged
             result.segments_saved += count
+            seen_codes.add(option.city_code.upper())
+
+        # 上游本次没返回的城市 = 已下架。只处理池 1 自己写的行：
+        # 手工清单与 985 的行不归这里管，不能顺手改掉。
+        stale_rows = db.scalars(select(CatalogCityOption).where(
+            CatalogCityOption.resource_category == CATEGORY,
+            CatalogCityOption.country_code == code,
+            CatalogCityOption.data_source == SUPPLIER_SOURCE,
+        )).all()
+        for row in stale_rows:
+            if row.city_code.upper() not in seen_codes and row.is_enabled:
+                row.is_enabled = False
+                row.note = "上游本次同步未返回该城市，已自动下架；确认恢复后手动启用"
+                result.disabled_stale += 1
         db.flush()
     return result
 
@@ -247,9 +265,13 @@ def sync_city_segments_985(
                 city_code=city_code,
                 city_name=city_name,
                 ip_segments="",
-                is_enabled=bool(canonical),
+                # 985 目前只有只读接口，采购链路走的是池 1。这里同步进来的城市与号段
+                # 只能当预研数据：一旦对客户开放，客户就会选到一个"下单必然失败"的段。
+                # 等 985 下单接入并跑通沙箱后，由运营在后台显式启用。
+                is_enabled=False,
                 sort_order=500,
-                note=None if canonical else "待归属：985 城市名，确认后启用",
+                note=("985 城市：采购链路未接入，暂不开放" if canonical
+                      else "待归属：985 城市名，确认后启用"),
                 data_source="supplier_985",
             )
             db.add(option)
@@ -259,6 +281,16 @@ def sync_city_segments_985(
             result.matched += 1
             if option.data_source == "manual":
                 continue
+            if option.data_source != "supplier_985":
+                # 这一行属于别的池（池 1 / 手工）。两个池的段不能混进同一行：
+                # 客户按这一行选段，采购却按池 1 下单，买不到就会变成退款。
+                # 双池并存的正确做法是按池分行存，见
+                # docs/城市号段来源与多池归属方案.md。
+                continue
+            if option.is_enabled:
+                # 早期版本把匹配上别名的 985 城市直接开了；现在纠正回来。
+                option.is_enabled = False
+                option.note = option.note or "985 城市：采购链路未接入，暂不开放"
 
         if segments:
             merged, saved = _merge_segments(option.ip_segments or "", segments)

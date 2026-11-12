@@ -201,6 +201,7 @@ GET /api/catalog/cities?product_id=2
 
 ## 7. 后续（接上游后）
 
+0. **多池归属先定方向**：见 `docs/城市号段来源与多池归属方案.md`。985 只有只读接口前，同步进来的城市与号段一律不开放（`sync_city_segments_985` 已加护栏）；
 1. `supplier_sync` 增加 985 城市/号段实现，写入 `catalog_city_options`（`data_source=supplier_985`）；
 2. 库存进 `stock` 字段后，选购页可显示「该城市剩余 N 条」；
 3. 采购单里带上 `requested_city_*` / `requested_ip_segment`，并在采购失败时按段/城市给出具体原因；

@@ -1,5 +1,6 @@
 from collections.abc import Generator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -11,32 +12,76 @@ from app.api.deps import require_roles
 from app.core.config import get_settings
 from app.db import get_db
 from app.models import (
-    CatalogPublication, ProductSupplyRule, ResourcePool, ResourcePoolSupplier, Supplier,
-    SupplierInventorySnapshot, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion,
-    SupplierSyncRun, User,
+    CatalogPublication,
+    ProductSupplyRule,
+    ResourcePool,
+    ResourcePoolSupplier,
+    Supplier,
+    SupplierInventorySnapshot,
+    SupplierIpSegmentSnapshot,
+    SupplierProduct,
+    SupplierQuote,
+    SupplierRegion,
+    SupplierSyncRun,
+    User,
 )
 from app.services.audit_service import write_audit
-from app.services.catalog_publication_service import PublicationError, publish_catalog, withdraw_catalog
-from app.services.city_catalog_sync import sync_city_segments, sync_city_segments_985
-from app.services.supplier_credentials import (
-    SupplierCredentialError, clear_api_key, credential_encryption_ready, credential_source,
-    get_supplier, has_configured_api_key, save_api_key, supplier_key_status,
+from app.services.catalog_import_service import (
+    CatalogImportError,
+    import_sellable_catalog,
 )
+from app.services.catalog_publication_service import (
+    PublicationError,
+    publish_catalog,
+    withdraw_catalog,
+)
+from app.services.city_catalog_sync import sync_city_segments, sync_city_segments_985
 from app.services.settings_service import AUTO_PROCUREMENT_KEY, get_flag, set_flag
+from app.services.supplier_credentials import (
+    SupplierCredentialError,
+    clear_api_key,
+    credential_encryption_ready,
+    credential_source,
+    get_supplier,
+    has_configured_api_key,
+    save_api_key,
+    supplier_key_status,
+)
 from app.services.supplier_service import (
-    CITIES_ENDPOINT, COUNTRIES_ENDPOINT, INVENTORY_CHECK_ENDPOINT, begin_sync_run,
-    configure_manual_supply_rule, ensure_pool_one, finish_sync_run, map_supplier_product,
-    map_supplier_region, RESOURCE_CATEGORY_CODES, save_inventory, save_ip_segment_snapshots, save_quotes,
-    sync_products, sync_regions, sync_supplier_catalog,
+    CITIES_ENDPOINT,
+    COUNTRIES_ENDPOINT,
+    INVENTORY_CHECK_ENDPOINT,
+    RESOURCE_CATEGORY_CODES,
+    begin_sync_run,
+    configure_manual_supply_rule,
+    ensure_pool_one,
+    finish_sync_run,
+    map_supplier_product,
+    map_supplier_region,
+    save_inventory,
+    save_ip_segment_snapshots,
+    save_quotes,
+    sync_products,
+    sync_regions,
+    sync_supplier_catalog,
 )
 from app.suppliers.base import (
-    InventoryItem, ProcurementDisabledError, SupplierBusinessError, SupplierCapabilityUnsupportedError,
-    SupplierConfigurationError, SupplierError, SupplierInvalidResponseError, SupplierRateLimitError,
-    SupplierTimeoutError, reject_procurement,
+    InventoryItem,
+    ProcurementDisabledError,
+    SupplierBusinessError,
+    SupplierCapabilityUnsupportedError,
+    SupplierConfigurationError,
+    SupplierError,
+    SupplierInvalidResponseError,
+    SupplierRateLimitError,
+    SupplierTimeoutError,
+    reject_procurement,
 )
-from app.suppliers.factory import build_supplier_adapter
-from app.suppliers.global_proxy import NATIVE_PRODUCT_TYPE_ID, GlobalProxyReadOnlyAdapter
-from app.suppliers.factory import build_readonly_adapter
+from app.suppliers.factory import build_readonly_adapter, build_supplier_adapter
+from app.suppliers.global_proxy import (
+    NATIVE_PRODUCT_TYPE_ID,
+    GlobalProxyReadOnlyAdapter,
+)
 
 router = APIRouter(prefix="/admin/suppliers", tags=["供应商只读接入"])
 
@@ -97,6 +142,18 @@ class CatalogPublishIn(BaseModel):
     inventory_snapshot_id: int = Field(gt=0)
     quote_snapshot_id: int = Field(gt=0)
     price: float = Field(gt=0, allow_inf_nan=False)
+
+
+class CatalogImportIn(BaseModel):
+    """一键落成可售 SKU。默认 dry_run，先看差异再写库。"""
+    model_config = ConfigDict(extra="forbid")
+    supplier_product_ids: list[int] | None = None
+    default_monthly_price: Decimal | None = Field(default=None, gt=0)
+    country_monthly_prices: dict[str, Decimal] | None = None
+    overwrite_prices: bool = False
+    enable_supply_rules: bool = True
+    list_on_site: bool = True
+    dry_run: bool = True
 
 
 def get_global_proxy_adapter(db: Session = Depends(get_db)) -> Generator[GlobalProxyReadOnlyAdapter, None, None]:
@@ -279,7 +336,7 @@ def snapshot_state(
         return "query_failed"
     if not snapshot_at:
         return "not_synced"
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=ttl_minutes)
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=ttl_minutes)
     return "stale" if snapshot_at < cutoff else "fresh"
 
 
@@ -515,6 +572,47 @@ def sync_supplier_catalog_endpoint(
     )
     db.commit()
     return {**result, "stock_default": "out_of_stock", "procurement_enabled": False}
+
+
+@router.post("/catalog/import-sellable")
+def import_sellable_catalog_endpoint(
+    payload: CatalogImportIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    """按供应商国家目录一键生成「商品 + 月价 + 供给规则 + 官网上架」。
+
+    dry_run 默认开启：先返回将创建/更新多少，运营确认后传 dry_run=false 才写库。
+    已存在的月价默认不动，避免第二次点击把手工调过的价格覆盖回去。
+    """
+    try:
+        result = import_sellable_catalog(
+            db, user,
+            supplier_product_ids=payload.supplier_product_ids,
+            default_monthly_price=payload.default_monthly_price,
+            country_monthly_prices=payload.country_monthly_prices,
+            overwrite_prices=payload.overwrite_prices,
+            enable_supply_rules=payload.enable_supply_rules,
+            list_on_site=payload.list_on_site,
+            dry_run=payload.dry_run,
+        )
+        if payload.dry_run:
+            db.rollback()  # 预演不落任何写入（包括幂等创建的供应商/资源池）
+            return result.as_dict()
+        write_audit(
+            db, user, "import_sellable_catalog", "supplier_catalog",
+            detail=(f"国家={result.countries}; 新建商品={result.products_created}; 更新商品={result.products_updated}; "
+                    f"新建月价={result.prices_created}; 更新月价={result.prices_updated}; "
+                    f"启用供给规则={result.rules_enabled}; 上架={result.listings_listed}; 缺价跳过={len(result.skipped)}"),
+        )
+        db.commit()
+        return result.as_dict()
+    except CatalogImportError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.post("/sync/countries")

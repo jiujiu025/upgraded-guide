@@ -22,6 +22,9 @@ from sqlalchemy.orm import Session
 from app.models import CatalogCityOption, Product, Region
 
 AUTO_ASSIGN_LABEL = "自动分配（不指定城市）"
+# 采购只走资源池 1。城市清单里只有这个来源的行能保证“能选就能买”；
+# manual 是历史手工清单，985 目前只有只读接口。见 docs/城市号段来源与多池归属方案.md。
+POOL_ONE_SOURCE = "supplier_global_proxy"
 SEGMENT_SPLIT_PATTERN = re.compile(r"[,，;；\s]+")
 # 上游号段形如 ``1.1.1``（/24 的前三段），也允许 ``1.1.1.0/24`` 这类完整写法。
 SEGMENT_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.\-/]{1,30}$")
@@ -89,6 +92,21 @@ def options_of(db: Session, resource_category: str | None, country_code: str | N
     return list(db.scalars(query.order_by(CatalogCityOption.sort_order, CatalogCityOption.city_code)).all())
 
 
+def sellable_options_of(db: Session, resource_category: str | None, country_code: str | None) -> list[CatalogCityOption]:
+    """客户真正能选的城市：有池 1 同步数据时，只信池 1。
+
+    为什么不是简单按 ``is_enabled`` 过滤：手工清单可以被人为打开，985 的城市也曾经
+    被误开过；一旦池 1 有该国家的真实同步结果，就说明我们掌握了“上游实际卖什么”，
+    此时再让手工/别池的行混进来，客户就会选到一个采购必然失败的段。
+
+    没有池 1 数据的国家退回已启用清单（历史手工维护的国家仍可用），
+    这是兼容路径而不是保证：管理后台会明确标出哪些行还没被池 1 核对过。
+    """
+    rows = options_of(db, resource_category, country_code, enabled_only=True)
+    trusted = [row for row in rows if row.data_source == POOL_ONE_SOURCE]
+    return trusted or rows
+
+
 def option_view(option: CatalogCityOption) -> dict:
     return {
         "id": option.id,
@@ -109,7 +127,7 @@ def customer_options(db: Session, product: Product) -> dict:
     """客户下单页用的城市清单。没配城市时 supported=False，前端只显示"自动分配"。"""
     region = db.get(Region, product.region_id) if product.region_id else None
     country_code = (region.country_code or "").upper() if region else ""
-    items = options_of(db, product.resource_category, country_code) if region else []
+    items = sellable_options_of(db, product.resource_category, country_code) if region else []
     return {
         "supported": bool(items),
         "resource_category": product.resource_category,
@@ -153,7 +171,7 @@ def resolve_choice(db: Session, product: Product, region: Region,
         return CityChoice()
 
     country_code = (region.country_code or "").upper()
-    options = options_of(db, product.resource_category, country_code)
+    options = sellable_options_of(db, product.resource_category, country_code)
     if not options:
         raise CitySelectionError("该地区暂不支持指定城市，请选择自动分配")
 

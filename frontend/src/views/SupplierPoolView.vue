@@ -15,7 +15,7 @@ import {
   getSupplierRules, getSupplierSyncRuns, setAutoProcurement, syncSupplier985,
   checkSupplierInventory, deleteSupplierCredential, deleteSupplierCredentialFor, mapSupplierProduct,
   mapSupplierRegion, publishCatalogSnapshot, saveSupplierCredential, saveSupplierCredentialFor, saveSupplierRule,
-  syncSupplierCities, syncSupplierCatalog, syncSupplierCitySegments, syncSupplierCountries, syncSupplierInventory,
+  importSellableCatalog, syncSupplierCities, syncSupplierCatalog, syncSupplierCitySegments, syncSupplierCountries, syncSupplierInventory,
   syncSupplierProducts, syncSupplierQuotes, withdrawCatalogPublication,
 } from '../api'
 
@@ -47,6 +47,10 @@ const localProducts = ref([])
 const localRegions = ref([])
 const publications = ref([])
 const catalogSyncSummary = ref(null)
+const importPrice = ref('')
+const importListOnSite = ref(true)
+const importSummary = ref(null)
+const importPreviewed = ref(false)
 const inventoryCountry = ref('US')
 const selectedResourceCategory = ref('static_residential')
 const selectedInventoryProductId = ref('')
@@ -559,6 +563,48 @@ async function generateWebsiteCatalog() {
   }
 }
 
+function sellableImportPayload(dryRun) {
+  const price = Number(importPrice.value)
+  return {
+    default_monthly_price: Number.isFinite(price) && price > 0 ? price : null,
+    list_on_site: importListOnSite.value,
+    enable_supply_rules: true,
+    dry_run: dryRun,
+  }
+}
+
+async function previewSellableImport() {
+  busy.value = 'sellable-import'
+  error.value = ''
+  importSummary.value = null
+  try {
+    const { data } = await importSellableCatalog(sellableImportPayload(true))
+    importSummary.value = data
+    importPreviewed.value = true
+    notify('预演完成：确认数字后点击「落成可售 SKU」写入')
+  } catch (requestError) {
+    error.value = errorText(requestError, '预演失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function applySellableImport() {
+  busy.value = 'sellable-import'
+  error.value = ''
+  try {
+    const { data } = await importSellableCatalog(sellableImportPayload(false))
+    importSummary.value = data
+    importPreviewed.value = false
+    notify(`已落成：新建 ${data.products_created} 个商品，上架 ${data.listings_listed} 个国家`)
+    await load()
+  } catch (requestError) {
+    error.value = errorText(requestError, '落成可售 SKU 失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
 async function updateRegionMapping(item, value) {
   busy.value = `region-${item.id}`
   error.value = ''
@@ -840,6 +886,17 @@ onMounted(load)
                 <button class="primary-action" type="button" :disabled="busy || !supplierProducts.some((item) => resourceCategories.some((category) => category.code === item.resource_category)) || !supplierRegions.some((item) => !item.city_name && item.local_region_id)" @click="generateWebsiteCatalog"><RefreshCw :size="14" :class="{ spinning: busy === 'catalog' }" />{{ busy === 'catalog' ? '生成中' : '同步到官网目录' }}</button>
               </div>
               <p v-if="catalogSyncSummary" class="catalog-sync-result" role="status">本次新增 {{ catalogSyncSummary.created }} 个商品，自动关联 {{ catalogSyncSummary.mapped_regions }} 个地区；{{ catalogSyncSummary.skipped_no_price }} 个国家缺少对应周期售价而跳过。自动采购未开启。</p>
+              <div class="sellable-import">
+                <div class="sellable-import-head"><div><h3>一键落成可售 SKU</h3><p>按供应商国家目录生成 30 天商品，补月价、启用供给规则并上架官网；长周期价仍由月价线性派生。已存在的月价不会被覆盖。</p></div><span>商品 + 月价 + 供给 + 上架</span></div>
+                <div class="sellable-import-controls">
+                  <label>缺价国家的默认月价<input v-model="importPrice" type="number" min="1" step="1" inputmode="decimal" placeholder="留空则只用已有月价" :disabled="!!busy" @input="importPreviewed = false" /></label>
+                  <label class="sellable-import-check"><input v-model="importListOnSite" type="checkbox" :disabled="!!busy" @change="importPreviewed = false" /> 同时上架官网</label>
+                  <button class="secondary-action" type="button" :disabled="!!busy" @click="previewSellableImport">预演差异</button>
+                  <button class="primary-action" type="button" :disabled="!!busy || !importPreviewed" @click="applySellableImport">{{ busy === 'sellable-import' ? '执行中' : '落成可售 SKU' }}</button>
+                </div>
+                <p v-if="importPreviewed" class="sellable-import-hint">预演不会写库；确认上方数字后点「落成可售 SKU」。</p>
+                <p v-if="importSummary" class="catalog-sync-result" role="status">国家 {{ importSummary.countries }} 个：新建商品 {{ importSummary.products_created }}、更新 {{ importSummary.products_updated }}；新建月价 {{ importSummary.prices_created }}、更新 {{ importSummary.prices_updated }}；启用供给规则 {{ importSummary.rules_enabled }}；上架 {{ importSummary.listings_listed }}；缺价跳过 {{ importSummary.skipped_total }}。<span v-if="importSummary.skipped_total">跳过国家：{{ importSummary.skipped.map((item) => item.country).join('、') }}</span></p>
+              </div>
               <div v-if="countryOptions.length" class="country-grid" role="group" aria-label="选择国家">
                 <button v-for="country in countryOptions" :key="country.code" type="button" :aria-pressed="inventoryCountry === country.code" :class="{ active: inventoryCountry === country.code }" @click="inventoryCountry = country.code">
                   <span class="country-card-top"><span class="country-code">{{ country.code }}</span><Check v-if="inventoryCountry === country.code" :size="15" aria-hidden="true" /></span>
@@ -977,7 +1034,8 @@ onMounted(load)
 .segment-snapshot-list>div>span{display:grid;gap:3px;min-width:0}.segment-snapshot-list b{font-size:11px;font-variant-numeric:tabular-nums}.segment-snapshot-list small{color:#74867e;font-size:9px}
 .segment-snapshot-list .secondary-action{min-height:30px;padding:5px 8px;font-size:10px}
 .product-mapping-table .data-head,.product-mapping-table .data-row{grid-template-columns:1.2fr .55fr 1.1fr 1.25fr .8fr}
-.catalog-sync-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 13px;margin:12px 0;background:#edf4f1;border:1px solid #d4e3dd;border-radius:5px}.catalog-sync-row>span{max-width:78ch;color:#4e6961;font-size:11px;line-height:1.5}.catalog-sync-result{margin:0 0 12px;padding:10px 12px;border:1px solid #c9e3d6;border-radius:5px;background:#f0faf4;color:#28664d;font-size:11px;line-height:1.5}
+.catalog-sync-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 13px;margin:12px 0;background:#edf4f1;border:1px solid #d4e3dd;border-radius:5px}.catalog-sync-row>span{max-width:78ch;color:#4e6961;font-size:11px;line-height:1.5}.sellable-import{padding:13px;margin:0 0 12px;border:1px solid #d8e3ee;border-radius:6px;background:#f7fafc}.sellable-import-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}.sellable-import-head h3{margin:0 0 4px;font-size:13px;color:#1f3a34}.sellable-import-head p{margin:0;max-width:78ch;color:#5b716b;font-size:11px;line-height:1.55}.sellable-import-head>span{flex:none;padding:3px 8px;border-radius:999px;background:#e6effa;color:#2b5b8a;font-size:10px}.sellable-import-controls{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin-top:11px}.sellable-import-controls label{display:flex;flex-direction:column;gap:4px;color:#4e6961;font-size:11px}.sellable-import-controls input[type=number]{width:180px;padding:7px 9px;border:1px solid #cfdad6;border-radius:4px;font-size:12px}.sellable-import-check{flex-direction:row!important;align-items:center;gap:6px!important;padding-bottom:7px}.sellable-import-hint{margin:9px 0 0;color:#8a6d1f;font-size:11px}
+.catalog-sync-result{margin:0 0 12px;padding:10px 12px;border:1px solid #c9e3d6;border-radius:5px;background:#f0faf4;color:#28664d;font-size:11px;line-height:1.5}
 @media(max-width:768px){.category-browser-controls{grid-template-columns:1fr}.category-browser-controls .secondary-action{width:100%}.catalog-sync-row{align-items:stretch;flex-direction:column}.catalog-sync-row .primary-action{width:100%}.segment-snapshot-list>div{grid-template-columns:minmax(0,1fr) auto}.segment-snapshot-list>div>.secondary-action{grid-column:1/-1}.supplier-shell .workspace-sidebar{position:fixed}.supplier-header{height:76px}.supplier-content{padding:18px}}
 @media(max-width:480px){.country-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.country-grid button{min-height:148px;padding:11px}.country-grid strong{font-size:13px}.category-browser-controls select{width:100%}.supplier-content{padding:14px}}
 @media(prefers-reduced-motion:reduce){.spinning,.supplier-loading span{animation:none}.country-grid button{transition:none}.country-grid button:hover{transform:none}}

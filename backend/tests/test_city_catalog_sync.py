@@ -16,9 +16,10 @@ from app.api.supplier_routes import get_global_proxy_adapter
 from app.core.security import create_access_token, hash_password
 from app.db import get_db
 from app.main import app
-from app.models import CatalogCityOption, Region, User
+from app.models import CatalogCityOption, Product, Region, User
 from app.models.base import Base
-from app.services.city_catalog_sync import sync_city_segments
+from app.services.city_catalog_sync import sync_city_segments, sync_city_segments_985
+from app.services.city_option_service import CitySelectionError, customer_options, resolve_choice
 from app.services.session_service import create_session
 from app.suppliers.base import SupplierRegionItem
 
@@ -108,6 +109,84 @@ def test_sync_is_idempotent():
         engine.dispose()
 
 
+class Fake985Adapter:
+    """985 的库存接口：同城 LAX，但段是另一个池的段。"""
+
+    def list_inventory(self, static_proxy_type="premium"):
+        return [
+            {"country": "US", "city": "Los Angeles", "can_spec": True},
+            {"country": "US", "city": "Nowhere", "can_spec": False},
+        ]
+
+    def list_ip_segments(self, *, country=None, city=None, static_proxy_type="premium"):
+        return ["9.9.9"]
+
+
+def test_985_sync_never_opens_cities_before_purchase_chain_exists():
+    """985 只有只读接口，采购走池 1；同步进来的城市不能对客户开放。
+
+    否则客户会在下拉里选到一个"下单必然失败"的城市/号段——那是退款的前置条件。
+    """
+    engine, db = make_session()
+    try:
+        result = sync_city_segments_985(db, Fake985Adapter())
+        db.commit()
+
+        lax = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_code == "LAX"))
+        assert lax is not None
+        assert lax.is_enabled is False
+        assert lax.data_source == "supplier_985"
+        assert "暂不开放" in (lax.note or "")
+        assert lax.ip_segments == "9.9.9"  # 段可以预研落库，但不展示给客户
+        assert result.created_pending == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_985_sync_does_not_pollute_pool_one_rows():
+    """同一城市已属于池 1 时，985 的段不能并进来——客户会选到池 1 买不到的段。"""
+    engine, db = make_session()
+    try:
+        seed_lax(db)
+        sync_city_segments(db, FakeAdapter())   # 池 1 先同步，LAX 行归属池 1
+        db.commit()
+        before = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_code == "LAX"))
+        before_segments, before_source = before.ip_segments, before.data_source
+
+        sync_city_segments_985(db, Fake985Adapter())
+        db.commit()
+
+        after = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_code == "LAX"))
+        assert after.ip_segments == before_segments
+        assert "9.9.9" not in after.ip_segments
+        assert after.data_source == before_source
+        assert after.is_enabled is True
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_985_sync_disables_rows_opened_by_older_version():
+    """早期版本会直接开放匹配上别名的 985 城市；重跑同步要把它们纠正为关闭。"""
+    engine, db = make_session()
+    try:
+        db.add(CatalogCityOption(resource_category="static_residential", country_code="US",
+                                 city_code="LAX", city_name="Los Angeles", ip_segments="",
+                                 is_enabled=True, sort_order=500, data_source="supplier_985"))
+        db.commit()
+
+        sync_city_segments_985(db, Fake985Adapter())
+        db.commit()
+
+        lax = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_code == "LAX"))
+        assert lax.is_enabled is False
+        assert "暂不开放" in (lax.note or "")
+    finally:
+        db.close()
+        engine.dispose()
+
+
 @pytest.fixture()
 def api():
     engine, db = make_session()
@@ -163,3 +242,67 @@ def test_sync_endpoint_updates_customer_visible_segments(api):
     assert lax["segments"] == ["23.94.5", "149.52", "38.30"]
     washington = next(item for item in listed["items"] if item["city_name"] == "Washington")
     assert washington["is_enabled"] is False
+
+
+def _customer_product(db):
+    region = db.scalar(select(Region).where(Region.country_code == "US"))
+    product = Product(name="美国 静态住宅IP 30天", product_type="静态住宅IP", price=60,
+                      billing_days=30, region_id=region.id, resource_category="static_residential")
+    db.add(product)
+    db.commit()
+    return product
+
+
+def test_customer_options_only_trust_pool_one_when_available():
+    engine, db = make_session()
+    try:
+        seed_lax(db)  # manual / LAX / enabled
+        db.add(CatalogCityOption(resource_category="static_residential", country_code="US",
+                                 city_code="NYC", city_name="纽约", ip_segments="44.1",
+                                 is_enabled=True, data_source="supplier_global_proxy"))
+        db.add(CatalogCityOption(resource_category="static_residential", country_code="US",
+                                 city_code="SFO", city_name="旧金山", ip_segments="45.1",
+                                 is_enabled=True, data_source="supplier_985"))
+        db.commit()
+        product = _customer_product(db)
+
+        listed = customer_options(db, product)
+        assert [item["city_code"] for item in listed["items"]] == ["NYC"]
+        with pytest.raises(CitySelectionError):
+            resolve_choice(db, product, db.get(Region, product.region_id), "LAX", None)
+        choice = resolve_choice(db, product, db.get(Region, product.region_id), "NYC", None)
+        assert choice.city_code == "NYC"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_disables_pool_one_cities_missing_from_upstream():
+    engine, db = make_session()
+    try:
+        db.add(Region(name="美国", country_code="US"))
+        for code, name in (("SFO", "旧金山"), ("LAX", "洛杉矶")):
+            db.add(CatalogCityOption(resource_category="static_residential", country_code="US",
+                                     city_code=code, city_name=name, ip_segments="",
+                                     is_enabled=True, data_source="supplier_global_proxy"))
+        db.add(CatalogCityOption(resource_category="static_residential", country_code="US",
+                                 city_code="BOS", city_name="波士顿", ip_segments="",
+                                 is_enabled=True, data_source="manual"))
+        db.commit()
+
+        result = sync_city_segments(db, FakeAdapter())
+        db.commit()
+
+        assert result.disabled_stale == 1
+        sfo = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_code == "SFO"))
+        assert sfo.is_enabled is False
+        assert "未返回" in sfo.note
+        manual = db.scalar(select(CatalogCityOption).where(
+            CatalogCityOption.city_code == "BOS",
+            CatalogCityOption.data_source == "manual",
+        ))
+        # 只处理池 1 自己的行，手工行不应被同步顺手改掉
+        assert manual.is_enabled is True
+    finally:
+        db.close()
+        engine.dispose()
