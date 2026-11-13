@@ -1908,6 +1908,9 @@ def admin_upgrade_line(line_id: int, payload: LineUpgradeIn, db: Session = Depen
     line = db.get(CustomerLine, line_id)
     if not line or line.status == "deleted":
         raise HTTPException(status_code=404, detail="线路不存在或已删除")
+    if line.status == "expired":
+        # 升级不动到期时间，过期线路升级会变成「状态使用中、到期日已过」的矛盾数据。
+        raise HTTPException(status_code=409, detail="线路已过期，请先续费再升级")
     customer = db.get(Customer, line.customer_id)
     if not customer or customer.is_deleted or not customer.user_id:
         raise HTTPException(status_code=409, detail="客户账号不可用，无法升级")
@@ -1942,9 +1945,23 @@ def admin_upgrade_line(line_id: int, payload: LineUpgradeIn, db: Session = Depen
         return {**{column.name: getattr(existing, column.name) for column in Order.__table__.columns},
                 "customer_name": existing_customer.name if existing_customer else "未知客户"}
 
+    # 同一线路不允许多张待处理升级单：前端双击、网络重试都可能绕过幂等键。
+    pending = db.scalar(select(Order).where(
+        Order.renewal_line_id == line.id,
+        Order.order_type == "upgrade",
+        Order.status.in_({"pending_confirm", "pending_payment"}),
+    ))
+    if pending is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该线路已有待处理的升级单（{pending.order_no}），请先完成或取消那一单",
+        )
+
     order = Order(
         order_no=f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}",
         customer_id=customer.id, product_id=target.id, source_type="owned",
+        # 记住升级前的产品：退款要按它把线路切回去，否则钱退了升级还留着。
+        previous_product_id=current.id,
         idempotency_key=payload.idempotency_key,
         amount=diff, quantity=1, billing_days=current.billing_days,
         unit_price=diff, total_amount=diff,
@@ -1992,6 +2009,9 @@ def admin_confirm_order(order_id: int, background_tasks: BackgroundTasks, db: Se
         # 升级单用「确认收款」推进：确认即切产品线，到期时间不变。
         if order.status not in {"pending_confirm", "pending_payment", "paid"}:
             raise HTTPException(status_code=409, detail="订单状态不允许确认升级")
+        # 余额/在线支付的升级单是 pending_payment，钱没到不能切线路；
+        # contact_manager 走「先确认后到账」的老流程，这里会放行。
+        ensure_payment_settled(order)
         line = settle_upgrade(db, order, "manually_confirmed")
         write_audit(db, user, "confirm_upgrade", "order", order.id,
                     f"升级确认；线路={line.id}; 差价={order.total_amount}")
@@ -2047,6 +2067,11 @@ def retry_order_procurement(
         raise HTTPException(status_code=409, detail="只有购买订单可以自动开通")
     if order.source_type == "resource_pool":
         raise HTTPException(status_code=409, detail="资源池订单不走这条开通链路")
+    if order.status == "pending_transit":
+        raise HTTPException(
+            status_code=409,
+            detail="订单在等待配置中转，重试采购不会推进；请先完成中转配置再交付",
+        )
     if order.payment_status != "paid":
         raise HTTPException(status_code=409, detail="订单还没收款，不能开通")
     done = db.scalar(select(Procurement).where(
@@ -2220,6 +2245,12 @@ def admin_cancel_order(order_id: int, db: Session = Depends(get_db), user: User 
     order = db.get(Order, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="订单不存在")
+    if order.status == "pending_transit":
+        raise HTTPException(
+            status_code=409,
+            detail="订单已付款并采购了上游 IP，正在等待配置中转，不能取消；"
+                   "如需终止请先与上游确认退订，再走退款",
+        )
     if order.status in {"partially_delivered", "delivered", "completed", "cancelled", "refunding", "refunded", "paid", "processing"}:
         raise HTTPException(status_code=409, detail="当前订单状态不允许取消，已收款订单请走退款")
     ensure_order_cancellable(db, order)

@@ -171,6 +171,10 @@ class Order(TimestampMixin, Base):
     order_no: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    # 升级单专用：升级前的产品。退款时必须按它把线路切回去，
+    # 否则钱退了、升级还在（product_id 存的是目标产品，回不去）。
+    previous_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", name="fk_orders_previous_product_id"), nullable=True)
     source_type: Mapped[str] = mapped_column(String(30), default="owned", server_default="owned", nullable=False, index=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     resource_category: Mapped[str | None] = mapped_column(String(50), nullable=True)

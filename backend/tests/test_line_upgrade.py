@@ -182,3 +182,72 @@ def test_upgrade_options_only_list_positive_diffs(api):
     diffs = {item["category"]: item["diff"] for item in body["options"]}
     assert diffs["social_media"] == 35.0
     assert diffs["live_stream_pc"] == 1040.0
+
+
+def test_unpaid_upgrade_cannot_be_confirmed(api):
+    """余额支付的升级单是 pending_payment，钱没到不能确认切线路。"""
+    created = upgrade(api, "social_media", payment_method="balance").json()
+    assert created["status"] == "pending_payment"
+    response = api["client"].post(f"/api/admin/orders/{created['id']}/confirm",
+                                  headers=api["headers"])
+    assert response.status_code == 409
+    db = api["db"]
+    db.expire_all()
+    assert db.get(CustomerLine, api["line"].id).product_id == api["products"]["static_residential"].id
+
+
+def test_refund_rolls_back_product_line(api):
+    """升级单退款必须把线路切回原产品，否则客户既拿回钱又保住升级。"""
+    from app.services.order_service import rollback_upgrade
+
+    db = api["db"]
+    expires_before = db.get(CustomerLine, api["line"].id).expires_at
+    created = upgrade(api, "social_media").json()
+    assert api["client"].post(f"/api/admin/orders/{created['id']}/confirm",
+                              headers=api["headers"]).status_code == 200
+
+    db.expire_all()
+    line = db.get(CustomerLine, api["line"].id)
+    assert line.product_id == api["products"]["social_media"].id
+    assert line.status == "pending_transit"
+
+    order = db.get(Order, created["id"])
+    restored = rollback_upgrade(db, order)
+    db.commit()
+    assert restored is not None
+    assert restored.product_id == api["products"]["static_residential"].id
+    assert restored.expires_at == expires_before
+    # 回退后不再需要中转，状态要跟着回到 active
+    assert restored.status == "active"
+
+
+def test_expired_line_cannot_be_upgraded(api):
+    """升级不动到期时间，过期线路升级会得到「active 但已过期」的矛盾数据。"""
+    db = api["db"]
+    line = db.get(CustomerLine, api["line"].id)
+    line.status = "expired"
+    db.commit()
+
+    assert upgrade(api, "social_media").status_code == 409
+
+
+def test_second_pending_upgrade_is_rejected(api):
+    """同一线路不能堆多张待处理升级单（双击、网络重试都可能绕过幂等键）。"""
+    assert upgrade(api, "social_media").status_code == 201
+    response = upgrade(api, "live_stream_pc")
+    assert response.status_code == 409
+    assert "已有待处理" in response.text
+
+
+def test_pending_transit_order_cannot_be_cancelled(api):
+    """已付款且采购了 IP 的待配中转单，不能当普通单取消。"""
+    db = api["db"]
+    created = upgrade(api, "social_media").json()
+    order = db.get(Order, created["id"])
+    order.status = "pending_transit"
+    db.commit()
+
+    response = api["client"].post(f"/api/admin/orders/{created['id']}/cancel",
+                                  headers=api["headers"])
+    assert response.status_code == 409
+    assert "中转" in response.text

@@ -29,7 +29,7 @@ from app.services.payment_gateway import (
 )
 from app.services.procurement_service import run_auto_procure_in_background
 from app.services.order_service import (
-    is_payable_order, rollback_renewal_extension, settle_renewal, settle_upgrade,
+    is_payable_order, rollback_renewal_extension, rollback_upgrade, settle_renewal, settle_upgrade,
 )
 from app.tasks.notify import notify_admins
 from app.services.wallet_service import (
@@ -757,6 +757,11 @@ def record_completed_refund(order_id: int, payload: RefundIn, db: Session = Depe
         if order.order_type == "renewal":
             line = rollback_renewal_extension(db, order)
             rollback_note = f"; 已回退线路天数={order.billing_days}" if line else "; 线路存在后续续费记录，天数需人工核对"
+        elif order.order_type == "upgrade":
+            # 升级单退款必须把线路切回原产品，否则客户既拿回差价又保住升级。
+            line = rollback_upgrade(db, order)
+            rollback_note = ("; 已把线路切回升级前的产品" if line
+                             else "; 升级单缺少原产品记录或线路已被再次升级，产品线需人工核对")
         reverse_sales_commission(db, payment, actor.id, f"订单退款冲销佣金：{payload.reason}")
         write_audit(db, actor, "order_refund_completed", "order", order.id,
                     f"退款金额分={payment.amount_cents}; 渠道={payment.channel}; 外部凭证={payload.external_reference or '余额退回'}; 原因={payload.reason}{rollback_note}")

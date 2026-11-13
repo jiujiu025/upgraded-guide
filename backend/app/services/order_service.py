@@ -192,6 +192,32 @@ def settle_upgrade(db: Session, order: Order, payment_status: str) -> CustomerLi
     return line
 
 
+def rollback_upgrade(db: Session, order: Order) -> CustomerLine | None:
+    """升级单退款后把线路切回升级前的产品。
+
+    与 ``rollback_renewal_extension`` 的区别：升级不改到期时间，所以回退只需要换产品，
+    不需要算天数。没有 ``previous_product_id`` 的老升级单返回 None，由调用方转人工核对。
+    """
+    if order.order_type != "upgrade" or not order.renewal_line_id:
+        return None
+    if not order.previous_product_id:
+        return None
+    line = db.scalar(select(CustomerLine).where(
+        CustomerLine.id == order.renewal_line_id,
+        CustomerLine.customer_id == order.customer_id,
+    ).with_for_update())
+    if line is None or line.status == "deleted":
+        return None
+    # 只在线路仍指向本次升级的目标时才回退：期间若又被升级到更高档，不能覆盖那一单。
+    if line.product_id != order.product_id:
+        return None
+    line.product_id = order.previous_product_id
+    # 升级时可能把它标成待配中转；回退到原产品后这个状态不再成立。
+    if line.status == "pending_transit":
+        line.status = "active"
+    return line
+
+
 def rollback_renewal_extension(db: Session, order: Order) -> CustomerLine | None:
     """续费退款后回退延长天数。
 

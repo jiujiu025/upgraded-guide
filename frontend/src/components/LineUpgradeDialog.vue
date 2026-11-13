@@ -14,6 +14,8 @@ const emit = defineEmits(['close', 'created'])
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
+// 幂等键按「线路 + 目标 + 付款方式」复用：双击或超时重试落到同一张单上，成功后才换新键。
+const attempt = ref(null)
 const data = ref(null)
 const selected = ref('')
 const paymentMethod = ref('contact_manager')
@@ -34,6 +36,7 @@ async function load() {
   error.value = ''
   data.value = null
   selected.value = ''
+  attempt.value = null
   try {
     const response = await getLineUpgradeOptions(props.line.id)
     data.value = response.data
@@ -52,11 +55,13 @@ async function submit() {
   saving.value = true
   error.value = ''
   try {
-    await upgradeLine(props.line.id, {
-      target_category: chosen.value.category,
-      payment_method: paymentMethod.value,
-      idempotency_key: newKey(),
-    })
+    const body = { target_category: chosen.value.category, payment_method: paymentMethod.value }
+    const fingerprint = JSON.stringify([props.line.id, body])
+    if (!attempt.value || attempt.value.fingerprint !== fingerprint) {
+      attempt.value = { fingerprint, key: newKey() }
+    }
+    await upgradeLine(props.line.id, { ...body, idempotency_key: attempt.value.key })
+    attempt.value = null
     emit('created', chosen.value)
     emit('close')
   } catch (err) {

@@ -368,7 +368,10 @@ def test_supplier_access_is_admin_only_and_procurement_is_hard_disabled(supplier
     assert Settings(supplier_auto_procurement_enabled=True, _env_file=None).supplier_auto_procurement_enabled is True
 
 
-def test_freshness_out_of_stock_failed_sync_and_audit(supplier_api):
+def test_freshness_out_of_stock_failed_sync_and_audit(supplier_api, monkeypatch):
+    # 这个用例断言「Key 未配置」时的表现，但 overview 直接读环境变量，
+    # 本地 .env 里填了真实 Key 就会误报失败。显式把配置状态压成未配置，测试只验代码路径。
+    monkeypatch.setattr("app.api.supplier_routes.api_key_configured", lambda db: False)
     headers = auth(supplier_api.admin_token)
     assert supplier_api.post("/api/admin/suppliers/sync/products", headers=headers).status_code == 200
     assert supplier_api.post("/api/admin/suppliers/sync/quotes", json={}, headers=headers).status_code == 200
