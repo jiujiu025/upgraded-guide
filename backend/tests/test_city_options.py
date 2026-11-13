@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -214,3 +214,43 @@ def test_city_maintenance_requires_admin_and_is_unique(api):
 
 def test_city_options_require_login(api):
     assert api["client"].get("/api/catalog/cities", params={"product_id": api["products"]["US"]}).status_code == 401
+
+
+def _add_social_product(api, country_code="US"):
+    region = api["db"].scalar(select(Region).where(Region.country_code == country_code))
+    product = Product(name=f"{country_code} 社媒运营专线 30天", product_type="社媒运营专线", price=95,
+                      billing_days=30, region_id=region.id, resource_category="social_media",
+                      is_active=True, is_in_stock=True)
+    api["db"].add(product)
+    api["db"].add(RetailPriceRule(resource_category="social_media", country_code=country_code,
+                                  billing_days=30, unit_price=Decimal("95"), source_version="test"))
+    api["db"].commit()
+    return product.id
+
+
+def test_social_line_reuses_residential_cities_without_segments(api):
+    """社媒没有自己的城市清单时，借住宅的位置，但不给号段。"""
+    create_city(api, "US", "LAX", "洛杉矶", "149.52")
+    social_id = _add_social_product(api)
+    body = api["client"].get("/api/catalog/cities", params={"product_id": social_id},
+                             headers=api["headers"]["customer"]).json()
+    assert body["shared"] is True
+    assert [item["city_name"] for item in body["items"]] == ["洛杉矶"]
+    assert body["items"][0]["segments"] == []
+
+
+def test_social_line_can_pick_city(api):
+    create_city(api, "US", "LAX", "洛杉矶", "149.52")
+    social_id = _add_social_product(api)
+    response = order_on_behalf(api, product_id=social_id, city_code="LAX")
+    assert response.status_code == 200, response.text
+    assert response.json()["requested_city_code"] == "LAX"
+
+
+def test_social_line_rejects_ip_segment(api):
+    """住宅号段跟自有线路落地无关，选了必须拒绝而不是静默忽略。"""
+    create_city(api, "US", "LAX", "洛杉矶", "149.52")
+    social_id = _add_social_product(api)
+    response = order_on_behalf(api, product_id=social_id, city_code="LAX", ip_segment="149.52")
+    assert response.status_code == 422
+    assert "自有线路" in response.text

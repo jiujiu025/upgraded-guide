@@ -28,7 +28,9 @@ from app.services.payment_gateway import (
     decrypt_secret, encrypt_secret, new_payment_order_values, verify_signature,
 )
 from app.services.procurement_service import run_auto_procure_in_background
-from app.services.order_service import is_payable_order, rollback_renewal_extension, settle_renewal
+from app.services.order_service import (
+    is_payable_order, rollback_renewal_extension, settle_renewal, settle_upgrade,
+)
 from app.tasks.notify import notify_admins
 from app.services.wallet_service import (
     accrue_sales_commission, apply_wallet_delta, money_to_cents,
@@ -147,6 +149,9 @@ def _record_paid_order(db: Session, payment_order: PaymentOrder, customer: Custo
     if order.order_type == "renewal":
         # 续费单收款即视为条件已满足：延长线路并结单，不再等管理员二次确认。
         settle_renewal(db, order, "paid")
+    elif order.order_type == "upgrade":
+        # 升级单同理：收款即切换产品线，到期时间不变。
+        settle_upgrade(db, order, "paid")
     else:
         order.status = "paid"
         order.payment_status = "paid"
@@ -544,6 +549,8 @@ def pay_order_with_balance(order_id: int, payload: IdempotencyIn, background_tas
                            user.id, payment.id, order.id, f"订单 {order.order_no} 余额支付")
         if order.order_type == "renewal":
             settle_renewal(db, order, "paid")
+        elif order.order_type == "upgrade":
+            settle_upgrade(db, order, "paid")
         else:
             order.status = "paid"
             order.payment_status = "paid"
@@ -672,7 +679,7 @@ async def suisui_payment_notify(request: Request, response: Response, db: Sessio
 
 
 @router.post("/admin/finance/orders/{order_id}/offline-payment")
-def record_offline_order_payment(order_id: int, payload: OfflineOrderPaymentIn, db: Session = Depends(get_db), actor: User = Depends(require_roles("super_admin", "admin"))):
+def record_offline_order_payment(order_id: int, payload: OfflineOrderPaymentIn, background_tasks: BackgroundTasks, db: Session = Depends(get_db), actor: User = Depends(require_roles("super_admin", "admin"))):
     if not payload.confirmed_received:
         raise HTTPException(status_code=409, detail="必须确认线下款项已实际到账")
     order = db.scalar(select(Order).where(Order.id == order_id).with_for_update())
@@ -693,6 +700,8 @@ def record_offline_order_payment(order_id: int, payload: OfflineOrderPaymentIn, 
         db.flush()
         if order.order_type == "renewal":
             settle_renewal(db, order, "manually_confirmed")
+        elif order.order_type == "upgrade":
+            settle_upgrade(db, order, "manually_confirmed")
         else:
             order.status = "paid"
             order.payment_status = "manually_confirmed"
@@ -700,6 +709,11 @@ def record_offline_order_payment(order_id: int, payload: OfflineOrderPaymentIn, 
         write_audit(db, actor, "offline_order_payment", "order", order.id,
                     f"线下收款金额分={amount}; 凭证={payload.external_reference}; 备注={payload.remark}")
         db.commit()
+        # 线下收款（对公/微信转账）是最常见的收款方式，必须和余额、在线收款一样自动开通。
+        # 否则销售单收到钱后停在 paid，客户拿到的是「已付款但没有线路」，还得人工再点一次。
+        # 采购开关关着时 auto_procure_order 会静默返回 None，不会误扣上游余额。
+        if order.order_type == "purchase":
+            background_tasks.add_task(run_auto_procure_in_background, order.id)
         return _payment_order_view(item, customer.name)
     except Exception:
         db.rollback()

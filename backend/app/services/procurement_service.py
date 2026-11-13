@@ -32,9 +32,15 @@ from app.services.supplier_service import ensure_supplier
 from app.suppliers.base import SupplierError
 from app.suppliers.factory import build_readonly_adapter
 from app.suppliers.global_proxy import DAYS_TIMELEN
+from app.services.transit_service import (
+    TransitNotConfigured, provision_transit, requires_transit,
+)
 
-# 只有这些分类能自动采购：上游卖的是静态住宅（原生），其他产品线没有对应接口。
-PROCURABLE_CATEGORIES = {"static_residential"}
+# 采购永远是买同一个东西：上游的静态住宅 IP。
+# 三类产品线共用这一个货源，社媒/直播只是多一层中转（见 transit_service）。
+PROCURABLE_CATEGORIES = {
+    "static_residential", "social_media", "live_stream_mobile", "live_stream_pc",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +227,34 @@ def auto_procure_order(db: Session, order: Order, *, trigger: str = "payment") -
     )
 
     now = _utcnow()
+    # 社媒/直播比静态住宅多一跳 VPS 中转：IP 买到了不等于能交付。
+    # 中转没配好就停在 pending_transit —— 绝不能把裸 IP 当专线交给客户。
+    # 注意这里不能走 _fail：IP 已经买了（钱已扣），标 failed 会诱导人工重试，
+    # 重试就是再买一次。
+    if requires_transit(product.resource_category):
+        try:
+            provision_transit(
+                db, order=order, accounts=result.accounts,
+                country_code=region.country_code, city_name=request["city"],
+            )
+        except TransitNotConfigured as exc:
+            order.status = "pending_transit"
+            order.confirmed_at = order.confirmed_at or now
+            record.status = "awaiting_transit"
+            record.error_code = "TRANSIT_NOT_READY"
+            record.error_message = str(exc)[:500]
+            write_audit(db, None, "procure_awaiting_transit", "order", order.id,
+                        f"上游单号={result.order_number}; 原因={str(exc)[:200]}")
+            db.commit()
+            if customer is not None:
+                notify_order_parties(
+                    db, customer, order, "线路正在配置中转",
+                    f"订单 {order.order_no} 的住宅 IP 已就绪，正在配置专线中转，配置完成后即可使用。",
+                    "procurement",
+                )
+                db.commit()
+            return record
+
     public_base = (settings.frontend_origin or "").rstrip("/")
     token = issue_token(customer.id) if customer else None
     created: list[int] = []

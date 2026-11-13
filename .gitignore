@@ -41,3 +41,6 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 .workbuddy/
+
+# pytest 临时目录（验收用例的 tmp_path 产物，不提交）
+.ptrunc*/

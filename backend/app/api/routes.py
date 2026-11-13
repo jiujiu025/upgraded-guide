@@ -15,7 +15,7 @@ from app.core.client_ip import get_client_ip
 from app.core.timeutil import local_date_of, local_day_range_utc
 from app.db import get_db
 from app.models import (
-    AuthSession, CatalogListing, Customer, CustomerLine, HealthIncident, Node, Notification, Order, PaymentOrder, PaymentRefund, Procurement, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
+    AuthSession, CatalogCityOption, CatalogListing, Customer, CustomerLine, HealthIncident, Node, Notification, Order, PaymentOrder, PaymentRefund, Procurement, Product, ProductSupplyRule, Region, ResourcePool, RetailPriceRule,
     SalesInviteCode, SalesLoginEvent, SupplierIpSegmentSnapshot, SupplierProduct, SupplierQuote, SupplierRegion, User,
 )
 from app.schemas.common import (
@@ -27,7 +27,7 @@ from app.schemas.common import (
 )
 from app.api.pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, counts_by, like_pattern, page_payload, paginate
 from app.services.audit_service import write_audit
-from app.services.city_option_service import CitySelectionError, customer_options, resolve_choice
+from app.services.city_option_service import CitySelectionError, customer_options, normalize_segments, resolve_choice
 from app.services.proxy_link import ProxyLinkError, parse_link
 from app.services.subscription_service import issue_token
 from app.services.customer_scope import get_customer_profile, scoped_customer_ids
@@ -38,7 +38,7 @@ from app.services.procurement_service import run_auto_procure_in_background
 from app.services.order_service import (
     TERMINAL_ORDER_STATUSES, add_notification, calculate_order_price, claim_delivery_slot,
     ensure_order_cancellable, ensure_payment_settled, ensure_sales_user, initial_order_status,
-    notify_order_parties, settle_renewal,
+    notify_order_parties, settle_renewal, settle_upgrade,
 )
 from app.services.pricing_service import (
     SELLABLE_PERIODS, PricingError, monthly_price_for, periods_of, unit_price_for,
@@ -107,6 +107,18 @@ class UserAccessIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: str | None = None
     is_active: bool | None = None
+
+
+class LineUpgradeIn(BaseModel):
+    """把一条既有线路升级到更高的产品线（静态住宅 → 社媒/直播）。
+
+    只补差价，到期时间不变；差额按原订单周期倍数折算。
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    target_category: str = Field(min_length=1, max_length=50)
+    payment_method: str = "contact_manager"
+    idempotency_key: str = Field(min_length=36, max_length=64)
 
 
 class AdminResourceOrderIn(BaseModel):
@@ -1604,11 +1616,53 @@ def admin_order_center_options(
         SupplierQuote.quoted_at >= datetime.utcnow() - timedelta(minutes=settings.supplier_quote_ttl_minutes),
     ).order_by(SupplierQuote.quoted_at.desc()).limit(1000)).all()
     quotes = [item for item in quotes if item.supplier_product_id in supplier_product_ids]
+    # 订单中心的「销售单 · 自动采购」标签必须反映真实开关：
+    # 开关关着时客户付款只到 paid，不会向上游下单，标成自动采购会误导运营。
+    from app.services.settings_service import get_flag, AUTO_PROCUREMENT_KEY
+
+    procurement_enabled, procurement_source = get_flag(db, AUTO_PROCUREMENT_KEY)
+
+    # 商品所在国家：销售单要按「类型 → 国家 → 城市」逐级收敛，
+    # 前端不能只靠 product_type 猜，得拿到 region 的国家码。
+    region_ids = {item.region_id for item in products if item.region_id}
+    regions = {item.id: item for item in db.scalars(
+        select(Region).where(Region.id.in_(region_ids))).all()} if region_ids else {}
+
+    # 城市与号段：与客户下单页同一口径（该国有池 1 同步行时只信任池 1），
+    # 否则手工清单会把上游买不到的城市带进后台下拉。
+    # 社媒/直播没有自有城市清单，复用住宅位置（shared=True）且不给号段。
+    from app.services.city_option_service import city_rows_for
+
+    products_payload = [{"id": item.id, "name": item.name, "product_type": item.product_type,
+                        "price": item.price, "billing_days": item.billing_days, "region_id": item.region_id,
+                        "resource_category": item.resource_category,
+                        "country_code": (regions.get(item.region_id).country_code or "").upper()
+                        if regions.get(item.region_id) else None,
+                        "country_name": regions.get(item.region_id).name if regions.get(item.region_id) else None}
+                       for item in products]
+    sale_pairs = sorted({
+        (item["resource_category"], item["country_code"])
+        for item in products_payload
+        if item["resource_category"] and item["country_code"]
+    })
+    city_options: list[dict] = []
+    for category, country_code in sale_pairs:
+        rows, shared = city_rows_for(db, category, country_code)
+        for row in rows:
+            city_options.append({
+                "resource_category": category,
+                "country_code": country_code,
+                "city_code": row.city_code,
+                "city_name": row.city_name,
+                "segments": [] if shared else normalize_segments(row.ip_segments),
+                "shared": shared,
+            })
+
     return {
+        "auto_procurement": {"enabled": procurement_enabled, "source": procurement_source},
         "customers": [{"id": item.id, "name": item.name, "email": item.email} for item in customers],
-        "products": [{"id": item.id, "name": item.name, "product_type": item.product_type,
-                      "price": item.price, "billing_days": item.billing_days, "region_id": item.region_id}
-                     for item in products],
+        "products": products_payload,
+        "city_options": city_options,
         "categories": [{"code": code, "label": label} for code, label in RESOURCE_CATEGORY_CODES.items()],
         "supplier_products": [{"id": item.id, "external_product_ref": item.external_product_ref,
                                "name": item.name_snapshot, "resource_category": item.resource_category,
@@ -1784,6 +1838,149 @@ def admin_create_resource_order(
         raise
 
 
+@router.get("/admin/lines/{line_id}/upgrade-options")
+def admin_line_upgrade_options(line_id: int, db: Session = Depends(get_db),
+                               user: User = Depends(require_roles("super_admin", "admin"))):
+    """这条线路能升级到哪些产品线，以及各自要补多少差价。
+
+    差价按原订单周期折算（不按剩余天数），与 ``admin_upgrade_line`` 同一口径，
+    前端只负责展示，不自己算钱。
+    """
+    line = db.get(CustomerLine, line_id)
+    if not line or line.status == "deleted":
+        raise HTTPException(status_code=404, detail="线路不存在或已删除")
+    current = db.get(Product, line.product_id)
+    if current is None or not current.resource_category:
+        # 老数据里有些产品没归入资源分类（无法按价目表算升级差价）。
+        # 这不是"崩溃"，而是一条明确的可解释状态，前端据此提示而不是弹红色错误。
+        return {
+            "current": None,
+            "options": [],
+            "reason": "线路当前产品没有资源分类，无法计算升级差价；请先在商品管理里归类",
+        }
+    current_unit, _ = calculate_order_price(db, current, 1, current.billing_days)
+    candidates = db.scalars(select(Product).where(
+        Product.region_id == current.region_id,
+        Product.billing_days == current.billing_days,
+        Product.is_active.is_(True),
+        Product.resource_category.is_not(None),
+        Product.resource_category != current.resource_category,
+    ).order_by(Product.id)).all()
+    options = []
+    for item in candidates:
+        try:
+            unit, _ = calculate_order_price(db, item, 1, current.billing_days)
+        except HTTPException:
+            continue
+        diff = round(float(unit) - float(current_unit), 2)
+        if diff <= 0:
+            continue
+        options.append({
+            "category": item.resource_category,
+            "label": RESOURCE_CATEGORY_CODES.get(item.resource_category, item.resource_category),
+            "product_id": item.id,
+            "product_name": item.name,
+            "unit_price": float(unit),
+            "diff": diff,
+        })
+    return {
+        "current": {
+            "category": current.resource_category,
+            "label": RESOURCE_CATEGORY_CODES.get(current.resource_category, current.resource_category),
+            "product_name": current.name, "unit_price": float(current_unit),
+            "billing_days": current.billing_days, "expires_at": line.expires_at,
+        },
+        "options": options,
+    }
+
+
+@router.post("/admin/lines/{line_id}/upgrade", status_code=201)
+def admin_upgrade_line(line_id: int, payload: LineUpgradeIn, db: Session = Depends(get_db),
+                       user: User = Depends(require_roles("super_admin", "admin"))):
+    """把一条既有线路升级到更高的产品线（静态住宅 → 社媒/直播）。
+
+    口径（业务确认）：只补差价 =（目标单价 − 原单价）× 原订单周期倍数，
+    **到期时间不变**。原住宅 IP 保留，社媒/直播只是多一层中转。
+
+    这里只创建待付款/待确认的升级单，线路在收款后才切换（见 ``settle_upgrade``）——
+    先改线路再收钱，退款时就回不去了。
+    """
+    line = db.get(CustomerLine, line_id)
+    if not line or line.status == "deleted":
+        raise HTTPException(status_code=404, detail="线路不存在或已删除")
+    customer = db.get(Customer, line.customer_id)
+    if not customer or customer.is_deleted or not customer.user_id:
+        raise HTTPException(status_code=409, detail="客户账号不可用，无法升级")
+    current = db.get(Product, line.product_id)
+    if current is None:
+        raise HTTPException(status_code=409, detail="线路当前产品不存在")
+    if payload.target_category not in RESOURCE_CATEGORY_CODES:
+        raise HTTPException(status_code=422, detail="目标产品类型无效")
+    if payload.target_category == current.resource_category:
+        raise HTTPException(status_code=409, detail="目标类型与当前类型相同，无需升级")
+
+    target = db.scalar(select(Product).where(
+        Product.region_id == current.region_id,
+        Product.billing_days == current.billing_days,
+        Product.resource_category == payload.target_category,
+        Product.is_active.is_(True),
+    ).order_by(Product.id).limit(1))
+    if target is None:
+        raise HTTPException(status_code=409, detail="该国家与周期下没有目标产品线，请先上架对应 SKU")
+
+    current_unit, _ = calculate_order_price(db, current, 1, current.billing_days)
+    target_unit, _ = calculate_order_price(db, target, 1, current.billing_days)
+    diff = round(float(target_unit) - float(current_unit), 2)
+    if diff <= 0:
+        raise HTTPException(status_code=409, detail="只能升级到单价更高的产品线")
+
+    existing = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+    if existing is not None:
+        if existing.renewal_line_id != line.id:
+            raise HTTPException(status_code=409, detail="请求重复但线路不一致，请刷新后重试")
+        existing_customer = db.get(Customer, existing.customer_id)
+        return {**{column.name: getattr(existing, column.name) for column in Order.__table__.columns},
+                "customer_name": existing_customer.name if existing_customer else "未知客户"}
+
+    order = Order(
+        order_no=f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}",
+        customer_id=customer.id, product_id=target.id, source_type="owned",
+        idempotency_key=payload.idempotency_key,
+        amount=diff, quantity=1, billing_days=current.billing_days,
+        unit_price=diff, total_amount=diff,
+        region_id=current.region_id,
+        region_name=(db.get(Region, current.region_id).name if current.region_id else ""),
+        product_name=f"{target.name}（升级）",
+        payment_method=payload.payment_method, payment_status="unpaid",
+        status=initial_order_status(payload.payment_method, "upgrade"),
+        order_type="upgrade", renewal_line_id=line.id,
+        assigned_sales_id=customer.sales_id, created_via="admin",
+        created_by_user_id=user.id,
+        remark=f"升级差价：{target.name} {target_unit} − {current.name} {current_unit} = {diff}；到期时间不变",
+    )
+    try:
+        db.add(order)
+        db.flush()
+        write_audit(db, user, "upgrade_line", "customer_line", line.id,
+                    f"线路={line.id}; 从={current.resource_category}; 到={payload.target_category}; "
+                    f"差价={diff}; 周期={current.billing_days}天; 订单={order.order_no}")
+        db.commit()
+        db.refresh(order)
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+        if existing is not None:
+            existing_customer = db.get(Customer, existing.customer_id)
+            return {**{column.name: getattr(existing, column.name) for column in Order.__table__.columns},
+                    "customer_name": existing_customer.name if existing_customer else "未知客户"}
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    return {**{column.name: getattr(order, column.name) for column in Order.__table__.columns},
+            "customer_name": customer.name}
+
+
 @router.post("/admin/orders/{order_id}/confirm", response_model=OrderOut)
 def admin_confirm_order(order_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db), user: User = Depends(require_roles("super_admin", "admin"))):
     order = db.get(Order, order_id)
@@ -1791,6 +1988,16 @@ def admin_confirm_order(order_id: int, background_tasks: BackgroundTasks, db: Se
         raise HTTPException(status_code=404, detail="订单不存在")
     if order.source_type == "resource_pool":
         raise HTTPException(status_code=409, detail="资源池自动采购尚未启用，不能确认采购或开通线路")
+    if order.order_type == "upgrade":
+        # 升级单用「确认收款」推进：确认即切产品线，到期时间不变。
+        if order.status not in {"pending_confirm", "pending_payment", "paid"}:
+            raise HTTPException(status_code=409, detail="订单状态不允许确认升级")
+        line = settle_upgrade(db, order, "manually_confirmed")
+        write_audit(db, user, "confirm_upgrade", "order", order.id,
+                    f"升级确认；线路={line.id}; 差价={order.total_amount}")
+        db.commit()
+        db.refresh(order)
+        return order
     if order.order_type != "purchase":
         raise HTTPException(status_code=409, detail="仅普通购买订单可以确认交付")
     if order.status not in {"pending_confirm", "pending_payment", "paid", "processing"}:

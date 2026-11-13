@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -50,7 +51,37 @@ CITY_ALIASES: dict[str, str] = {
     "warsaw": "WAW", "moscow": "MOW", "tel aviv": "TLV",
     "riyadh": "RUH", "johannesburg": "JNB", "dhaka": "DAC",
     "karachi": "KHI", "sofia": "SOF", "budapest": "BUD", "copenhagen": "CPH",
+    # 2026-11-13 首次真实同步暴露的缺口：上游有这些城市且有号段，
+    # 但白名单没有 → 全被写成「待归属」且不开放，客户看不到。
+    "frankfurt am main": "FRA",
+    "houston": "HOU",
+    "san francisco": "SFO",
+    "seattle": "SEA",
+    "las vegas": "LAS",
+    "phoenix": "PHX",
+    "washington": "WAS",
+    "boston": "BOS",
+    "philadelphia": "PHL",
+    "denver": "DEN",
+    # 0 段但确是上游真实城市，先开城市（交付时按城市自动分配号段）
+    "islamabad": "ISB",
+    "sejong": "SJN",
+    "cyberjaya": "CYB",
+    "wroclaw": "WRW",
+    # 故意不收录：Abingdon（英国小城，业务未确认）、Columbia（同名多州，有歧义），
+    # 继续留在「待归属」等人工确认，避免客户选到语义不明的地点。
 }
+
+
+def city_key(name: str) -> str:
+    """城市名归一化后再查别名表。
+
+    上游会返回 ``São Paulo`` 这类带变音符号的名字，直接 lower() 永远匹配不上
+    ``sao paulo``，于是同一城市会多出一行「待归属」、而原行永远没有号段。
+    这里统一做 NFKD 分解 + 去组合符 + 折叠空白。
+    """
+    folded = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode("ascii")
+    return " ".join(folded.lower().split())
 
 
 @dataclass
@@ -59,6 +90,7 @@ class CitySegmentSyncResult:
     cities_seen: int = 0
     matched: int = 0
     created_pending: int = 0
+    claimed: int = 0
     segments_saved: int = 0
     disabled_stale: int = 0
     errors: list[str] = field(default_factory=list)
@@ -69,6 +101,7 @@ class CitySegmentSyncResult:
             "cities_seen": self.cities_seen,
             "matched": self.matched,
             "created_pending": self.created_pending,
+            "claimed": self.claimed,
             "segments_saved": self.segments_saved,
             "disabled_stale": self.disabled_stale,
             "errors": self.errors[:20],
@@ -144,7 +177,7 @@ def sync_city_segments(
                 # 这里保留城市、只记错误，避免把“暂时查不到段”误判成“已下架”。
                 result.errors.append(f"{code}/{name}: {type(exc).__name__}")
 
-            canonical = CITY_ALIASES.get(name.lower())
+            canonical = CITY_ALIASES.get(city_key(name))
             option = None
             if canonical:
                 option = db.scalar(select(CatalogCityOption).where(
@@ -179,6 +212,20 @@ def sync_city_segments(
                 if option.data_source == "manual":
                     # 保留手工维护的启停与展示名，只把真实号段合并进来
                     option.data_source = SUPPLIER_SOURCE
+                # 别名补齐后要把历史上按名字兜底建的「待归属」行认领成规范城市码并开放，
+                # 否则补了别名只是把号段写进一行仍然关闭的记录里，客户依旧看不到。
+                # 只有当规范码还没被别的行占用时才改（法兰克福 FRA 已存在，走上面的精确匹配）。
+                if canonical and option.city_code != canonical and not option.is_enabled:
+                    taken = db.scalar(select(CatalogCityOption.id).where(
+                        CatalogCityOption.resource_category == CATEGORY,
+                        CatalogCityOption.country_code == code,
+                        CatalogCityOption.city_code == canonical,
+                    ))
+                    if taken is None:
+                        option.city_code = canonical
+                        option.is_enabled = True
+                        option.note = None
+                        result.claimed += 1
 
             merged, count = _merge_segments(option.ip_segments, segments)
             if merged != option.ip_segments:

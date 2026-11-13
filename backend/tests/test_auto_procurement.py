@@ -146,12 +146,17 @@ def test_supplier_error_keeps_order_pending_and_marks_failed(db, monkeypatch):
 
 
 def test_non_residential_product_is_skipped(db, monkeypatch):
+    """不属于三条产品线的分类（如数据中心）没有上游货源，直接跳过。
+
+    注：社媒 / 直播 2026-11-13 起也算可采购——它们的货源同样是住宅 IP，
+    只是多一层中转，不再用它们做"不可采购"的例子。
+    """
     session, order = db
     enable_procurement(monkeypatch)
     adapter = FakeAdapter()
     monkeypatch.setattr(procurement_service, "build_readonly_adapter", lambda *a, **k: adapter)
     product = session.get(Product, order.product_id)
-    product.resource_category = "social_media"
+    product.resource_category = "static_datacenter"
     session.commit()
 
     assert procurement_service.auto_procure_order(session, order) is None
@@ -224,3 +229,30 @@ def test_failed_procurement_can_be_retried(db, monkeypatch):
     assert second.status == "succeeded"
     assert second.error_code is None
     assert good.calls == 1
+
+
+def test_transit_category_stops_at_pending_transit(db, monkeypatch):
+    """社媒/直播：IP 买到了但中转没配好，必须停在待配中转，不能交付裸 IP。
+
+    采购是真扣钱，所以这里还钉两件事：上游单号要留、不能标成 failed（otherwise 会诱导重试重复扣款）。
+    """
+    session, order = db
+    product = session.get(Product, order.product_id)
+    product.resource_category = "social_media"
+    session.commit()
+
+    enable_procurement(monkeypatch)
+    adapter = FakeAdapter()
+    monkeypatch.setattr(procurement_service, "build_readonly_adapter", lambda *a, **k: adapter)
+
+    record = procurement_service.auto_procure_order(session, order)
+
+    assert adapter.calls == 1
+    assert record.status == "awaiting_transit"
+    assert record.error_code == "TRANSIT_NOT_READY"
+    assert record.external_order_no == "UPSTREAM-0001"
+    # 关键：没有 CustomerLine，客户拿不到任何东西
+    assert session.scalar(select(CustomerLine).where(CustomerLine.order_id == order.id)) is None
+    session.refresh(order)
+    assert order.status == "pending_transit"
+    assert order.delivered_quantity == 0

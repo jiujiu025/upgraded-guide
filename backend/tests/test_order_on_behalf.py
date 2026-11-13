@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.security import create_access_token, hash_password
 from app.db import get_db
 from app.main import app
-from app.models import AuditLog, Customer, Notification, Order, Product, Region, RetailPriceRule, User
+from app.models import AuditLog, CatalogCityOption, Customer, Notification, Order, Product, Region, RetailPriceRule, User
 from app.models.base import Base
 from app.services.session_service import create_session
 
@@ -223,3 +223,40 @@ def test_customer_self_orders_still_work(api):
     assert response.status_code == 200, response.text
     assert response.json()["created_via"] == "self_service"
     assert response.json()["assigned_sales_id"] == api["sales_a"].id
+
+
+def _seed_us_city(db):
+    db.add(CatalogCityOption(
+        resource_category="static_residential", country_code="US",
+        city_code="LAX", city_name="Los Angeles", ip_segments="23.94.5,149.52",
+        is_enabled=True, sort_order=10, data_source="supplier_global_proxy",
+    ))
+    db.commit()
+
+
+def test_order_records_customer_chosen_city_and_segment(api):
+    """后台下单要能把「城市 + IP 段」带进订单，采购时按这个快照下单。"""
+    _seed_us_city(api["db"])
+    response = post(api, "admin", city_code="LAX", ip_segment="149.52")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["requested_city_code"] == "LAX"
+    assert body["requested_city_name"] == "Los Angeles"
+    assert body["requested_ip_segment"] == "149.52"
+
+
+def test_rejects_segment_belonging_to_another_city(api):
+    """段不属于所选城市时必须 422，不能静默换成别的段。"""
+    _seed_us_city(api["db"])
+    response = post(api, "admin", city_code="LAX", ip_segment="9.9.9")
+    assert response.status_code == 422, response.text
+    assert "不属于" in response.text or "不可售" in response.text
+
+
+def test_city_optional_and_defaults_to_auto_assign(api):
+    """城市留空表示自动分配，不能挡住下单。"""
+    response = post(api, "admin")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["requested_city_code"] is None
+    assert body["requested_ip_segment"] is None

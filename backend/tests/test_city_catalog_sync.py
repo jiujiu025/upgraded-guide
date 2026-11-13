@@ -18,7 +18,7 @@ from app.db import get_db
 from app.main import app
 from app.models import CatalogCityOption, Product, Region, User
 from app.models.base import Base
-from app.services.city_catalog_sync import sync_city_segments, sync_city_segments_985
+from app.services.city_catalog_sync import city_key, sync_city_segments, sync_city_segments_985
 from app.services.city_option_service import CitySelectionError, customer_options, resolve_choice
 from app.services.session_service import create_session
 from app.suppliers.base import SupplierRegionItem
@@ -36,7 +36,7 @@ class FakeAdapter:
         self.calls.append(("cities", country_code))
         return [
             SupplierRegionItem("653", "US", "美国", "3911", "Los Angeles"),
-            SupplierRegionItem("653", "US", "美国", "3915", "Washington"),
+            SupplierRegionItem("653", "US", "美国", "3915", "Springfield"),
         ]
 
     def list_ip_segments(self, *, country_code=None, city_code=None, page=1, page_size=20, **kwargs):
@@ -82,7 +82,7 @@ def test_sync_merges_segments_and_keeps_unmatched_cities_pending():
         assert segments == ["23.94.5", "149.52", "38.30"]
         assert lax.is_enabled is True
 
-        pending = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_name == "Washington"))
+        pending = db.scalar(select(CatalogCityOption).where(CatalogCityOption.city_name == "Springfield"))
         assert pending is not None
         assert pending.is_enabled is False
         assert pending.note and "待归属" in pending.note
@@ -233,15 +233,15 @@ def test_sync_endpoint_updates_customer_visible_segments(api):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "success"
-    # LA 合并后 3 段（原有 1 + 上游 2），Washington 1 段，合计 4
+    # LA 合并后 3 段（原有 1 + 上游 2），Springfield 1 段，合计 4
     assert body["segments_saved"] == 4
 
     listed = api["client"].get("/api/admin/catalog-management/cities?country_code=US",
                                headers=api["headers"]["admin"]).json()
     lax = next(item for item in listed["items"] if item["city_code"] == "LAX")
     assert lax["segments"] == ["23.94.5", "149.52", "38.30"]
-    washington = next(item for item in listed["items"] if item["city_name"] == "Washington")
-    assert washington["is_enabled"] is False
+    springfield = next(item for item in listed["items"] if item["city_name"] == "Springfield")
+    assert springfield["is_enabled"] is False
 
 
 def _customer_product(db):
@@ -303,6 +303,72 @@ def test_sync_disables_pool_one_cities_missing_from_upstream():
         ))
         # 只处理池 1 自己的行，手工行不应被同步顺手改掉
         assert manual.is_enabled is True
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_city_key_folds_accent_and_whitespace():
+    """上游会返回 São Paulo 这类带变音符号的名字，不归一化就永远匹配不上白名单。"""
+    assert city_key("São Paulo") == "sao paulo"
+    assert city_key("  FRANKFURT   Am Main ") == "frankfurt am main"
+    assert city_key("Los Angeles") == "los angeles"
+
+
+def test_sync_claims_pending_row_when_alias_now_known():
+    """补了别名之后，历史上按名字兜底建的待归属行要认领成规范码并开放。"""
+    engine, db = make_session()
+    try:
+        db.add(Region(name="美国", country_code="US"))
+        db.add(CatalogCityOption(
+            resource_category="static_residential", country_code="US",
+            city_code="HOUSTON", city_name="Houston", ip_segments="",
+            is_enabled=False, sort_order=500,
+            note="待归属：上游城市名，确认后启用", data_source="supplier_global_proxy",
+        ))
+        db.commit()
+
+        adapter = FakeAdapter()
+        adapter.list_cities = lambda *a, **k: [SupplierRegionItem("653", "US", "美国", "3910", "Houston")]
+        result = sync_city_segments(db, adapter)
+        db.commit()
+
+        assert result.claimed == 1
+        row = db.scalar(select(CatalogCityOption).where(CatalogCityOption.country_code == "US"))
+        assert row.city_code == "HOU"
+        assert row.is_enabled is True
+        assert row.note is None
+        assert row.ip_segments == "44.1"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_merges_renamed_city_into_existing_code():
+    """法兰克福上游叫 Frankfurt Am Main，已有 FRA 行时不能新建第二行。"""
+    engine, db = make_session()
+    try:
+        db.add(Region(name="德国", country_code="DE"))
+        db.add(CatalogCityOption(
+            resource_category="static_residential", country_code="DE",
+            city_code="FRA", city_name="法兰克福", ip_segments="",
+            is_enabled=True, sort_order=10, data_source="supplier_global_proxy",
+        ))
+        db.commit()
+
+        adapter = FakeAdapter()
+        adapter.list_countries = lambda *a, **k: [SupplierRegionItem("1", "DE", "德国")]
+        adapter.list_cities = lambda *a, **k: [
+            SupplierRegionItem("1", "DE", "德国", "5001", "Frankfurt Am Main"),
+        ]
+        result = sync_city_segments(db, adapter)
+        db.commit()
+
+        rows = db.scalars(select(CatalogCityOption)).all()
+        assert len(rows) == 1
+        assert rows[0].city_code == "FRA"
+        assert rows[0].ip_segments == "44.1"
+        assert result.created_pending == 0
     finally:
         db.close()
         engine.dispose()

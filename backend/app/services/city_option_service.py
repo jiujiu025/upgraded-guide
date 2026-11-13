@@ -25,6 +25,10 @@ AUTO_ASSIGN_LABEL = "自动分配（不指定城市）"
 # 采购只走资源池 1。城市清单里只有这个来源的行能保证“能选就能买”；
 # manual 是历史手工清单，985 目前只有只读接口。见 docs/城市号段来源与多池归属方案.md。
 POOL_ONE_SOURCE = "supplier_global_proxy"
+# 社媒 / 直播没有自己的城市清单（上游同步只覆盖住宅 IP 的位置）。
+# 它们的落地城市复用住宅清单，只借“地理位置”，号段不借——
+# 住宅号段是住宅 IP 的前缀，跟社媒/直播机房的落地位置没有关系。
+SHARED_CITY_CATEGORY = "static_residential"
 SEGMENT_SPLIT_PATTERN = re.compile(r"[,，;；\s]+")
 # 上游号段形如 ``1.1.1``（/24 的前三段），也允许 ``1.1.1.0/24`` 这类完整写法。
 SEGMENT_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.\-/]{1,30}$")
@@ -92,6 +96,29 @@ def options_of(db: Session, resource_category: str | None, country_code: str | N
     return list(db.scalars(query.order_by(CatalogCityOption.sort_order, CatalogCityOption.city_code)).all())
 
 
+def _trusted(rows: list[CatalogCityOption]) -> list[CatalogCityOption]:
+    """有池 1 同步行时只信池 1，否则退回已启用清单（历史手工国家仍可用）。"""
+    trusted = [row for row in rows if row.data_source == POOL_ONE_SOURCE]
+    return trusted or rows
+
+
+def city_rows_for(db: Session, resource_category: str | None,
+                  country_code: str | None) -> tuple[list[CatalogCityOption], bool]:
+    """返回 (城市行, 是否来自住宅清单的共享回退)。
+
+    社媒/直播没有自己的城市清单时，借用住宅 IP 的位置清单：客户选的是“落地在哪个城市”，
+    不涉及号段归属。有自有清单的分类仍然优先用自己的。
+    """
+    rows = options_of(db, resource_category, country_code, enabled_only=True)
+    if rows:
+        return _trusted(rows), False
+    if resource_category and resource_category != SHARED_CITY_CATEGORY:
+        shared = options_of(db, SHARED_CITY_CATEGORY, country_code, enabled_only=True)
+        if shared:
+            return _trusted(shared), True
+    return [], False
+
+
 def sellable_options_of(db: Session, resource_category: str | None, country_code: str | None) -> list[CatalogCityOption]:
     """客户真正能选的城市：有池 1 同步数据时，只信池 1。
 
@@ -101,10 +128,12 @@ def sellable_options_of(db: Session, resource_category: str | None, country_code
 
     没有池 1 数据的国家退回已启用清单（历史手工维护的国家仍可用），
     这是兼容路径而不是保证：管理后台会明确标出哪些行还没被池 1 核对过。
+
+    社媒 / 直播没有自有清单时回退到住宅清单，见 ``city_rows_for``。
     """
-    rows = options_of(db, resource_category, country_code, enabled_only=True)
-    trusted = [row for row in rows if row.data_source == POOL_ONE_SOURCE]
-    return trusted or rows
+    rows, _shared = city_rows_for(db, resource_category, country_code)
+    return rows
+
 
 
 def option_view(option: CatalogCityOption) -> dict:
@@ -127,9 +156,10 @@ def customer_options(db: Session, product: Product) -> dict:
     """客户下单页用的城市清单。没配城市时 supported=False，前端只显示"自动分配"。"""
     region = db.get(Region, product.region_id) if product.region_id else None
     country_code = (region.country_code or "").upper() if region else ""
-    items = sellable_options_of(db, product.resource_category, country_code) if region else []
+    rows, shared = city_rows_for(db, product.resource_category, country_code) if region else ([], False)
     return {
-        "supported": bool(items),
+        "supported": bool(rows),
+        "shared": shared,
         "resource_category": product.resource_category,
         "country_code": country_code,
         "country_name": region.name if region else None,
@@ -138,10 +168,12 @@ def customer_options(db: Session, product: Product) -> dict:
             {
                 "city_code": option.city_code,
                 "city_name": option.city_name,
-                "segments": normalize_segments(option.ip_segments),
+                # 共享清单只借位置，不借号段：住宅段跟社媒/直播落地机房无关，
+                # 留着会让客户以为可选段，提交时又被拒。
+                "segments": [] if shared else normalize_segments(option.ip_segments),
                 "note": option.note,
             }
-            for option in items
+            for option in rows
         ],
     }
 
@@ -171,9 +203,13 @@ def resolve_choice(db: Session, product: Product, region: Region,
         return CityChoice()
 
     country_code = (region.country_code or "").upper()
-    options = sellable_options_of(db, product.resource_category, country_code)
+    options, shared = city_rows_for(db, product.resource_category, country_code)
     if not options:
         raise CitySelectionError("该地区暂不支持指定城市，请选择自动分配")
+    # 共享回来的是住宅位置清单，号段是住宅 IP 的前缀，跟自有线路的落地机房无关。
+    # 只允许指定城市，不允许指定段——否则等于给了客户一个交付不了的承诺。
+    if shared and segment_raw:
+        raise CitySelectionError("该产品线是自有线路，不按住宅 IP 段交付；城市可以指定，号段请留空")
 
     option = _match_option(options, code_raw) if code_raw else None
     if code_raw and option is None:

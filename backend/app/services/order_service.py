@@ -136,6 +136,62 @@ def settle_renewal(db: Session, order: Order, payment_status: str) -> CustomerLi
     return line
 
 
+def settle_upgrade(db: Session, order: Order, payment_status: str) -> CustomerLine:
+    """升级订单收款后把线路切到更高档产品线。
+
+    口径（2026-11-13 玖夜确认）：
+    - 只补差价 =（目标单价 − 原单价）× 原订单周期倍数，**不按剩余天数折算**；
+    - **到期时间完全不变**，升级不重新计时；
+    - 原住宅 IP 保留，社交/直播只是多一层中转；中转没配好时线路标待配中转，
+      客户继续用原来的直连地址，不会断。
+
+    幂等：``renewal_completed_at`` 已写入时直接返回。续费与升级共用这个标记，
+    因为两者都是"针对某条既有线路的一次性操作"，且都只允许结算一次。
+    """
+    if order.renewal_completed_at is not None:
+        return db.get(CustomerLine, order.renewal_line_id)
+    if order.order_type != "upgrade":
+        raise HTTPException(status_code=409, detail="不是升级订单")
+    if order.status in {"cancelled", "refunding", "refunded"}:
+        raise HTTPException(status_code=409, detail="订单已取消或退款，不能完成升级")
+    if not order.renewal_line_id:
+        raise HTTPException(status_code=409, detail="升级订单缺少原线路信息")
+    line = db.scalar(select(CustomerLine).where(
+        CustomerLine.id == order.renewal_line_id,
+        CustomerLine.customer_id == order.customer_id,
+    ).with_for_update())
+    if not line:
+        raise HTTPException(status_code=409, detail="升级线路不存在或与订单客户不匹配")
+    if line.status == "deleted":
+        raise HTTPException(status_code=409, detail="线路已删除，不能升级")
+    target = db.get(Product, order.product_id)
+    if target is None:
+        raise HTTPException(status_code=409, detail="升级目标产品不存在")
+
+    from app.services.transit_service import requires_transit
+
+    now = utcnow()
+    line.product_id = target.id
+    if line.status == "expired":
+        line.status = "active"
+    # 到期时间不动：升级只换交付方式，不重算周期。
+    if requires_transit(target.resource_category):
+        line.status = "pending_transit"
+
+    order.status = "completed"
+    order.payment_status = payment_status
+    order.renewal_completed_at = now
+
+    customer = db.get(Customer, order.customer_id)
+    if customer and customer.user_id:
+        add_notification(
+            db, customer.user_id, "线路已升级",
+            f"升级订单 {order.order_no} 已完成，线路已切换到「{target.name}」，"
+            f"到期时间不变（{line.expires_at:%Y-%m-%d}）。", "upgrade",
+        )
+    return line
+
+
 def rollback_renewal_extension(db: Session, order: Order) -> CustomerLine | None:
     """续费退款后回退延长天数。
 
