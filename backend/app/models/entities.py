@@ -744,3 +744,89 @@ class CatalogCityOption(TimestampMixin, Base):
     note: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # manual = 后台手填；supplier_985 / supplier_global_proxy = 上游同步写入。
     data_source: Mapped[str] = mapped_column(String(30), default="manual", server_default="manual", nullable=False)
+
+
+class TransitVps(TimestampMixin, Base):
+    """一台承接中转的 VPS（3x-ui 面板）。
+
+    业务拓扑（2026-11-26 玖夜确认）：中转机不按"客户买哪个国家"一一对应，而是按
+    **区域组**承接——北美/欧洲的订单都落到美国机，东南亚/南非等落到香港机。
+    所以机器只标 ``group_code``，具体国家走 ``TransitRoute`` 映射，新增国家不用建机器。
+
+    reality 密钥按机器一对（与人工操作一致）：同一台机上所有入站共用同一组
+    privateKey/publicKey/shortId，客户端链接里的 pbk 相同。
+    """
+
+    __tablename__ = "transit_vps"
+
+    name: Mapped[str] = mapped_column(String(60), nullable=False, unique=True)
+    # us / hk 这类区域组；与 TransitRoute.group_code 对应
+    group_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    # 面板地址，含面板路径，例 https://1.2.3.4:54321/AbCd
+    base_url: Mapped[str] = mapped_column(String(255), nullable=False)
+    username: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    encrypted_password: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 以后若改用面板 API Token，写这里；两者都有时 Token 优先
+    encrypted_api_token: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 客户实际连接的地址：机器有 NAT/多网卡时和面板地址不同
+    connect_host: Mapped[str] = mapped_column(String(120), nullable=False)
+    # 留空 = 每条入站自动生成独立密钥对（面板现状就是这样）；填了则固定复用
+    reality_private_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reality_public_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reality_short_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sni: Mapped[str] = mapped_column(String(120), default="yahoo.com", server_default="yahoo.com", nullable=False)
+    dest: Mapped[str] = mapped_column(String(160), default="yahoo.com:443", server_default="yahoo.com:443", nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(20), default="random", server_default="random", nullable=False)
+    # 入站端口分配区间：避开面板端口和已有业务端口
+    port_start: Mapped[int] = mapped_column(Integer, default=52000, server_default="52000", nullable=False)
+    port_end: Mapped[int] = mapped_column(Integer, default=52999, server_default="52999", nullable=False)
+    # 单机承载上限：每次改 Xray 模板要重启，同机客户会瞬断，必须限量
+    max_inbounds: Mapped[int] = mapped_column(Integer, default=200, server_default="200", nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False, index=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class TransitRoute(TimestampMixin, Base):
+    """国家 → 中转机区域组。北美/欧洲默认 us，东南亚/南非默认 hk，后台可改。"""
+
+    __tablename__ = "transit_routes"
+    __table_args__ = (
+        UniqueConstraint("country_code", name="uq_transit_route_country"),
+    )
+
+    country_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    group_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class TransitProvision(TimestampMixin, Base):
+    """某张订单第 N 条线路的中转配置记录（入站 + 出站 + 路由）。
+
+    幂等键 (order_id, line_index)：重试时先看这条记录，已建好的入站不再重建。
+    IP 已经买过、钱已花，所以任何失败都不能把订单标成 failed，只能停在待配中转。
+    """
+
+    __tablename__ = "transit_provisions"
+    __table_args__ = (
+        UniqueConstraint("order_id", "line_index", name="uq_transit_provision_order_line"),
+    )
+
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), nullable=False, index=True)
+    line_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    transit_vps_id: Mapped[int | None] = mapped_column(ForeignKey("transit_vps.id"), nullable=True, index=True)
+    # pending / inbound_created / configured / failed
+    status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending", nullable=False, index=True)
+    inbound_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inbound_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    uuid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    outbound_tag: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    exit_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 上游 socks 账密（加密）。重试时靠它重建出站：
+    # procurements.response_payload 出于安全只存 ip/port，不存密码，丢了就只能找上游要。
+    encrypted_exit_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remark: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    node_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)

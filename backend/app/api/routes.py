@@ -1351,6 +1351,187 @@ def customer_renew_line(line_id: int, payload: RenewalIn, db: Session = Depends(
         raise
 
 
+def _line_upgrade_options_payload(db: Session, line: CustomerLine) -> dict:
+    """一条线路能升级到哪些产品线，以及各自要补多少差价。
+
+    客户自助、销售代客、管理员三个入口共用这一份口径：差价 =（目标单价 − 当前单价）
+    × 原订单周期倍数，不按剩余天数折算；**到期时间不变**。前端只展示，不自己算钱。
+    """
+    current = db.get(Product, line.product_id)
+    if current is None or not current.resource_category:
+        # 老数据里有些产品没归入资源分类（无法按价目表算升级差价）。
+        # 这不是"崩溃"，而是一条明确的可解释状态，前端据此提示而不是弹红色错误。
+        return {
+            "current": None,
+            "options": [],
+            "reason": "线路当前产品没有资源分类，无法计算升级差价；请先在商品管理里归类",
+        }
+    current_unit, _ = calculate_order_price(db, current, 1, current.billing_days)
+    candidates = db.scalars(select(Product).where(
+        Product.region_id == current.region_id,
+        Product.billing_days == current.billing_days,
+        Product.is_active.is_(True),
+        Product.resource_category.is_not(None),
+        Product.resource_category != current.resource_category,
+    ).order_by(Product.id)).all()
+    options = []
+    seen: set[str] = set()
+    for item in candidates:
+        # 同一分类可能有多条重复商品行。下单时取 id 最小的一条，这里必须只保留同一条，
+        # 否则前端展示的差价会和实际建单金额对不上。
+        if item.resource_category in seen:
+            continue
+        try:
+            unit, _ = calculate_order_price(db, item, 1, current.billing_days)
+        except HTTPException:
+            continue
+        diff = round(float(unit) - float(current_unit), 2)
+        if diff <= 0:
+            continue
+        seen.add(item.resource_category)
+        options.append({
+            "category": item.resource_category,
+            "label": RESOURCE_CATEGORY_CODES.get(item.resource_category, item.resource_category),
+            "product_id": item.id,
+            "product_name": item.name,
+            "unit_price": float(unit),
+            "diff": diff,
+        })
+    # 便宜的档位排前面：客户先看到"视频专线 补 ¥35"，不是直接看到直播的 ¥1040。
+    options.sort(key=lambda item: item["diff"])
+    return {
+        "current": {
+            "category": current.resource_category,
+            "label": RESOURCE_CATEGORY_CODES.get(current.resource_category, current.resource_category),
+            "product_name": current.name, "unit_price": float(current_unit),
+            "billing_days": current.billing_days, "expires_at": line.expires_at,
+        },
+        "options": options,
+    }
+
+
+def _create_upgrade_order(db: Session, actor: User, customer: Customer, line: CustomerLine,
+                          payload: "LineUpgradeIn", created_via: str) -> Order:
+    """把一条既有线路升级到更高的产品线（静态住宅 → 视频/社媒、直播）。
+
+    口径（业务确认）：只补差价 =（目标单价 − 原单价）× 原订单周期倍数，
+    **到期时间不变**。原住宅 IP 保留，社媒/直播只是多一层中转。
+
+    这里只创建待付款/待确认的升级单，线路在收款后才切换（见 ``settle_upgrade``）——
+    先改线路再收钱，退款时就回不去了。
+    """
+    if line.status == "deleted":
+        raise HTTPException(status_code=409, detail="线路已删除，不能升级")
+    if line.status == "expired":
+        # 升级不动到期时间，过期线路升级会变成「状态使用中、到期日已过」的矛盾数据。
+        raise HTTPException(status_code=409, detail="线路已过期，请先续费再升级")
+    if customer.is_deleted or not customer.user_id:
+        raise HTTPException(status_code=409, detail="客户账号不可用，无法升级")
+    current = db.get(Product, line.product_id)
+    if current is None:
+        raise HTTPException(status_code=409, detail="线路当前产品不存在")
+    if payload.target_category not in RESOURCE_CATEGORY_CODES:
+        raise HTTPException(status_code=422, detail="目标产品类型无效")
+    if payload.target_category == current.resource_category:
+        raise HTTPException(status_code=409, detail="目标类型与当前类型相同，无需升级")
+
+    target = db.scalar(select(Product).where(
+        Product.region_id == current.region_id,
+        Product.billing_days == current.billing_days,
+        Product.resource_category == payload.target_category,
+        Product.is_active.is_(True),
+    ).order_by(Product.id).limit(1))
+    if target is None:
+        raise HTTPException(status_code=409, detail="该国家与周期下没有目标产品线，请先上架对应 SKU")
+
+    current_unit, _ = calculate_order_price(db, current, 1, current.billing_days)
+    target_unit, _ = calculate_order_price(db, target, 1, current.billing_days)
+    diff = round(float(target_unit) - float(current_unit), 2)
+    if diff <= 0:
+        raise HTTPException(status_code=409, detail="只能升级到单价更高的产品线")
+
+    existing = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+    if existing is not None:
+        if existing.renewal_line_id != line.id:
+            raise HTTPException(status_code=409, detail="请求重复但线路不一致，请刷新后重试")
+        return existing
+
+    # 同一线路不允许多张待处理升级单：前端双击、网络重试都可能绕过幂等键。
+    pending = db.scalar(select(Order).where(
+        Order.renewal_line_id == line.id,
+        Order.order_type == "upgrade",
+        Order.status.in_({"pending_confirm", "pending_payment"}),
+    ))
+    if pending is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该线路已有待处理的升级单（{pending.order_no}），请先完成或取消那一单",
+        )
+
+    order = Order(
+        order_no=f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}",
+        customer_id=customer.id, product_id=target.id, source_type="owned",
+        # 记住升级前的产品：退款要按它把线路切回去，否则钱退了升级还留着。
+        previous_product_id=current.id,
+        idempotency_key=payload.idempotency_key,
+        amount=diff, quantity=1, billing_days=current.billing_days,
+        unit_price=diff, total_amount=diff,
+        region_id=current.region_id,
+        region_name=(db.get(Region, current.region_id).name if current.region_id else ""),
+        product_name=f"{target.name}（升级）",
+        payment_method=payload.payment_method, payment_status="unpaid",
+        status=initial_order_status(payload.payment_method, "upgrade"),
+        order_type="upgrade", renewal_line_id=line.id,
+        assigned_sales_id=customer.sales_id, created_via=created_via,
+        created_by_user_id=actor.id,
+        remark=f"升级差价：{target.name} {target_unit} − {current.name} {current_unit} = {diff}；到期时间不变",
+    )
+    db.add(order)
+    db.flush()
+    write_audit(db, actor, "upgrade_line", "customer_line", line.id,
+                f"线路={line.id}; 从={current.resource_category}; 到={payload.target_category}; "
+                f"差价={diff}; 周期={current.billing_days}天; 订单={order.order_no}; 来源={created_via}")
+    return order
+
+
+@router.get("/customer/lines/{line_id}/upgrade-options")
+def customer_line_upgrade_options(line_id: int, db: Session = Depends(get_db),
+                                 user: User = Depends(require_roles("customer"))):
+    """客户看自己线路的升级选项：能升到哪些产品线、各补多少差价。"""
+    customer = get_customer_profile(db, user)
+    line = db.scalar(select(CustomerLine).where(CustomerLine.id == line_id,
+                                                 CustomerLine.customer_id == customer.id))
+    if not line or line.status == "deleted":
+        raise HTTPException(status_code=404, detail="线路不存在或无权访问")
+    return _line_upgrade_options_payload(db, line)
+
+
+@router.post("/customer/lines/{line_id}/upgrade", response_model=OrderOut, status_code=201)
+def customer_upgrade_line(line_id: int, payload: "LineUpgradeIn", db: Session = Depends(get_db),
+                          user: User = Depends(require_roles("customer"))):
+    """客户自助升级：只建升级单，付清差价后线路自动切换，到期时间不变。"""
+    customer = get_customer_profile(db, user)
+    line = db.scalar(select(CustomerLine).where(CustomerLine.id == line_id,
+                                                 CustomerLine.customer_id == customer.id))
+    if not line or line.status == "deleted":
+        raise HTTPException(status_code=404, detail="线路不存在或无权访问")
+    try:
+        order = _create_upgrade_order(db, user, customer, line, payload, "self_service")
+        db.commit()
+        db.refresh(order)
+        return order
+    except IntegrityError:
+        # 并发双击绕过前面的幂等检查时，按幂等键返回同一张单，不报 500。
+        db.rollback()
+        existing = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+        if existing is not None:
+            return existing
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
 def received_revenue_cents(db: Session, customer_ids, order_type: str, start_utc: datetime, end_utc: datetime) -> int:
     """区间内某类订单的实际回款（分）：已收款减去同期已完成的退款。
 
@@ -1491,6 +1672,53 @@ def sales_renew_line(line_id: int, payload: RenewalIn, db: Session = Depends(get
         db.commit()
         db.refresh(order)
         return order
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.get("/sales/lines/{line_id}/upgrade-options")
+def sales_line_upgrade_options(line_id: int, db: Session = Depends(get_db),
+                               user: User = Depends(require_roles("sales"))):
+    """销售看名下客户线路能升到哪些产品线、各补多少差价。"""
+    line = db.scalar(select(CustomerLine).where(
+        CustomerLine.id == line_id,
+        CustomerLine.customer_id.in_(scoped_customer_ids(db, user)),
+    ))
+    if not line or line.status == "deleted":
+        raise HTTPException(status_code=404, detail="线路不存在或无权访问")
+    return _line_upgrade_options_payload(db, line)
+
+
+@router.post("/sales/lines/{line_id}/upgrade", response_model=OrderOut, status_code=201)
+def sales_upgrade_line(line_id: int, payload: LineUpgradeIn, db: Session = Depends(get_db),
+                       user: User = Depends(require_roles("sales"))):
+    """销售代客户升级，金额与客户端完全一致。
+
+    与代客续费同一口径：不能替客户动用余额或在线支付，只能落到「联系经理确认」。
+    """
+    if payload.payment_method != "contact_manager":
+        raise HTTPException(status_code=422, detail="销售代客户升级只能选择「联系经理确认」")
+    line = db.scalar(select(CustomerLine).where(
+        CustomerLine.id == line_id,
+        CustomerLine.customer_id.in_(scoped_customer_ids(db, user)),
+    ))
+    if not line or line.status == "deleted":
+        raise HTTPException(status_code=404, detail="线路不存在或无权访问")
+    customer = db.get(Customer, line.customer_id)
+    if customer is None or customer.is_deleted:
+        raise HTTPException(status_code=404, detail="客户不存在或无权访问")
+    try:
+        order = _create_upgrade_order(db, user, customer, line, payload, "sales_assisted")
+        db.commit()
+        db.refresh(order)
+        return order
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
+        if existing is not None:
+            return existing
+        raise
     except Exception:
         db.rollback()
         raise
@@ -1898,49 +2126,7 @@ def admin_line_upgrade_options(line_id: int, db: Session = Depends(get_db),
     line = db.get(CustomerLine, line_id)
     if not line or line.status == "deleted":
         raise HTTPException(status_code=404, detail="线路不存在或已删除")
-    current = db.get(Product, line.product_id)
-    if current is None or not current.resource_category:
-        # 老数据里有些产品没归入资源分类（无法按价目表算升级差价）。
-        # 这不是"崩溃"，而是一条明确的可解释状态，前端据此提示而不是弹红色错误。
-        return {
-            "current": None,
-            "options": [],
-            "reason": "线路当前产品没有资源分类，无法计算升级差价；请先在商品管理里归类",
-        }
-    current_unit, _ = calculate_order_price(db, current, 1, current.billing_days)
-    candidates = db.scalars(select(Product).where(
-        Product.region_id == current.region_id,
-        Product.billing_days == current.billing_days,
-        Product.is_active.is_(True),
-        Product.resource_category.is_not(None),
-        Product.resource_category != current.resource_category,
-    ).order_by(Product.id)).all()
-    options = []
-    for item in candidates:
-        try:
-            unit, _ = calculate_order_price(db, item, 1, current.billing_days)
-        except HTTPException:
-            continue
-        diff = round(float(unit) - float(current_unit), 2)
-        if diff <= 0:
-            continue
-        options.append({
-            "category": item.resource_category,
-            "label": RESOURCE_CATEGORY_CODES.get(item.resource_category, item.resource_category),
-            "product_id": item.id,
-            "product_name": item.name,
-            "unit_price": float(unit),
-            "diff": diff,
-        })
-    return {
-        "current": {
-            "category": current.resource_category,
-            "label": RESOURCE_CATEGORY_CODES.get(current.resource_category, current.resource_category),
-            "product_name": current.name, "unit_price": float(current_unit),
-            "billing_days": current.billing_days, "expires_at": line.expires_at,
-        },
-        "options": options,
-    }
+    return _line_upgrade_options_payload(db, line)
 
 
 @router.post("/admin/lines/{line_id}/upgrade", status_code=201)
@@ -1957,79 +2143,11 @@ def admin_upgrade_line(line_id: int, payload: LineUpgradeIn, db: Session = Depen
     line = db.get(CustomerLine, line_id)
     if not line or line.status == "deleted":
         raise HTTPException(status_code=404, detail="线路不存在或已删除")
-    if line.status == "expired":
-        # 升级不动到期时间，过期线路升级会变成「状态使用中、到期日已过」的矛盾数据。
-        raise HTTPException(status_code=409, detail="线路已过期，请先续费再升级")
     customer = db.get(Customer, line.customer_id)
-    if not customer or customer.is_deleted or not customer.user_id:
+    if customer is None:
         raise HTTPException(status_code=409, detail="客户账号不可用，无法升级")
-    current = db.get(Product, line.product_id)
-    if current is None:
-        raise HTTPException(status_code=409, detail="线路当前产品不存在")
-    if payload.target_category not in RESOURCE_CATEGORY_CODES:
-        raise HTTPException(status_code=422, detail="目标产品类型无效")
-    if payload.target_category == current.resource_category:
-        raise HTTPException(status_code=409, detail="目标类型与当前类型相同，无需升级")
-
-    target = db.scalar(select(Product).where(
-        Product.region_id == current.region_id,
-        Product.billing_days == current.billing_days,
-        Product.resource_category == payload.target_category,
-        Product.is_active.is_(True),
-    ).order_by(Product.id).limit(1))
-    if target is None:
-        raise HTTPException(status_code=409, detail="该国家与周期下没有目标产品线，请先上架对应 SKU")
-
-    current_unit, _ = calculate_order_price(db, current, 1, current.billing_days)
-    target_unit, _ = calculate_order_price(db, target, 1, current.billing_days)
-    diff = round(float(target_unit) - float(current_unit), 2)
-    if diff <= 0:
-        raise HTTPException(status_code=409, detail="只能升级到单价更高的产品线")
-
-    existing = db.scalar(select(Order).where(Order.idempotency_key == payload.idempotency_key))
-    if existing is not None:
-        if existing.renewal_line_id != line.id:
-            raise HTTPException(status_code=409, detail="请求重复但线路不一致，请刷新后重试")
-        existing_customer = db.get(Customer, existing.customer_id)
-        return {**{column.name: getattr(existing, column.name) for column in Order.__table__.columns},
-                "customer_name": existing_customer.name if existing_customer else "未知客户"}
-
-    # 同一线路不允许多张待处理升级单：前端双击、网络重试都可能绕过幂等键。
-    pending = db.scalar(select(Order).where(
-        Order.renewal_line_id == line.id,
-        Order.order_type == "upgrade",
-        Order.status.in_({"pending_confirm", "pending_payment"}),
-    ))
-    if pending is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"该线路已有待处理的升级单（{pending.order_no}），请先完成或取消那一单",
-        )
-
-    order = Order(
-        order_no=f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}",
-        customer_id=customer.id, product_id=target.id, source_type="owned",
-        # 记住升级前的产品：退款要按它把线路切回去，否则钱退了升级还留着。
-        previous_product_id=current.id,
-        idempotency_key=payload.idempotency_key,
-        amount=diff, quantity=1, billing_days=current.billing_days,
-        unit_price=diff, total_amount=diff,
-        region_id=current.region_id,
-        region_name=(db.get(Region, current.region_id).name if current.region_id else ""),
-        product_name=f"{target.name}（升级）",
-        payment_method=payload.payment_method, payment_status="unpaid",
-        status=initial_order_status(payload.payment_method, "upgrade"),
-        order_type="upgrade", renewal_line_id=line.id,
-        assigned_sales_id=customer.sales_id, created_via="admin",
-        created_by_user_id=user.id,
-        remark=f"升级差价：{target.name} {target_unit} − {current.name} {current_unit} = {diff}；到期时间不变",
-    )
     try:
-        db.add(order)
-        db.flush()
-        write_audit(db, user, "upgrade_line", "customer_line", line.id,
-                    f"线路={line.id}; 从={current.resource_category}; 到={payload.target_category}; "
-                    f"差价={diff}; 周期={current.billing_days}天; 订单={order.order_no}")
+        order = _create_upgrade_order(db, user, customer, line, payload, "admin")
         db.commit()
         db.refresh(order)
     except IntegrityError:
@@ -2119,7 +2237,7 @@ def retry_order_procurement(
     if order.status == "pending_transit":
         raise HTTPException(
             status_code=409,
-            detail="订单在等待配置中转，重试采购不会推进；请先完成中转配置再交付",
+            detail="订单在等待配置中转，重试采购不会推进；请改用「重试配置中转」",
         )
     if order.payment_status != "paid":
         raise HTTPException(status_code=409, detail="订单还没收款，不能开通")

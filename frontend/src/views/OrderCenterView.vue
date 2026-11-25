@@ -193,7 +193,7 @@ function money(value, digits = 2) {
   return value == null ? '—' : `¥${Number(value).toFixed(digits)}`
 }
 function stateLabel(status) {
-  return ({ active: '使用中', expired: '已到期', disabled: '已停用', pending_payment: '待付款', pending_confirm: '待审核', paid: '已付款', pending_delivery: '待交付', pending_transit: '待配中转', partially_delivered: '部分交付', delivered: '已交付', cancelled: '已取消', completed: '已完成' })[status] || status || '未知'
+  return ({ active: '使用中', expired: '已到期', disabled: '已停用', pending_payment: '待付款', pending_confirm: '待审核', paid: '已付款', pending_delivery: '待交付', pending_transit: '待开通中转', partially_delivered: '部分交付', delivered: '已交付', cancelled: '已取消', completed: '已完成' })[status] || status || '未知'
 }
 function stateTone(status) {
   return ['active', 'paid', 'completed', 'delivered'].includes(status) ? 'good'
@@ -415,7 +415,7 @@ onMounted(load)
               </span>
               <span v-else-if="sellNeedsTransit">
                 <b>社媒 / 直播：自动采购住宅 IP + 自动配置 VPS 中转</b>
-                <small>付款后先买住宅 IP，再建中转。中转配置完成前订单停在「待配中转」，不会把裸 IP 交给客户。</small>
+                <small>付款后先买住宅 IP，再建中转。中转配置完成前订单停在「待开通中转」，不会把裸 IP 交给客户。</small>
               </span>
               <span v-else>
                 <b>静态住宅：自动采购住宅 IP 并直接交付</b>

@@ -4,19 +4,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import router
-from app.api.inbox_routes import router as inbox_router
-from app.api.finance_routes import router as finance_router
-from app.api.customer_admin_routes import router as customer_admin_router
+from app.api.audit_routes import router as audit_router
 from app.api.catalog_admin_routes import router as catalog_admin_router
+from app.api.customer_admin_routes import router as customer_admin_router
+from app.api.finance_export_routes import router as finance_export_router
+from app.api.finance_routes import router as finance_router
+from app.api.inbox_routes import router as inbox_router
+from app.api.notification_channel_routes import router as notification_channel_router
+from app.api.outreach_routes import router as outreach_router
+from app.api.procurement_routes import router as procurement_router
+from app.api.routes import router
+from app.api.subscription_routes import router as subscription_router
 from app.api.supplier_routes import router as supplier_router
 from app.api.task_admin_routes import router as task_admin_router
-from app.api.outreach_routes import router as outreach_router
-from app.api.finance_export_routes import router as finance_export_router
-from app.api.notification_channel_routes import router as notification_channel_router
-from app.api.subscription_routes import router as subscription_router
-from app.api.audit_routes import router as audit_router
-from app.api.procurement_routes import router as procurement_router
+from app.api.transit_admin_routes import router as transit_admin_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
 from app.core.request_logging import RequestLoggingMiddleware
@@ -71,6 +72,8 @@ app.include_router(subscription_router, prefix="/api")
 app.include_router(audit_router, prefix="/api")
 # 采购记录：只读列表 + 详情，不返回上游凭据原文
 app.include_router(procurement_router, prefix="/api")
+# 中转机池：3x-ui 面板、国家映射、待配中转与重试
+app.include_router(transit_admin_router, prefix="/api")
 
 
 @app.get("/healthz")

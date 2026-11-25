@@ -13,6 +13,7 @@ import CatalogManagementView from '../views/CatalogManagementView.vue'
 import AdminTasksView from '../views/AdminTasksView.vue'
 import AuditLogView from '../views/AuditLogView.vue'
 import ProcurementRecordsView from '../views/ProcurementRecordsView.vue'
+import TransitPanelsView from '../views/TransitPanelsView.vue'
 import NotificationChannelsView from '../views/NotificationChannelsView.vue'
 import AdminLayout from '../layouts/AdminLayout.vue'
 import ChangePasswordView from '../views/ChangePasswordView.vue'
@@ -74,6 +75,7 @@ const routes = [
       { path: 'notifications', component: NotificationChannelsView, meta: { page: 'admin-notification-channels' } },
       { path: 'inbox', component: InboxView, meta: { page: 'admin-inbox' } },
       { path: 'resource-pool', component: SupplierPoolView, meta: { page: 'admin-resource-pool' } },
+      { path: 'transit-panels', component: TransitPanelsView, meta: { page: 'admin-transit-panels' } },
       { path: 'procurements', component: ProcurementRecordsView, meta: { page: 'admin-procurements' } },
       { path: 'orders', component: OrderCenterView, meta: { page: 'admin-orders' } },
       { path: 'finance', component: FinanceView, meta: { page: 'admin-finance' } },

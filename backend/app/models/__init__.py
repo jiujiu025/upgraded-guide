@@ -6,6 +6,7 @@ from app.models.entities import (
     RenewalOutreach, WalletAccount, WalletTransaction, SalesInviteCode,
     NotificationChannel, NotificationChannelBinding, NotificationDelivery,
     CatalogListing, CatalogCityOption, Procurement, RuntimeSetting,
+    TransitVps, TransitRoute, TransitProvision,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "RenewalOutreach", "ScheduledTaskRun", "WalletAccount", "WalletTransaction", "SalesInviteCode",
     "NotificationChannel", "NotificationChannelBinding", "NotificationDelivery", "CatalogListing", "Procurement", "RuntimeSetting",
     "CatalogCityOption",
+    "TransitVps", "TransitRoute", "TransitProvision",
 ]

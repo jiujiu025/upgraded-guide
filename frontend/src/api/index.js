@@ -139,9 +139,14 @@ export const getInboxUnreadCount = () => client.get('/inbox/unread-count')
 export const getInboxSalesOptions = (id) => client.get(`/inbox/threads/${id}/sales-options`)
 export const getSalesDashboard = () => client.get('/sales/dashboard')
 export const createOnBehalfOrder = (payload) => client.post('/orders/on-behalf', payload)
-// 线路升级：静态住宅 → 社媒/直播，只补差价，到期时间不变
+// 线路升级：静态住宅 → 视频/社媒、直播，只补差价，到期时间不变。
+// 三个入口共用后端同一套口径，前端按当前工作台选对应路径，不自己算差价。
 export const getLineUpgradeOptions = (lineId) => client.get(`/admin/lines/${lineId}/upgrade-options`)
 export const upgradeLine = (lineId, payload) => client.post(`/admin/lines/${lineId}/upgrade`, payload)
+export const getCustomerLineUpgradeOptions = (lineId) => client.get(`/customer/lines/${lineId}/upgrade-options`)
+export const upgradeCustomerLine = (lineId, payload) => client.post(`/customer/lines/${lineId}/upgrade`, payload)
+export const getSalesLineUpgradeOptions = (lineId) => client.get(`/sales/lines/${lineId}/upgrade-options`)
+export const upgradeSalesLine = (lineId, payload) => client.post(`/sales/lines/${lineId}/upgrade`, payload)
 export const getSalesCustomers = () => client.get('/sales/customers')
 export const getSalesOrders = (params = {}) => client.get('/sales/orders', { params })
 export const getSalesOrder = (id) => client.get(`/sales/orders/${id}`)
@@ -276,4 +281,16 @@ export const syncSupplierQuotes = () => client.post('/admin/suppliers/sync/quote
 export const mapSupplierProduct = (id, localProductId, resourceCategory = null) => client.patch(`/admin/suppliers/products/${id}/mapping`, { local_product_id: localProductId || null, resource_category: resourceCategory || null })
 export const mapSupplierRegion = (id, localRegionId) => client.patch(`/admin/suppliers/regions/${id}/mapping`, { local_region_id: localRegionId || null })
 export const saveSupplierRule = (payload) => client.post('/admin/suppliers/supply-rules', payload)
+// 中转面板（3x-ui）：面板池、国家映射、待配中转重试
+export const getTransitSummary = () => client.get('/admin/transit/summary')
+export const getTransitPanels = () => client.get('/admin/transit/vps')
+export const createTransitPanel = (payload) => client.post('/admin/transit/vps', payload)
+export const updateTransitPanel = (id, payload) => client.patch(`/admin/transit/vps/${id}`, payload)
+// 只读检测：登录 + 列入站 + 读 Xray 模板，不改配置
+export const testTransitPanel = (id) => client.post(`/admin/transit/vps/${id}/test`)
+export const getTransitRoutes = () => client.get('/admin/transit/routes')
+export const saveTransitRoute = (countryCode, payload) =>
+  client.put(`/admin/transit/routes/${encodeURIComponent(countryCode)}`, payload)
+export const getTransitProvisions = (params = {}) => client.get('/admin/transit/provisions', { params })
+export const retryTransitOrder = (orderId) => client.post(`/admin/orders/${orderId}/retry-transit`)
 export default client

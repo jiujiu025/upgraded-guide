@@ -3,9 +3,11 @@ import BrandLogo from "../components/BrandLogo.vue";
 import OrderOnBehalfDialog from "../components/OrderOnBehalfDialog.vue";
 import ClientBuyPanel from "../components/ClientBuyPanel.vue";
 import DeliveryLinkInput from "../components/DeliveryLinkInput.vue";
+import LineUpgradeDialog from "../components/LineUpgradeDialog.vue";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
   Activity,
+  ArrowUpCircle,
   Bell,
   Box,
   ChevronLeft,
@@ -17,6 +19,7 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  MoreHorizontal,
   PackageSearch,
   RefreshCw,
   RotateCw,
@@ -184,6 +187,16 @@ const orderActionConfirmation = ref(null);
 const customerRenewalConfirmation = ref(null);
 const deliveryConfirmation = ref(null);
 const renewalConfirmation = ref(null);
+// 线路行尾「更多选项」：查看详情 / 续费 / 升级，位置按触发按钮实时算，
+// 不用原生下拉，避免表格 overflow 裁剪。
+const lineMenu = ref(null);
+const upgradeTarget = ref(null);
+const lineBasePath = computed(() =>
+  workspace.value === "sales" ? "/sales/lines" : "/client/lines",
+);
+const renewalsPath = computed(() =>
+  workspace.value === "sales" ? "/sales/renewals" : "/client/renewals",
+);
 const delivery = reactive({
   // 节点 ID 不再是必填：贴了链接后端会按链接自动关联或创建节点
   node_id: "",
@@ -328,6 +341,7 @@ const statusText = {
   paid: "已支付",
   processing: "处理中",
   pending_delivery: "待交付",
+  pending_transit: "待开通中转",
   partially_delivered: "部分交付",
   delivered: "已交付",
   completed: "已完成",
@@ -941,6 +955,62 @@ function beginRenew(line) {
     : line.billing_days || 30;
   renewDraft.payment_method = "contact_manager";
 }
+// 行尾「更多选项」：点按钮时按实际位置算弹层坐标；下方不够就向上翻，
+// 不依赖表格容器（.data-table 是 overflow:hidden，原生下拉会被裁掉）。
+function toggleLineMenu(line, event) {
+  if (lineMenu.value?.line.id === line.id) {
+    lineMenu.value = null;
+    return;
+  }
+  const rect = event.currentTarget.getBoundingClientRect();
+  const width = 176;
+  const height = 156;
+  const left = Math.max(
+    10,
+    Math.min(window.innerWidth - width - 10, rect.right - width),
+  );
+  const top =
+    rect.bottom + height + 8 > window.innerHeight
+      ? Math.max(8, rect.top - height - 6)
+      : rect.bottom + 6;
+  lineMenu.value = { line, left, top };
+}
+function closeLineMenu() {
+  lineMenu.value = null;
+}
+function openLineDetail(line) {
+  lineMenu.value = null;
+  router.push(`${lineBasePath.value}/${line.id}`);
+}
+function renewFromMenu(line) {
+  lineMenu.value = null;
+  beginRenew(line);
+  router.push(renewalsPath.value);
+}
+function openUpgrade(line) {
+  lineMenu.value = null;
+  upgradeTarget.value = line;
+}
+async function onUpgraded(target) {
+  upgradeTarget.value = null;
+  try {
+    if (workspace.value === "sales") await loadSalesBase();
+    else await loadClientBase();
+  } catch (refreshError) {
+    error.value =
+      refreshError.userMessage || "升级单已创建，但线路列表刷新失败，请手动刷新";
+  }
+  if (target?.needsPayment) {
+    showSuccess(
+      `升级单已创建，补差价 ${money(target.diff)}，正在前往账户余额完成支付`,
+    );
+    router.push(walletPath.value);
+    return;
+  }
+  showSuccess(
+    `升级单已创建：${target?.label || "目标产品线"}，补差价 ${money(target?.diff)}；付清后线路切换，到期日与当前线路一致`,
+  );
+}
 async function submitRenew() {
   const line = lines.value.find((item) => item.id === renewDraft.lineId);
   if (!line || busy.value) return;
@@ -1469,7 +1539,7 @@ onMounted(load);
                   ]"
                   :key="value"
                 >
-                  {{ value }}
+                  {{ statusText[value] || value }}
                 </option></select
               ><input v-model="filters.note" placeholder="搜索备注" />
             </div>
@@ -1509,13 +1579,15 @@ onMounted(load);
                   ><button v-else class="note-button" @click="beginNote(line)">
                     {{ line.customer_note || "添加备注" }}
                   </button></span
-                ><span
+                ><span class="line-more-cell"
                   ><button
                     class="icon-link"
-                    aria-label="查看线路详情"
-                    @click="router.push(`/client/lines/${line.id}`)"
+                    :class="{ active: lineMenu?.line.id === line.id }"
+                    aria-label="更多选项"
+                    :aria-expanded="lineMenu?.line.id === line.id"
+                    @click.stop="toggleLineMenu(line, $event)"
                   >
-                    <ChevronRight :size="17" /></button
+                    <MoreHorizontal :size="18" /></button
                 ></span>
               </div></div
           ></template>
@@ -1606,18 +1678,26 @@ onMounted(load);
               <div class="detail-actions">
                 <button
                   class="outline-action"
-                  @click="router.push('/client/lines')"
+                  @click="router.push(lineBasePath)"
                 >
                   返回线路</button
-                ><button
-                  class="button button-small"
-                  @click="
-                    beginRenew(detail);
-                    router.push('/client/renewals');
-                  "
-                >
-                  发起续费
-                </button>
+                ><div class="detail-action-group">
+                  <button
+                    class="outline-action"
+                    @click="
+                      beginRenew(detail);
+                      router.push(renewalsPath);
+                    "
+                  >
+                    发起续费
+                  </button>
+                  <button
+                    class="button button-small"
+                    @click="openUpgrade(detail)"
+                  >
+                    <ArrowUpCircle :size="15" />升级线路
+                  </button>
+                </div>
               </div>
             </section></template
           >
@@ -2811,6 +2891,37 @@ onMounted(load);
         </footer>
       </section>
     </div>
+
+    <Teleport to="body">
+      <div v-if="lineMenu" class="line-menu-layer" @click="closeLineMenu">
+        <div
+          class="line-menu"
+          role="menu"
+          :style="{ left: lineMenu.left + 'px', top: lineMenu.top + 'px' }"
+          @click.stop
+        >
+          <p class="line-menu-title">{{ lineMenu.line.line_name }}</p>
+          <button type="button" role="menuitem" @click="openLineDetail(lineMenu.line)">
+            <ChevronRight :size="15" />查看线路详情
+          </button>
+          <button type="button" role="menuitem" @click="renewFromMenu(lineMenu.line)">
+            <RotateCw :size="15" />续费这条线路
+          </button>
+          <button type="button" role="menuitem" class="line-menu-upgrade" @click="openUpgrade(lineMenu.line)">
+            <ArrowUpCircle :size="15" />升级线路
+            <small>视频专线 / 直播专线</small>
+          </button>
+        </div>
+      </div>
+    </Teleport>
+
+    <LineUpgradeDialog
+      :open="!!upgradeTarget"
+      :line="upgradeTarget"
+      :workspace="workspace"
+      @close="upgradeTarget = null"
+      @created="onUpgraded"
+    />
   </div>
 </template>
 
@@ -3046,4 +3157,17 @@ onMounted(load);
 .mini-order-button{min-height:28px;padding:0 9px;border:1px solid #b8c8c4;border-radius:5px;background:#fff;color:#2c6f60;font-size:11px;font-weight:650;white-space:nowrap}
 .mini-order-button:hover{border-color:#3d9587;background:#f1f6f3;color:#247d70}
 @media(max-width:760px){.compact-row{align-items:flex-start;flex-direction:column;gap:8px}.customer-row-actions{width:100%;justify-content:space-between}}
+/* 线路行尾「更多选项」：弹层走 Teleport + fixed，绕开 .data-table 的 overflow 裁剪 */
+.line-more-cell{display:grid;place-items:center}
+.icon-link.active{color:#10684f;background:#e7f4ee;border-radius:5px}
+.line-menu-layer{position:fixed;inset:0;z-index:70}
+.line-menu{position:fixed;width:176px;padding:5px;background:#fff;border:1px solid #d8e2dc;border-radius:7px;box-shadow:0 16px 40px #10211f26;display:grid;gap:1px}
+.line-menu-title{margin:0;padding:6px 9px 7px;font-size:10px;color:#7d8f86;border-bottom:1px solid #eef2f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.line-menu button{display:grid;grid-template-columns:16px 1fr;align-items:center;gap:8px;padding:9px;border-radius:5px;color:#2c443c;font-size:12px;text-align:left}
+.line-menu button:hover{background:#eef6f2;color:#10684f}
+.line-menu-upgrade{grid-template-rows:auto auto!important;color:#10684f!important;font-weight:650}
+.line-menu-upgrade svg{grid-row:1/3}
+.line-menu-upgrade small{grid-column:2;font-size:10px;font-weight:400;color:#7d8f86}
+.detail-action-group{display:flex;gap:9px;align-items:center}
+@media(max-width:600px){.detail-action-group{flex-wrap:wrap}}
 </style>
