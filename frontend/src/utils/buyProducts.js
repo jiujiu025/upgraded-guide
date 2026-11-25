@@ -74,3 +74,40 @@ export function buildProductViews(lines = []) {
 export function pickDefaultProduct(products = []) {
   return products.find((item) => item.regionCount > 0 && item.inStock) || products.find((item) => item.regionCount > 0) || null
 }
+
+// 大洲分组的展示顺序与中文名。后端只下发 continent 枚举，文案放前端，
+// 改文案不用动后端；未知国家后端给 "other"，统一排在最后。
+export const CONTINENT_ORDER = [
+  'north_america', 'asia', 'middle_east', 'europe', 'south_america', 'oceania', 'africa', 'other',
+]
+export const CONTINENT_LABELS = {
+  north_america: '北美洲',
+  asia: '亚洲',
+  middle_east: '中东',
+  europe: '欧洲',
+  south_america: '南美洲',
+  oceania: '大洋洲',
+  africa: '非洲',
+  other: '其他',
+}
+
+/**
+ * 把某个产品下可选的国家按大洲分组。
+ * 只返回真的有国家的洲——空栏会让客户以为"这个洲没货"。
+ */
+export function groupRegionsByContinent(regions = []) {
+  const buckets = new Map()
+  for (const region of regions) {
+    const key = region.continent || 'other'
+    if (!buckets.has(key)) buckets.set(key, [])
+    buckets.get(key).push(region)
+  }
+  return CONTINENT_ORDER
+    .filter((key) => buckets.has(key))
+    .map((key) => ({
+      key,
+      label: CONTINENT_LABELS[key] || key,
+      count: buckets.get(key).length,
+      regions: buckets.get(key),
+    }))
+}

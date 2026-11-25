@@ -5,9 +5,10 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ArrowRight, Check, Minus, Plus, RefreshCw, Search } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { getPublicCatalog, previewOrder } from '../api'
-import { buildProductViews, pickDefaultProduct } from '../utils/buyProducts'
+import { buildProductViews, groupRegionsByContinent, pickDefaultProduct } from '../utils/buyProducts'
 import { session } from '../api/session'
 import CitySegmentPicker from './CitySegmentPicker.vue'
+import ContinentTabs from './ContinentTabs.vue'
 import PageIntro from './PageIntro.vue'
 
 const router = useRouter()
@@ -32,11 +33,31 @@ let previewTimer
 const products = computed(() => buildProductViews(catalog.value.lines || []))
 const product = computed(() => products.value.find((item) => item.code === selectedProductCode.value) || null)
 const regions = computed(() => product.value?.regions || [])
-const regionMatches = computed(() => regions.value.filter((item) => item.name.includes(query.value.trim())))
+const activeContinent = ref('all')
+const continentGroups = computed(() => groupRegionsByContinent(regions.value))
+// 关键词搜索跨全部大洲：客户记得"越南"但未必知道它在亚洲，
+// 这时还按洲过滤会搜不到，反而显得系统没这个国家。
+const regionMatches = computed(() => {
+  const keyword = query.value.trim()
+  if (keyword) return regions.value.filter((item) => item.name.includes(keyword))
+  if (activeContinent.value === 'all') return regions.value
+  return regions.value.filter((item) => (item.continent || 'other') === activeContinent.value)
+})
 const selectedRegion = computed(() => regions.value.find((item) => item.id === selectedRegionId.value) || null)
 const offers = computed(() => selectedRegion.value?.offers || [])
 const selectedOffer = computed(() => offers.value.find((item) => item.product_id === selectedProductId.value) || null)
 const periods = computed(() => product.value?.periods || [])
+// 一输入关键词就跨全部大洲，避免"搜越南却停在欧洲"这种空结果
+watch(query, (value) => { if (value.trim()) activeContinent.value = 'all' })
+// 切大洲后，已选国家可能不在新列表里：自动落到该洲第一个有货的，
+// 否则右侧摘要写着"美国"，左边列表里却找不到它。
+watch(activeContinent, () => {
+  if (!regionMatches.value.length) return
+  if (regionMatches.value.some((item) => item.id === selectedRegionId.value)) return
+  const first = regionMatches.value.find((item) => item.offers.some((offer) => offer.in_stock))
+    || regionMatches.value[0]
+  selectRegion(first.id)
+})
 
 // 产品卡片上的价格：未登录不显示（catalog 已脱敏，min_price 本来就是 null）。
 function productPrice(item) {
@@ -46,6 +67,7 @@ function productPrice(item) {
 }
 
 function pickProduct(code) {
+  activeContinent.value = 'all'
   selectedProductCode.value = code
   query.value = ''
   const target = products.value.find((item) => item.code === code)
@@ -199,6 +221,12 @@ onMounted(loadCatalog)
               <div><p class="eyebrow dark">STEP 02</p><h2>选择国家 / 地区</h2></div>
               <label class="search-box"><Search :size="16" /><input v-model="query" placeholder="搜索国家或地区" /></label>
             </div>
+            <ContinentTabs
+              v-if="regions.length > 1"
+              v-model="activeContinent"
+              :groups="continentGroups"
+              :total="regions.length"
+            />
             <div v-if="regionMatches.length" class="region-picker">
               <button
                 v-for="region in regionMatches"
@@ -211,7 +239,12 @@ onMounted(loadCatalog)
                 <Check v-if="selectedRegionId === region.id" :size="15" />
               </button>
             </div>
-            <p v-else class="inline-empty">{{ product ? '该产品暂无可售国家，换一个产品试试。' : '请先选择产品。' }}</p>
+            <p v-else class="inline-empty">
+              <template v-if="!product">请先选择产品。</template>
+              <template v-else-if="query.trim()">没有找到「{{ query.trim() }}」，换个关键词试试。</template>
+              <template v-else-if="regions.length">该大洲暂无可售国家，切换其它大洲看看。</template>
+              <template v-else>该产品暂无可售国家，换一个产品试试。</template>
+            </p>
           </div>
 
           <div class="buy-block">

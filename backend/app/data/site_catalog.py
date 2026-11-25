@@ -144,3 +144,46 @@ def missing_prices() -> dict[str, list[str]]:
         "live": set(all_codes),
     }
     return {line: [code for code in all_codes if code not in have[line]] for line in have}
+
+
+# 大洲归属：购买页按大洲分栏用。业务上把中东单列（土耳其/以色列/阿联酋/沙特），
+# 这与客户在选线路时的心理分类一致——找沙特不会去"亚洲"里翻。
+# 顺序即页面展示顺序，与客户端的常见习惯一致（先北美，再亚洲/中东）。
+CONTINENT_ORDER = [
+    "north_america", "asia", "middle_east", "europe", "south_america", "oceania", "africa", "other",
+]
+
+CONTINENT_LABELS = {
+    "north_america": "北美洲",
+    "asia": "亚洲",
+    "middle_east": "中东",
+    "europe": "欧洲",
+    "south_america": "南美洲",
+    "oceania": "大洋洲",
+    "africa": "非洲",
+    "other": "其他",
+}
+
+CONTINENT_BY_COUNTRY = {
+    # 北美洲
+    "US": "north_america", "CA": "north_america", "MX": "north_america",
+    # 南美洲
+    "BR": "south_america",
+    # 欧洲（俄罗斯按商业习惯归欧洲）
+    "GB": "europe", "FR": "europe", "DE": "europe", "NL": "europe", "ES": "europe",
+    "IT": "europe", "PL": "europe", "HU": "europe", "BG": "europe", "DK": "europe",
+    "RU": "europe",
+    # 中东
+    "TR": "middle_east", "IL": "middle_east", "AE": "middle_east", "SA": "middle_east",
+    # 亚洲
+    "JP": "asia", "KR": "asia", "HK": "asia", "TW": "asia", "SG": "asia", "MY": "asia",
+    "TH": "asia", "VN": "asia", "ID": "asia", "PH": "asia", "IN": "asia", "BD": "asia",
+    "PK": "asia",
+    # 大洋洲 / 非洲
+    "AU": "oceania", "ZA": "africa",
+}
+
+
+def continent_of(country_code: str | None) -> str:
+    """未知国家归 other，不猜。购买页把 other 排最后。"""
+    return CONTINENT_BY_COUNTRY.get((country_code or "").strip().upper(), "other")

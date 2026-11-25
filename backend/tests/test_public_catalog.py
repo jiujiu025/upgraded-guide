@@ -196,3 +196,18 @@ def test_only_the_residential_native_category_is_sold(api):
     catalog = api["client"].get("/api/catalog", headers=api["headers"]).json()
     # 三条线，不多不少
     assert [line["code"] for line in catalog["lines"]] == ["residential", "social", "live"]
+
+
+def test_regions_carry_continent_for_buy_page_filter(api):
+    """购买页按大洲分栏：后端下发 continent，未知国家归 other 而不是猜。"""
+    response = api["client"].get("/api/public/catalog")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    residential = next(line for line in body["lines"] if line["code"] == "residential")
+    continents = {item["country_code"]: item["continent"] for item in residential["regions"]}
+    assert continents["US"] == "north_america"
+    assert continents["JP"] == "asia"
+    assert continents["DE"] == "europe"
+    # 没有国家码的历史地区不能被硬塞进某个洲
+    assert all(value for value in continents.values())

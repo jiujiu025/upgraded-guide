@@ -5,8 +5,9 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowRight, Check, Loader2, Minus, Plus, ShoppingCart } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { createCustomerOrder, getCatalog, previewOrder } from '../api'
-import { buildProductViews, pickDefaultProduct } from '../utils/buyProducts'
+import { buildProductViews, groupRegionsByContinent, pickDefaultProduct } from '../utils/buyProducts'
 import CitySegmentPicker from './CitySegmentPicker.vue'
+import ContinentTabs from './ContinentTabs.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -35,6 +36,13 @@ const lines = computed(() => catalog.value.lines || [])
 const products = computed(() => buildProductViews(lines.value))
 const product = computed(() => products.value.find((item) => item.code === form.productCode) || null)
 const regions = computed(() => product.value?.regions || [])
+const activeContinent = ref('all')
+const continentGroups = computed(() => groupRegionsByContinent(regions.value))
+const visibleRegions = computed(() => (
+  activeContinent.value === 'all'
+    ? regions.value
+    : regions.value.filter((item) => (item.continent || 'other') === activeContinent.value)
+))
 const region = computed(() => regions.value.find((item) => item.id === form.regionId) || null)
 const offers = computed(() => region.value?.offers || [])
 const periods = computed(() => product.value?.periods || [])
@@ -54,6 +62,7 @@ function regionPrice(entry) {
 
 function pickProduct(code) {
   form.productCode = code
+  activeContinent.value = 'all'
   const target = products.value.find((item) => item.code === code)
   const regionWithOffer = (target?.regions || []).find((item) => item.offers.some((offer) => offer.in_stock))
     || target?.regions?.[0]
@@ -61,6 +70,15 @@ function pickProduct(code) {
   form.billingDays = target?.periods?.[0] || 30
   syncProduct()
 }
+
+// 切大洲后已选国家可能被过滤掉：落到该洲第一个有货的，保持列表与右侧一致
+watch(activeContinent, () => {
+  if (!visibleRegions.value.length) return
+  if (visibleRegions.value.some((item) => item.id === form.regionId)) return
+  const first = visibleRegions.value.find((item) => (item.offers || []).some((offer) => offer.in_stock))
+    || visibleRegions.value[0]
+  pickRegion(first.id)
+})
 
 function pickRegion(id) {
   form.regionId = id
@@ -196,9 +214,15 @@ onMounted(load)
 
           <section class="buy-block">
             <h2>② 选择国家 / 地区</h2>
-            <div class="region-grid">
+            <ContinentTabs
+              v-if="regions.length > 1"
+              v-model="activeContinent"
+              :groups="continentGroups"
+              :total="regions.length"
+            />
+            <div v-if="visibleRegions.length" class="region-grid">
               <button
-                v-for="item in regions"
+                v-for="item in visibleRegions"
                 :key="item.id"
                 type="button"
                 :class="{ selected: form.regionId === item.id, empty: !(item.offers || []).length }"
@@ -209,6 +233,7 @@ onMounted(load)
                 <small v-else>暂无报价</small>
               </button>
             </div>
+            <p v-else class="inline-empty">该大洲在当前产品下暂无可售国家，切换其它大洲看看。</p>
           </section>
 
           <section v-show="citySupported" class="buy-block">

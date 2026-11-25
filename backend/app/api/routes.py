@@ -47,7 +47,9 @@ from app.services.pricing_service import (
 from app.services.invite_code_service import (
     create_invite_code, disable_codes_of_sales, disable_invite_code, lookup_active_code, normalize_code,
 )
-from app.data.site_catalog import CATEGORY_TO_LINE, LINE_LABELS, LINE_ORDER, LINE_SUBTITLES, LIVE_SPEC_LABELS
+from app.data.site_catalog import (
+    CATEGORY_TO_LINE, LINE_LABELS, LINE_ORDER, LINE_SUBTITLES, LIVE_SPEC_LABELS, continent_of,
+)
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
 from app.services.registration_service import (enforce_captcha_rate_limit, enforce_invite_check_rate_limit, enforce_login_rate_limit,
     enforce_password_recovery_rate_limit, enforce_public_rate_limit, enforce_registration_rate_limit)
@@ -1003,6 +1005,8 @@ def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
                 "id": region.id,
                 "name": region.name,
                 "country_code": region.country_code,
+                # 购买页按大洲分栏；历史地区没有国家码时归 other，不猜
+                "continent": continent_of(region.country_code),
                 "min_price": None,
                 "in_stock": False,
                 "offers": [],
