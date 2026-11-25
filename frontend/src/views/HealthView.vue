@@ -7,6 +7,7 @@ import { loadHealthFixture } from '../mocks/health'
 import { session } from '../api/session'
 import { logout as endSession } from '../api'
 import { getAdminNavigation } from '../navigation/adminNavigation'
+import AdminHealthPanel from './AdminHealthPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,6 +20,8 @@ const notice = ref('')
 const filters = reactive({ status: '', region: '', product: '', owner: '', keyword: '' })
 const storedUser = computed(() => session.user || {})
 const isSales = computed(() => route.meta.workspace === 'sales')
+// 管理员看真实数据（客户线路 + 面板入站）；客户与销售的视图仍是原型，后续再接真接口
+const isAdmin = computed(() => ['admin', 'super_admin'].includes(storedUser.value.role))
 const nav = computed(() => isSales.value
   ? [['销售概览', '/sales', Gauge], ['我的客户影响', '/sales/health', Activity], ['客户会话', '/sales/inbox', MessageSquare], ['安全中心', '/sales/security', ShieldCheck]]
   : getAdminNavigation(storedUser.value.role))
@@ -62,6 +65,8 @@ function prototypeAction(label) {
 function resetFilters() { Object.assign(filters, { status: '', region: '', product: '', owner: '', keyword: '' }) }
 
 async function load() {
+  // 管理员走 AdminHealthPanel 的真实接口，不再加载演示 fixture
+  if (isAdmin.value) { loading.value = false; return }
   loading.value = true
   error.value = ''
   selectedLine.value = null
@@ -74,7 +79,8 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="workspace-shell health-shell">
+  <AdminHealthPanel v-if="isAdmin" />
+  <div v-else class="workspace-shell health-shell">
     <aside class="workspace-sidebar" :class="{ open: mobileNav }">
       <div class="workspace-brand"><BrandLogo eager /><button aria-label="关闭导航" @click="mobileNav = false"><X :size="20" /></button></div>
       <p class="workspace-role">{{ isSales ? '销售工作台' : '管理后台' }}</p>

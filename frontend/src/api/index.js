@@ -281,6 +281,12 @@ export const syncSupplierQuotes = () => client.post('/admin/suppliers/sync/quote
 export const mapSupplierProduct = (id, localProductId, resourceCategory = null) => client.patch(`/admin/suppliers/products/${id}/mapping`, { local_product_id: localProductId || null, resource_category: resourceCategory || null })
 export const mapSupplierRegion = (id, localRegionId) => client.patch(`/admin/suppliers/regions/${id}/mapping`, { local_region_id: localRegionId || null })
 export const saveSupplierRule = (payload) => client.post('/admin/suppliers/supply-rules', payload)
+// 管理员线路健康：所有客户线路 + 面板入站
+export const getHealthOverview = () => client.get('/admin/health/overview')
+export const getAdminCustomerLines = (params = {}) => client.get('/admin/health/customer-lines', { params })
+export const checkAdminCustomerLines = (payload) => client.post('/admin/health/customer-lines/check', payload)
+export const getTransitInbounds = (params = {}) => client.get('/admin/health/transit-inbounds', { params })
+export const checkTransitInbounds = (payload) => client.post('/admin/health/transit-inbounds/check', payload)
 // 中转面板（3x-ui）：面板池、国家映射、待配中转重试
 export const getTransitSummary = () => client.get('/admin/transit/summary')
 export const getTransitPanels = () => client.get('/admin/transit/vps')

@@ -17,6 +17,7 @@ from app.api.routes import router
 from app.api.subscription_routes import router as subscription_router
 from app.api.supplier_routes import router as supplier_router
 from app.api.task_admin_routes import router as task_admin_router
+from app.api.health_admin_routes import router as health_admin_router
 from app.api.transit_admin_routes import router as transit_admin_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
@@ -74,6 +75,8 @@ app.include_router(audit_router, prefix="/api")
 app.include_router(procurement_router, prefix="/api")
 # 中转机池：3x-ui 面板、国家映射、待配中转与重试
 app.include_router(transit_admin_router, prefix="/api")
+# 管理员线路健康：所有客户线路 + 面板入站，可筛选与批量检测
+app.include_router(health_admin_router, prefix="/api")
 
 
 @app.get("/healthz")
