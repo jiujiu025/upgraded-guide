@@ -270,7 +270,7 @@ def build_client_link(
 
 
 # ---------------------------------------------------------------- 主流程
-def _panel_credentials(db: Session, vps: TransitVps) -> tuple[str | None, str | None]:
+def panel_credentials(db: Session, vps: TransitVps) -> tuple[str | None, str | None]:
     """解密面板凭据。Token 优先；没有 Token 用账号密码。
 
     密码用与供应商同一套 AES-GCM，AAD 带机器名：贴错机器的密文会解密失败，
@@ -566,7 +566,7 @@ def provision_transit(
         else:
             provision.transit_vps_id = provision.transit_vps_id or vps.id
 
-        password, token = _panel_credentials(db, vps)
+        password, token = panel_credentials(db, vps)
         try:
             with XuiClient(
                 vps.base_url, username=vps.username, password=password, api_token=token,
