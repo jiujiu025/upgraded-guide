@@ -53,6 +53,12 @@ jobs:
 
       - name: 运行测试
         working-directory: backend
+        env:
+          # 凭据加密/解密要有 32 字节（64 位十六进制）密钥才能跑通。
+          # CI 没有 .env，这里给的是测试专用固定值，不是任何环境的真实密钥；
+          # 两把必须不同（生产配置校验也这么要求）。
+          SUPPLIER_SECRET_ENCRYPTION_KEY: 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
+          PAYMENT_SECRET_ENCRYPTION_KEY: 1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809
         run: python -m pytest -q --no-header
 
       - name: 空库跑通全部迁移并校验无漂移

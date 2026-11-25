@@ -305,10 +305,16 @@ def sha256_of(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def ensure_private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != "posix":
         # Windows 没有 POSIX 位；生产是 Linux，这条检查只在 POSIX 上生效
         return
+    if not existed:
+        # 新建目录的权限受 umask 影响（默认 022 → 0755），刚 mkdir 完就自己
+        # 判自己"过宽"会把"目录不存在"这种正常首次运行直接判死。新建时显式收紧；
+        # 已存在的目录不动，权限不对还是要报错，让运维自己决定。
+        path.chmod(0o700)
     mode = path.stat().st_mode & 0o777
     if mode & 0o077:
         raise BackupError(f"备份目录权限过宽（{oct(mode)}）：先 chmod 700 {path}", exit_code=1)

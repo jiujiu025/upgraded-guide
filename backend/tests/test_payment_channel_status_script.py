@@ -7,11 +7,14 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.config import Settings
 from app.models import PaymentChannelConfig
 from app.models.base import Base
+from app.services import payment_gateway
 from app.services.payment_acceptance_service import record_acceptance
 from app.services.payment_gateway import encrypt_secret
 
@@ -20,6 +23,20 @@ spec = importlib.util.spec_from_file_location("payment_channel_status", ROOT / "
 status = importlib.util.module_from_spec(spec)
 sys.modules["payment_channel_status"] = status
 spec.loader.exec_module(status)
+
+MASTER_KEY = "22" * 32  # 64 位十六进制 = 32 字节 AES-256 密钥
+
+
+@pytest.fixture(autouse=True)
+def _credential_key(monkeypatch):
+    """凭据加密密钥由测试显式注入，不依赖仓库里的 .env。
+
+    以前这条用例默认环境里已经有 PAYMENT_SECRET_ENCRYPTION_KEY（本机 .env），
+    到了没有 .env 的 CI 就变成"后台凭据加密未配置"。加密/解密都走
+    payment_gateway 里引用的 get_settings，钉住这一个引用就够了。
+    """
+    settings = Settings(payment_secret_encryption_key=MASTER_KEY, _env_file=None)
+    monkeypatch.setattr(payment_gateway, "get_settings", lambda: settings)
 
 
 def make_db(tmp_path, *, merchant: str | None, secret: str | None, types: list[str], enabled: bool):
