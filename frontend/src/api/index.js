@@ -1,56 +1,77 @@
 import axios from 'axios'
-import { clearSession, onSessionChange, session, setSession } from './session'
+import { activePortal, clearSession, loginPathForPortal, onSessionChange, passwordPathForPortal, sessionFor, setSession } from './session'
 
 const client = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || '/api', timeout: 10000, withCredentials: true })
-let refreshPromise = null
-onSessionChange((type) => {
+const refreshPromises = new Map()
+const workspaceRoot = portal => portal === 'customer' ? '/client' : `/${portal}`
+onSessionChange((type, portal) => {
   if (type !== 'session-cleared') return
-  clearSession(false)
-  if (typeof window !== 'undefined') {
+  clearSession(false, portal)
+  if (portal === activePortal.value && typeof window !== 'undefined') {
     const path = window.location.pathname
-    const loginPath = path.startsWith('/admin') ? '/admin/login' : path.startsWith('/sales') ? '/sales/login' : path.startsWith('/client') ? '/login' : null
-    if (loginPath && path !== loginPath) window.location.replace(loginPath)
+    const root = workspaceRoot(portal)
+    const loginPath = loginPathForPortal(portal)
+    if ((path === root || path.startsWith(`${root}/`) || path === passwordPathForPortal(portal)) && path !== loginPath) {
+      window.location.replace(loginPath)
+    }
   }
 })
 client.interceptors.request.use((config) => {
-  const token = session.accessToken
-  if (token) config.headers.Authorization = `Bearer ${token}`
+  config.authPortal ??= activePortal.value
+  const token = sessionFor(config.authPortal).accessToken
+  if (token && !config.skipBearer) config.headers.Authorization = `Bearer ${token}`
   return config
-})
-async function restoreSession(force = false) {
-  if (!force && session.accessToken) return session.user
-  const refreshWork = async () => {
-    const csrf = await client.get('/auth/csrf', { skipRefresh: true })
-    const result = await client.post('/auth/refresh', {}, { skipRefresh: true, headers: { 'X-CSRF-Token': csrf.data.csrf_token } })
-    setSession(result.data)
-    return session.user
+}, undefined, { synchronous: true })
+
+const portalConfig = portal => ({ authPortal: portal, params: { portal } })
+const cookieConfig = portal => ({ ...portalConfig(portal), skipBearer: true, skipRefresh: true })
+const withPortalLock = (portal, work) => globalThis.navigator?.locks?.request
+  ? navigator.locks.request(`ops-session-${portal}`, work)
+  : work()
+
+async function restoreSession(portal = activePortal.value, force = false) {
+  const state = sessionFor(portal)
+  if (!force && state.accessToken) return state.user
+  if (!refreshPromises.has(portal)) {
+    const refresh = withPortalLock(portal, async () => {
+      const config = cookieConfig(portal)
+      const csrf = await client.get('/auth/csrf', config)
+      const { data } = await client.post('/auth/refresh', {}, {
+        ...config, headers: { 'X-CSRF-Token': csrf.data.csrf_token },
+      })
+      setSession(data, portal)
+      return state.user
+    })
+    refreshPromises.set(portal, refresh.finally(() => refreshPromises.delete(portal)))
   }
-  if (!refreshPromise) refreshPromise = (async () => {
-    if (typeof navigator !== 'undefined' && navigator.locks?.request) return navigator.locks.request('ops-refresh', refreshWork)
-    return refreshWork()
-  })().finally(() => { refreshPromise = null })
-  return refreshPromise
+  return refreshPromises.get(portal)
 }
 export const ensureSession = restoreSession
-export const hasSession = () => Boolean(session.user)
-export const currentSessionUser = () => session.user
+export const hasSession = () => Boolean(sessionFor().user)
+export const currentSessionUser = portal => sessionFor(portal).user
 
 client.interceptors.response.use((response) => response, async (error) => {
-  if (error.response?.status === 401 && !error.config?.skipRefresh && !error.config?._retried && !error.config?.url?.startsWith('/auth/')) {
+  const config = error.config
+  const portal = config?.authPortal ?? activePortal.value
+  const state = sessionFor(portal)
+  const requestToken = config?.headers?.Authorization?.replace(/^Bearer /, '') || ''
+  if (error.response?.status === 401 && config && !config.skipRefresh && !config._retried && !config.url?.startsWith('/auth/')) {
     try {
-      if (session.accessToken === error.config.headers?.Authorization?.replace(/^Bearer /, '')) await restoreSession(true)
-      return client({ ...error.config, _retried: true, headers: { ...error.config.headers, Authorization: `Bearer ${session.accessToken}` } })
-    } catch { clearSession() }
+      if (state.accessToken === requestToken) await restoreSession(portal, true)
+      if (state.accessToken) return client({ ...config, _retried: true })
+    } catch { /* 仅清理此次请求使用的失效会话 */ }
   }
-  if (error.response?.status === 401) {
-    clearSession()
+  if (error.response?.status === 401 && requestToken && requestToken === state.accessToken
+    && (!config.url?.startsWith('/auth/') || config.url === '/auth/me')) {
+    clearSession(false, portal)
   }
   const detail = error.response?.data?.detail
   const status = error.response?.status
   // 428 = 后端要求先改密（管理员重置过密码）。直接把人送到改密页，
   // 否则每个业务请求都会失败，用户只会看到一堆"请求失败"。
-  if (status === 428 && typeof window !== 'undefined' && !window.location.pathname.startsWith('/change-password')) {
-    window.location.replace('/change-password')
+  if (status === 428 && portal === activePortal.value && typeof window !== 'undefined') {
+    const path = passwordPathForPortal(portal)
+    if (window.location.pathname !== path) window.location.replace(path)
   }
   const validationMessage = Array.isArray(detail) ? detail.map((item) => item.msg?.replace(/^Value error,\s*/, '')).filter(Boolean).join('；') : ''
   const objectMessage = detail && !Array.isArray(detail) && typeof detail.message === 'string' ? detail.message : ''
@@ -71,15 +92,25 @@ export const getPublicRegions = () => client.get('/public/regions')
 // 注册图形验证码：拿九宫格题目（图形是 SVG，答案在 token 里，前端读不出来）
 export const getCaptcha = () => client.get('/public/captcha')
 export const previewOrder = (payload) => client.post('/public/orders/preview', payload)
-export const login = async (payload) => { const result = await client.post('/auth/login', payload); setSession(result.data); return result }
-export const register = async (payload) => { const result = await client.post('/public/register', payload); setSession(result.data); return result }
-export const logout = async () => {
+export const login = (payload, portal = activePortal.value) => withPortalLock(portal, async () => {
+  const result = await client.post('/auth/login', payload, cookieConfig(portal))
+  setSession(result.data, portal)
+  return result
+})
+export const register = payload => withPortalLock('customer', async () => {
+  const result = await client.post('/public/register', payload, cookieConfig('customer'))
+  setSession(result.data, 'customer')
+  return result
+})
+export const logout = (portal = activePortal.value) => withPortalLock(portal, async () => {
   try {
-    const csrf = await client.get('/auth/csrf', { skipRefresh: true })
-    await client.post('/auth/logout', {}, { skipRefresh: true, headers: { 'X-CSRF-Token': csrf.data.csrf_token } })
-  } finally { clearSession() }
-}
-export const changePassword = (payload) => client.post('/auth/change-password', payload)
+    const config = cookieConfig(portal)
+    const csrf = await client.get('/auth/csrf', config)
+    await client.post('/auth/logout', {}, { ...config, headers: { 'X-CSRF-Token': csrf.data.csrf_token } })
+  } finally { clearSession(true, portal) }
+})
+export const changePassword = (payload, portal = activePortal.value) =>
+  withPortalLock(portal, () => client.post('/auth/change-password', payload, portalConfig(portal)))
 export const getSecurityQuestions = () => client.get('/auth/security-questions')
 export const updateSecurityQuestions = (payload) => client.put('/auth/security-questions', payload)
 export const recoverPassword = (payload) => client.post('/auth/password-recovery', payload)

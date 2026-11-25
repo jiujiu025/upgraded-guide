@@ -2,8 +2,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Phone, Ticket, UserRound } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
-import { clearSession, session } from '../api/session'
-import { getAuthMe, getCustomerMe, getInviteCodeCheck, login, logout as endSession, register } from '../api'
+import { passwordPathForPortal, sessionFor } from '../api/session'
+import { getAuthMe, getCustomerMe, getInviteCodeCheck, login, register } from '../api'
 import BrandLogo from './BrandLogo.vue'
 import ImageCaptcha from './ImageCaptcha.vue'
 
@@ -43,7 +43,6 @@ const roleHome = (role) => role === 'customer' ? '/client' : role === 'sales' ? 
 // 如果这里不放行，登录完会被扔到客户中心，等于白点一次。
 const isSitePath = (path) => path.startsWith('/') && !path.startsWith('//') && !path.startsWith('/admin') && !path.startsWith('/sales') && !path.startsWith('/client')
 const canOpen = (role, path) => (role === 'customer' && (path.startsWith('/client') || isSitePath(path))) || (role === 'sales' && path.startsWith('/sales')) || (['admin', 'super_admin'].includes(role) && path.startsWith('/admin')) || path === '/checkout'
-const roleMatchesPortal = (role) => props.portal === 'customer' ? role === 'customer' : props.portal === 'sales' ? role === 'sales' : ['admin', 'super_admin'].includes(role)
 
 async function submit() {
   if (isRegister.value) return submitRegister()
@@ -51,24 +50,17 @@ async function submit() {
   error.value = ''
   busy.value = true
   try {
-    const { data } = await login({ username: account.value.trim(), password: password.value })
-    if (!roleMatchesPortal(data.user.role)) {
-      try { await endSession() } catch { clearSession() }
-      error.value = '用户名或密码错误'
-      return
-    }
-    const { data: verifiedUser } = await getAuthMe()
-    if (verifiedUser.role === 'customer') await getCustomerMe()
-    session.user = verifiedUser
+    const portal = props.portal
+    const { data: { user: verifiedUser } } = await login({ username: account.value.trim(), password: password.value }, portal)
     // 管理员重置过密码 / 首次登录：业务接口会被后端 428 拦住，先来改密。
     if (verifiedUser.must_change_password) {
-      await router.replace('/change-password')
+      await router.replace(passwordPathForPortal(portal))
       return
     }
+    if (verifiedUser.role === 'customer') await getCustomerMe()
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : ''
     await router.replace(redirect && canOpen(verifiedUser.role, redirect) ? redirect : roleHome(verifiedUser.role))
   } catch (requestError) {
-    clearSession()
     error.value = requestError.userMessage || '登录失败，请稍后重试'
   } finally { busy.value = false }
 }
@@ -77,7 +69,7 @@ async function establishCustomerSession() {
   const { data: verifiedUser } = await getAuthMe()
   if (verifiedUser.role !== 'customer') throw new Error('注册账号角色异常')
   await getCustomerMe()
-  session.user = verifiedUser
+  sessionFor('customer').user = verifiedUser
   await router.replace('/client')
 }
 
@@ -115,7 +107,6 @@ async function submitRegister() {
     })
     await establishCustomerSession()
   } catch (requestError) {
-    clearSession()
     error.value = requestError.userMessage || requestError.message || '注册失败，请检查填写内容后重试'
     // 验证码是一次性的：这道题在服务端已经用掉或作废了，换一题再试。
     captchaRef.value?.refresh()

@@ -1,26 +1,25 @@
 <script setup>
 import { reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { changePassword, currentSessionUser } from '../api'
-import { clearSession } from '../api/session'
+import { useRoute, useRouter } from 'vue-router'
+import { changePassword } from '../api'
+import { clearSession, loginPathForPortal, portalForPath } from '../api/session'
 
 const router = useRouter()
+const route = useRoute()
 const form = reactive({ current_password: '', new_password: '', confirm_password: '' })
 const busy = ref(false)
 const error = ref('')
 const done = ref(false)
-const loginPath = ref('/login')
+const portal = portalForPath(route.path)
+const loginPath = loginPathForPortal(portal)
 
 async function submit() {
   if (form.new_password !== form.confirm_password) { error.value = '两次输入的新密码不一致'; return }
   busy.value = true
   error.value = ''
   try {
-    // 改密会清掉会话，跳转目标必须在登出前按角色算好，否则销售/管理员会被丢到客户端登录页。
-    const role = currentSessionUser()?.role
-    await changePassword({ current_password: form.current_password, new_password: form.new_password })
-    loginPath.value = role === 'sales' ? '/sales/login' : ['admin', 'super_admin'].includes(role) ? '/admin/login' : '/login'
-    clearSession()
+    await changePassword({ current_password: form.current_password, new_password: form.new_password }, portal)
+    clearSession(true, portal)
     done.value = true
   } catch (requestError) { error.value = requestError.userMessage || '修改密码失败' }
   finally { busy.value = false }

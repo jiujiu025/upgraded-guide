@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Literal
 import unicodedata
 from uuid import uuid4
 
@@ -62,6 +63,36 @@ router = APIRouter()
 LOGIN_ERROR_DETAIL = "用户名或密码错误"
 DUMMY_PASSWORD_HASH = hash_password("rate-limit-timing-placeholder")
 REFRESH_COOKIE = "__Host-ops_refresh"
+AuthPortal = Literal["customer", "sales", "admin"]
+
+
+def _role_portal(user: User) -> str:
+    return "admin" if user.role == "super_admin" else user.role
+
+
+def _refresh_cookie_name(portal: AuthPortal | None) -> str:
+    return f"{REFRESH_COOKIE}_{portal}" if portal else REFRESH_COOKIE
+
+
+def _portal_refresh(db: Session, request: Request, portal: AuthPortal | None):
+    name = _refresh_cookie_name(portal)
+    if portal and name not in request.cookies:
+        name = REFRESH_COOKIE
+    session, token, user = find_refresh(db, request.cookies.get(name))
+    if portal and _role_portal(user) != portal:
+        raise SessionError("登录已失效")
+    return session, token, user, name
+
+
+def _clear_matching_legacy_cookie(db: Session, request: Request, response: Response, portal: AuthPortal) -> None:
+    if not request.cookies.get(REFRESH_COOKIE):
+        return
+    try:
+        _, _, user = find_refresh(db, request.cookies[REFRESH_COOKIE])
+    except SessionError:
+        return
+    if _role_portal(user) == portal:
+        _clear_cookie(response, REFRESH_COOKIE)
 
 
 def _origin_allowed(request: Request) -> bool:
@@ -163,14 +194,14 @@ def _security_answer_digest(value: str) -> str:
     return hmac.new(pepper.encode("utf-8"), _normalize_security_answer(value).encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _cookie(response: Response, raw: str, expires_at: datetime) -> None:
+def _cookie(response: Response, raw: str, expires_at: datetime, portal: AuthPortal | None) -> None:
     max_age = max(0, int((expires_at - utcnow()).total_seconds()))
-    response.set_cookie(REFRESH_COOKIE, raw, max_age=max_age, path="/", secure=True,
+    response.set_cookie(_refresh_cookie_name(portal), raw, max_age=max_age, path="/", secure=True,
                         httponly=True, samesite="lax")
 
 
-def _clear_cookie(response: Response) -> None:
-    response.delete_cookie(REFRESH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
+def _clear_cookie(response: Response, name: str) -> None:
+    response.delete_cookie(name, path="/", secure=True, httponly=True, samesite="lax")
 
 
 def _origin(request: Request) -> None:
@@ -366,6 +397,7 @@ def login(
     payload: LoginIn,
     response: Response,
     request: Request,
+    portal: AuthPortal | None = None,
     db: Session = Depends(get_db),
 ):
     # 限流要按用户名分桶，必须在拿到 payload 之后做，不能挂在依赖里。
@@ -389,6 +421,10 @@ def login(
         if user:
             db.commit()
         raise HTTPException(status_code=401, detail=LOGIN_ERROR_DETAIL)
+    if portal and _role_portal(user) != portal:
+        _record_sales_login(db, user, request, "failed", "wrong_portal")
+        db.commit()
+        raise HTTPException(status_code=401, detail=LOGIN_ERROR_DETAIL)
     user.failed_login_count = 0
     user.locked_until = None
     # 不清 must_change_password：管理员重置密码后它就是 True，登录后必须先去改密。
@@ -396,7 +432,9 @@ def login(
     session, raw = create_session(db, user)
     _record_sales_login(db, user, request, "success")
     db.commit()
-    _cookie(response, raw, session.expires_at)
+    if portal:
+        _clear_matching_legacy_cookie(db, request, response, portal)
+    _cookie(response, raw, session.expires_at, portal)
     return _token_out(user, session)
 
 
@@ -406,11 +444,11 @@ def me(user: User = Depends(current_user)):
 
 
 @router.get("/auth/csrf")
-def get_csrf(request: Request, response: Response, db: Session = Depends(get_db)):
+def get_csrf(request: Request, response: Response, portal: AuthPortal | None = None, db: Session = Depends(get_db)):
     _optional_origin(request)
     response.headers["Cache-Control"] = "no-store"
     try:
-        session, token, user = find_refresh(db, request.cookies.get(REFRESH_COOKIE))
+        session, token, user, _ = _portal_refresh(db, request, portal)
         validate_session(session, user)
         if token.consumed_at or token.generation != session.generation:
             raise SessionError("登录已失效")
@@ -420,35 +458,41 @@ def get_csrf(request: Request, response: Response, db: Session = Depends(get_db)
 
 
 @router.post("/auth/refresh", response_model=TokenOut)
-def refresh(request: Request, response: Response, db: Session = Depends(get_db)):
+def refresh(request: Request, response: Response, portal: AuthPortal | None = None, db: Session = Depends(get_db)):
     _origin(request)
     try:
-        session, token, user = find_refresh(db, request.cookies.get(REFRESH_COOKIE))
+        session, token, user, cookie_name = _portal_refresh(db, request, portal)
         _csrf(request, session, token.generation)
         raw = rotate_session(db, session, token, user)
-        _cookie(response, raw, session.expires_at)
+        _cookie(response, raw, session.expires_at, portal)
+        if cookie_name != _refresh_cookie_name(portal):
+            _clear_cookie(response, cookie_name)
         return _token_out(user, session)
     except SessionError as exc:
-        _clear_cookie(response)
         raise HTTPException(status_code=401, detail="登录已失效") from exc
 
 
 @router.post("/auth/logout", status_code=204)
-def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+def logout(request: Request, response: Response, portal: AuthPortal | None = None, db: Session = Depends(get_db)):
     _origin(request)
     try:
-        session, token, _ = find_refresh(db, request.cookies.get(REFRESH_COOKIE))
+        session, token, _, cookie_name = _portal_refresh(db, request, portal)
         _csrf(request, session, token.generation)
         revoke_session(session, "logout")
         db.commit()
+        if cookie_name != _refresh_cookie_name(portal):
+            _clear_cookie(response, cookie_name)
     except SessionError:
         pass
-    _clear_cookie(response)
+    _clear_cookie(response, _refresh_cookie_name(portal))
 
 
 @router.post("/auth/change-password", status_code=204)
-def change_password(payload: ChangePasswordIn, response: Response, db: Session = Depends(get_db),
+def change_password(payload: ChangePasswordIn, request: Request, response: Response,
+                    portal: AuthPortal | None = None, db: Session = Depends(get_db),
                     user: User = Depends(current_user)):
+    if portal and _role_portal(user) != portal:
+        raise HTTPException(status_code=403, detail="当前账号不属于此登录入口")
     if not _strong_password(payload.new_password):
         raise HTTPException(status_code=422, detail="新密码必须包含大小写字母、数字和特殊字符")
     length_error = _password_byte_length_error(payload.new_password)
@@ -461,7 +505,9 @@ def change_password(payload: ChangePasswordIn, response: Response, db: Session =
     revoke_user_sessions(db, user, "password_changed")
     write_audit(db, user, "change_password", "user", user.id)
     db.commit()
-    _clear_cookie(response)
+    if portal:
+        _clear_matching_legacy_cookie(db, request, response, portal)
+    _clear_cookie(response, _refresh_cookie_name(portal))
 
 
 @router.get("/auth/security-questions")
@@ -749,6 +795,7 @@ def public_register(
     payload: RegisterIn,
     response: Response,
     request: Request,
+    portal: Literal["customer"] | None = None,
     db: Session = Depends(get_db),
     _: None = Depends(enforce_registration_rate_limit),
 ):
@@ -808,7 +855,9 @@ def public_register(
         session, raw = create_session(db, user)
         db.commit()
         db.refresh(user)
-        _cookie(response, raw, session.expires_at)
+        if portal:
+            _clear_matching_legacy_cookie(db, request, response, portal)
+        _cookie(response, raw, session.expires_at, portal)
         return _token_out(user, session)
     except IntegrityError as exc:
         db.rollback()

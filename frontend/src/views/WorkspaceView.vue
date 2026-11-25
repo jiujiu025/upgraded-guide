@@ -72,7 +72,7 @@ import {
   updateSecurityQuestions,
   updateCustomerLineNote,
 } from "../api";
-import { session } from "../api/session";
+import { passwordPathForPortal, portalForRole, session } from "../api/session";
 import { getAdminNavigation } from "../navigation/adminNavigation";
 import { logout as endSession } from "../api";
 import { loadHealthFixture } from "../mocks/health";
@@ -1753,7 +1753,7 @@ onMounted(load);
             <section class="workspace-panel security-panel">
               <div class="panel-head">
                 <div><h2>登录密码</h2><p>建议定期更换；修改后所有设备都需要重新登录。</p></div>
-                <button class="outline-action" type="button" @click="router.push('/change-password')">
+                <button class="outline-action" type="button" @click="router.push(passwordPathForPortal(portalForRole(storedUser.role)))">
                   修改密码
                 </button>
               </div>
