@@ -24,6 +24,7 @@ from app.api.impersonation_routes import auth_router as impersonation_auth_route
 from app.api.log_routes import router as log_router
 from app.api.impersonation_routes import router as impersonation_router
 from app.api.transit_admin_routes import router as transit_admin_router
+from app.api.transit_backup_routes import router as transit_backup_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
 from app.core.request_logging import RequestLoggingMiddleware
@@ -80,6 +81,8 @@ app.include_router(audit_router, prefix="/api")
 app.include_router(procurement_router, prefix="/api")
 # 中转机池：3x-ui 面板、国家映射、待配中转与重试
 app.include_router(transit_admin_router, prefix="/api")
+# 面板备份与迁移：备份文件落服务器本地，恢复时端口/密钥不变，换机器只改 DNS
+app.include_router(transit_backup_router, prefix="/api")
 # 管理员线路健康：所有客户线路 + 面板入站，可筛选与批量检测
 app.include_router(health_admin_router, prefix="/api")
 # 模拟登录：超级管理员以销售/客户身份进入，10 分钟自动失效

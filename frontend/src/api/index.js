@@ -319,6 +319,14 @@ export const syncSupplierQuotes = () => client.post('/admin/suppliers/sync/quote
 export const mapSupplierProduct = (id, localProductId, resourceCategory = null) => client.patch(`/admin/suppliers/products/${id}/mapping`, { local_product_id: localProductId || null, resource_category: resourceCategory || null })
 export const mapSupplierRegion = (id, localRegionId) => client.patch(`/admin/suppliers/regions/${id}/mapping`, { local_region_id: localRegionId || null })
 export const saveSupplierRule = (payload) => client.post('/admin/suppliers/supply-rules', payload)
+// 面板备份与迁移
+export const createTransitBackup = (vpsId) => client.post(`/admin/transit/vps/${vpsId}/backups`)
+export const getTransitBackups = (params = {}) => client.get('/admin/transit/backups', { params })
+export const restoreTransitBackup = (id, payload) => client.post(`/admin/transit/backups/${id}/restore`, payload)
+export const deleteTransitBackup = (id) => client.delete(`/admin/transit/backups/${id}`)
+// 备份含私钥，必须带 Bearer 下载，不能用普通 <a href>
+export const downloadTransitBackup = (id) =>
+  client.get(`/admin/transit/backups/${id}/download`, { responseType: 'blob' })
 // 系统日志：采购/中转/模拟等关键链路的运行记录
 export const getSystemLogs = (params = {}) => client.get('/admin/logs', { params })
 export const getSystemLogSummary = (params = {}) => client.get('/admin/logs/summary', { params })

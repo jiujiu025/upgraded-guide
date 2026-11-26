@@ -10,11 +10,13 @@ import {
   createTransitPanel, getTransitPanels, getTransitProvisions, getTransitRoutes, getTransitSummary,
   retryTransitOrder, saveTransitRoute, testTransitPanel, updateTransitPanel,
 } from '../api'
+import TransitBackupPanel from './TransitBackupPanel.vue'
 
 const TABS = [
   { key: 'panels', label: '面板' },
   { key: 'routes', label: '国家映射' },
   { key: 'provisions', label: '待配中转' },
+  { key: 'backups', label: '备份与迁移' },
 ]
 const PROVISION_LABELS = {
   pending: '待开始',
@@ -406,7 +408,7 @@ onMounted(loadPanels)
       </div>
     </template>
 
-    <template v-else>
+    <template v-else-if="activeTab === 'provisions'">
       <div class="tp-toolbar">
         <p>付款后 IP 已买到、但中转没配完的订单。修好面板后在这里重试，不会重复买 IP。</p>
         <button class="tp-ghost" type="button" :disabled="provisionsLoading" @click="loadProvisions">
@@ -433,6 +435,10 @@ onMounted(loadPanels)
           </span>
         </div>
       </div>
+    </template>
+
+    <template v-else>
+      <TransitBackupPanel :panels="panels" />
     </template>
 
     <div v-if="dialogOpen" class="tp-dialog" role="dialog" aria-modal="true" aria-label="中转面板">

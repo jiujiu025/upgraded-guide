@@ -883,3 +883,33 @@ class SystemLog(TimestampMixin, Base):
     order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     vps_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class TransitBackup(TimestampMixin, Base):
+    """一台 3x-ui 面板的配置备份。
+
+    备份的是"能原样重建"的东西：每条入站的完整定义（含 UUID、reality 私钥、
+    shortId、端口）+ Xray 模板（出站与路由）。恢复时端口和密钥不变，
+    客户链接就不用换——换机器只需要把域名解析指过去。
+    """
+
+    __tablename__ = "transit_backups"
+
+    vps_id: Mapped[int | None] = mapped_column(ForeignKey("transit_vps.id"), nullable=True, index=True)
+    # 快照名称：面板被删后记录仍要能看懂是哪台
+    vps_name: Mapped[str] = mapped_column(String(60), nullable=False)
+    filename: Mapped[str] = mapped_column(String(160), nullable=False)
+    # 相对 storage 根目录的路径，不存绝对路径（换机器后路径会变）
+    storage_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    inbound_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    outbound_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rule_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # ready / restored / failed
+    status: Mapped[str] = mapped_column(String(20), default="ready", nullable=False, index=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    restored_to_vps_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
