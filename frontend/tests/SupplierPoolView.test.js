@@ -202,3 +202,18 @@ describe('资源池 Key 录入与即时同步', () => {
     expect(wrapper.text()).toContain('同步完成')
   })
 })
+
+describe('页头采购状态', () => {
+  it('跟着自动采购开关走，不是写死的文案', async () => {
+    const off = mount(SupplierPoolView)
+    await flushPromises()
+    expect(off.find('.procurement-lock').text()).toContain('采购已禁用')
+    off.unmount()
+
+    setLoadData({ pools: { items: [], purchase_enabled: true, min_margin_percent: 20 } })
+    const on = mount(SupplierPoolView)
+    await flushPromises()
+    expect(on.find('.procurement-lock').text()).toContain('采购已启用')
+    expect(on.find('.procurement-lock').attributes('data-on')).toBe('true')
+  })
+})
