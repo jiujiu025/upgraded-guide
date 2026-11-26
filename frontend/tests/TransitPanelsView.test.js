@@ -138,6 +138,30 @@ describe('TransitPanelsView', () => {
     expect(payload.port_end).toBe(52999)
   })
 
+  it('编辑时不能改名，提交里也不带 name', async () => {
+    api.updateTransitPanel.mockResolvedValue({ data: {} })
+    const wrapper = mount(TransitPanelsView)
+    await flushPromises()
+
+    await button(wrapper, '编辑').trigger('click')
+    await flushPromises()
+
+    // 名称框在编辑态是只读的，避免用户改了却不生效
+    const nameInput = wrapper.findAll('.tp-form input')[0]
+    expect(nameInput.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('名称是唯一标识')
+
+    await button(wrapper, '保存').trigger('click')
+    await flushPromises()
+
+    expect(api.updateTransitPanel).toHaveBeenCalledTimes(1)
+    const [id, payload] = api.updateTransitPanel.mock.calls[0]
+    expect(id).toBe(1)
+    // 后端的编辑接口没有 name 字段，多传会被 extra="forbid" 拒掉
+    expect('name' in payload).toBe(false)
+    expect(payload.is_enabled).toBe(true)
+  })
+
   it('停用前要确认，取消就不发请求', async () => {
     window.confirm = vi.fn(() => false)
     const wrapper = mount(TransitPanelsView)

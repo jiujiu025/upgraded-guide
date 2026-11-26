@@ -259,3 +259,15 @@ def test_disable_panel_reports_used_inbounds(api):
     body = response.json()
     assert body["is_enabled"] is False
     assert body["used_inbounds"] == 1
+
+
+def test_patch_with_unknown_field_gets_chinese_hint(api):
+    """编辑面板多传了 name（后端不支持改名）：提示要能看懂，而不是那句 Extra inputs。"""
+    client, _db, _order = api
+    headers = login(client)
+    client.post("/api/admin/transit/vps", json=VPS_PAYLOAD, headers=headers)
+
+    response = client.patch("/api/admin/transit/vps/1",
+                            json={"name": "US-02", "is_enabled": True}, headers=headers)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "提交了不支持的字段：name"

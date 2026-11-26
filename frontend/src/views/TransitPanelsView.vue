@@ -145,6 +145,9 @@ function payloadOf() {
     port_end: Number(form.port_end),
     max_inbounds: Number(form.max_inbounds),
   }
+  // 名称是唯一标识，创建后不允许改：后端的编辑接口没有这个字段，
+  // 传了会被 extra="forbid" 直接拒掉（就是那句 Extra inputs are not permitted）
+  if (editingId.value) delete payload.name
   // 编辑时留空 = 不改凭据；后端按"没传这个字段"处理，传空串会被当成清除
   if (!form.password) delete payload.password
   if (!form.api_token) delete payload.api_token
@@ -443,7 +446,10 @@ onMounted(loadPanels)
         </header>
 
         <div class="tp-form">
-          <label>面板名称<input v-model="form.name" placeholder="如 US-01 / HK-02" /></label>
+          <label>面板名称
+            <input v-model="form.name" :disabled="Boolean(editingId)" placeholder="如 US-01 / HK-02" />
+            <small v-if="editingId" class="tp-field-note">名称是唯一标识，创建后不可修改</small>
+          </label>
           <label>区域组
             <select v-model="form.group_code">
               <option v-for="group in groupOptions" :key="group" :value="group">{{ group }}</option>
@@ -578,6 +584,8 @@ onMounted(loadPanels)
 .tp-form .span2{grid-column:span 2}
 .tp-form .check{display:flex;align-items:center;gap:8px;font-weight:400}
 .tp-form .check input{min-height:0;width:15px;height:15px}
+.tp-form input:disabled{background:#f2f5f3;color:#7c8f86;cursor:not-allowed}
+.tp-field-note{color:#93a49c;font-size:10px;font-weight:400}
 .tp-dialog-card footer{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid #edf2ef}
 @media(max-width:900px){
   .tp-page{padding:22px 16px 40px}
