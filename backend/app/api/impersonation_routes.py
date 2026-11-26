@@ -22,12 +22,13 @@ from app.services.impersonation_service import (
     ImpersonationError,
     context_of,
     end,
-    mark_expired,
     end_by_token,
+    mark_expired,
     snapshot,
     start,
     target_customer_missing,
 )
+from app.services.log_service import write_log
 from app.services.session_service import SessionError
 
 router = APIRouter(prefix="/admin/impersonation", tags=["管理员模拟登录"])
@@ -70,6 +71,9 @@ def start_impersonation(
 
     write_audit(db, user, "impersonation_start", "user", target.id,
                 f"开始模拟 {target.display_name or target.username}（{target.role}，{TTL_MINUTES} 分钟）")
+    write_log(db, "warning", "impersonation", "impersonation_start",
+              f"{user.display_name or user.username} 开始模拟 {target.display_name or target.username}",
+              detail=f"目标角色={target.role} IP={_client_ip(request)}", actor=user)
     db.commit()
     db.refresh(record)
     return {
@@ -123,6 +127,9 @@ def force_end(
     end(db, record, "forced")
     write_audit(db, user, "impersonation_end", "user", record.target_user_id,
                 f"强制结束模拟（记录 #{record.id}）")
+    write_log(db, "warning", "impersonation", "impersonation_forced_end",
+              f"{user.display_name or user.username} 强制结束了记录 #{record.id}",
+              actor=user)
     db.commit()
     return {"ok": True}
 

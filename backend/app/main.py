@@ -19,6 +19,7 @@ from app.api.supplier_routes import router as supplier_router
 from app.api.task_admin_routes import router as task_admin_router
 from app.api.health_admin_routes import router as health_admin_router
 from app.api.impersonation_routes import auth_router as impersonation_auth_router
+from app.api.log_routes import router as log_router
 from app.api.impersonation_routes import router as impersonation_router
 from app.api.transit_admin_routes import router as transit_admin_router
 from app.core.config import get_settings
@@ -82,6 +83,8 @@ app.include_router(health_admin_router, prefix="/api")
 # 模拟登录：超级管理员以销售/客户身份进入，10 分钟自动失效
 app.include_router(impersonation_router, prefix="/api")
 app.include_router(impersonation_auth_router, prefix="/api")
+# 系统日志：采购/中转/模拟等关键链路的运行记录，排障用
+app.include_router(log_router, prefix="/api")
 
 
 @app.get("/healthz")

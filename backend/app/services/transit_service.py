@@ -35,6 +35,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Order, Region, TransitProvision, TransitRoute, TransitVps
+from app.services.log_service import write_log
 from app.services.reality_keys import (
     generate_reality_keypair,
     generate_short_id,
@@ -464,6 +465,9 @@ def _provision_one(
             provision.status = "inbound_created"
             provision.error_code = exc.code
             provision.error_message = str(exc)[:500]
+            write_log(db, "error", "transit", "transit_save_template_failed",
+                      f"面板 {vps.name} 保存出站/路由失败：{exc.code}",
+                      detail=str(exc)[:800], order_id=order.id, vps_id=vps.id)
             db.flush()
             raise TransitProvisionError(f"入站已建，但出站/路由保存失败：{exc}", code=exc.code) from exc
 
@@ -566,8 +570,8 @@ def provision_transit(
         else:
             provision.transit_vps_id = provision.transit_vps_id or vps.id
 
-        password, token = panel_credentials(db, vps)
         try:
+            password, token = panel_credentials(db, vps)
             with XuiClient(
                 vps.base_url, username=vps.username, password=password, api_token=token,
             ) as client:
@@ -575,9 +579,20 @@ def provision_transit(
                     db, order=order, vps=vps, provision=provision, account=account,
                     index=index, region_name=region_name, client=client,
                 ))
+        except TransitProvisionError:
+            # _provision_one 已经分好类（入站已建 / 保存失败…），不要二次包装把 code 盖掉
+            raise
         except (XuiAuthError, XuiConfigError, XuiError) as exc:
             _mark_failure(db, provision, exc)
             raise TransitProvisionError(str(exc), code=exc.code) from exc
+        except Exception as exc:  # noqa: BLE001
+            # 凭据解密失败、字段缺失这类问题不能让裸异常冒到调用方：
+            # 调用方只认 TransitProvisionError，裸异常会把订单卡在"采购中"。
+            provision.status = provision.status if provision.inbound_id else "failed"
+            provision.error_code = "TRANSIT_UNEXPECTED"
+            provision.error_message = f"{type(exc).__name__}: {exc}"[:500]
+            db.flush()
+            raise TransitProvisionError(f"{type(exc).__name__}: {exc}", code="TRANSIT_UNEXPECTED") from exc
 
     return endpoints
 

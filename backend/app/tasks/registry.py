@@ -64,6 +64,13 @@ def _notification_dispatch(db: Session, now: datetime) -> dict:
     return notifications.notification_dispatch(db, now)
 
 
+def _purge_system_logs(db: Session, now: datetime) -> dict:
+    """系统日志只留 30 天：它是排障用的，不是账本，没必要无限增长。"""
+    from app.services.log_service import purge_old
+
+    return {"deleted": purge_old(db, days=30)}
+
+
 # 顺序即执行顺序：先跑影响钱和客户的，再跑上游刷新；库存是唯一需要逐个国家
 # 串行请求的任务，放最后，避免它拖慢同一轮里的关单和到期提醒。
 # 钱包巡检是只读的且很快，紧跟支付对账，保证"钱有问题"在每轮最早被看见。
@@ -81,6 +88,8 @@ SPECS = (
     TaskSpec("supplier_catalog_refresh", "供应商目录刷新", 360, _supplier_catalog_refresh),
     TaskSpec("supplier_quotes_refresh", "供应商报价刷新", 360, _supplier_quotes_refresh),
     TaskSpec("supplier_inventory_refresh", "供应商库存刷新（按国家轮转）", 30, _supplier_inventory_refresh),
+    # 日志清理：每天一次，删 30 天前的运行日志；审计日志不在这里动。
+    TaskSpec("purge_system_logs", "清理过期系统日志", 1440, _purge_system_logs),
 )
 
 TASKS: dict[str, TaskSpec] = {spec.name: spec for spec in SPECS}

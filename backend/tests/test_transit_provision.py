@@ -289,3 +289,32 @@ def test_generates_per_inbound_keys_when_machine_has_none(ctx, monkeypatch):
     assert reality["shortIds"][0]
     # 链接里的 pbk 必须与这条入站自己的私钥匹配，不能是机器级共用值
     assert public_key_from_private(reality["privateKey"]) in endpoints[0].link
+
+
+def test_broken_panel_credential_stops_at_pending_transit(ctx, monkeypatch):
+    """凭据解密失败（密钥轮换后的真实场景）：订单停在待配中转，上游单号必须留下。
+
+    之前这里会抛 TransitCredentialError 冒到后台任务，导致事务回滚、单号丢失，
+    采购记录永远停在 pending —— 钱花了、单号没了、客户什么都收不到。
+    """
+    from app.models import Notification
+
+    session, order, vps = ctx
+    vps.encrypted_password = "v1:broken"   # 密钥换过 / 密文损坏
+    session.commit()
+
+    adapter = FakeAdapter()
+    monkeypatch.setattr(procurement_service, "build_readonly_adapter", lambda *a, **k: adapter)
+    monkeypatch.setattr(procurement_service.get_settings(), "supplier_auto_procurement_enabled",
+                        True, raising=False)
+
+    record = procurement_service.auto_procure_order(session, order)
+
+    assert record.status == "awaiting_transit"
+    assert record.error_code == "TRANSIT_UNEXPECTED"
+    # 关键：上游单号必须已经落盘，否则出事只能去上游后台按订单号捞
+    assert record.external_order_no == "UPSTREAM-9"
+
+    session.refresh(order)
+    assert order.status == "pending_transit"
+    assert session.query(Notification).count() >= 1

@@ -33,6 +33,7 @@ from app.models import (
     Supplier,
 )
 from app.services.audit_service import write_audit
+from app.services.log_service import write_log
 from app.services.order_service import claim_delivery_slot, notify_order_parties
 from app.services.settings_service import auto_procurement_enabled
 from app.services.subscription_service import issue_token
@@ -124,11 +125,42 @@ def _fail(db: Session, record: Procurement, code: str, message: str, customer: C
     record.error_message = message[:500]
     # 系统动作也要留痕：失败原因必须能在审计里查到，不能只躺在 procurements 表里
     write_audit(db, None, "procure_fail", "order", order.id, f"采购失败：{code} {message[:200]}")
+    write_log(db, "error", "procurement", "procurement_failed",
+              f"订单 {order.order_no} 采购失败：{code}",
+              detail=message[:800], order_id=order.id)
     db.commit()
     if customer is not None:
         notify_order_parties(
             db, customer, order, "自动采购失败",
             f"订单 {order.order_no} 自动采购未成功（{message[:80]}），已转人工处理，无需重复付款。",
+            "procurement",
+        )
+        db.commit()
+    return record
+
+
+def _await_transit(db: Session, *, order: Order, record: Procurement, customer: Customer | None,
+                   upstream_no: str, exc: Exception, now: datetime, code: str | None = None) -> Procurement:
+    """中转没配好：订单停在待配中转，绝不标记 failed。
+
+    IP 已经买了（钱已扣），标 failed 会诱导人工重试，重试就是再买一次。
+    这里同时把上游单号写进审计，出问题时能凭单号去上游对账。
+    """
+    order.status = "pending_transit"
+    order.confirmed_at = order.confirmed_at or now
+    record.status = "awaiting_transit"
+    record.error_code = code or getattr(exc, "code", "TRANSIT_NOT_READY")
+    record.error_message = f"{type(exc).__name__}: {exc}"[:500]
+    write_audit(db, None, "procure_awaiting_transit", "order", order.id,
+                f"上游单号={upstream_no}; 原因={str(exc)[:200]}")
+    write_log(db, "error", "transit", "transit_provision_failed",
+              f"订单 {order.order_no} 中转未完成：{type(exc).__name__}",
+              detail=f"上游单号={upstream_no}\n{exc}"[:1500], order_id=order.id)
+    db.commit()
+    if customer is not None:
+        notify_order_parties(
+            db, customer, order, "线路正在配置中转",
+            f"订单 {order.order_no} 的住宅 IP 已就绪，正在配置专线中转，配置完成后即可使用。",
             "procurement",
         )
         db.commit()
@@ -309,6 +341,10 @@ def auto_procure_order(db: Session, order: Order, *, trigger: str = "payment") -
           "expires_at": account.expires_at.isoformat() if account.expires_at else None}
          for account in result.accounts], ensure_ascii=False,
     )
+    # 上游已经扣钱了：先把单号与账号落盘，再去做中转。
+    # 否则中转抛任何意外异常，事务回滚会把单号一起抹掉——钱花了、单号没了，
+    # 只能去上游后台按 remark（订单号）捞。
+    db.commit()
 
     now = _utcnow()
     # 社媒/直播比静态住宅多一跳 VPS 中转：IP 买到了不等于能交付。
@@ -323,22 +359,14 @@ def auto_procure_order(db: Session, order: Order, *, trigger: str = "payment") -
                 country_code=region.country_code, city_name=request["city"],
             )
         except (TransitNotConfigured, TransitProvisionError) as exc:
-            order.status = "pending_transit"
-            order.confirmed_at = order.confirmed_at or now
-            record.status = "awaiting_transit"
-            record.error_code = getattr(exc, "code", "TRANSIT_NOT_READY")
-            record.error_message = str(exc)[:500]
-            write_audit(db, None, "procure_awaiting_transit", "order", order.id,
-                        f"上游单号={result.order_number}; 原因={str(exc)[:200]}")
-            db.commit()
-            if customer is not None:
-                notify_order_parties(
-                    db, customer, order, "线路正在配置中转",
-                    f"订单 {order.order_no} 的住宅 IP 已就绪，正在配置专线中转，配置完成后即可使用。",
-                    "procurement",
-                )
-                db.commit()
-            return record
+            return _await_transit(db, order=order, record=record, customer=customer,
+                                  upstream_no=result.order_number, exc=exc, now=now)
+        except Exception as exc:  # noqa: BLE001
+            # 中转侧任何没预料到的异常（凭据解密失败、字段缺失……）也必须停在待配中转，
+            # 不能让它冒到后台任务里：那会让采购记录永远停在 pending，客户什么都收不到。
+            return _await_transit(db, order=order, record=record, customer=customer,
+                                  upstream_no=result.order_number, exc=exc, now=now,
+                                  code="TRANSIT_UNEXPECTED")
 
     created = _create_customer_lines(
         db, order=order, customer=customer, accounts=list(result.accounts),
@@ -350,6 +378,9 @@ def auto_procure_order(db: Session, order: Order, *, trigger: str = "payment") -
     record.line_id = created[0] if created else None
     write_audit(db, None, "procure_success", "order", order.id,
                 f"上游单号={result.order_number}; 线路={','.join(str(item) for item in created)}")
+    write_log(db, "info", "procurement", "procurement_succeeded",
+              f"订单 {order.order_no} 已采购并交付 {len(created)} 条线路",
+              detail=f"上游单号={result.order_number}", order_id=order.id)
     db.commit()
 
     if customer is not None:

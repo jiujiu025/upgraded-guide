@@ -853,3 +853,33 @@ class ImpersonationSession(TimestampMixin, Base):
     actor_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SystemLog(TimestampMixin, Base):
+    """系统运行日志：谁、哪一步、为什么失败。
+
+    与 ``audit_logs`` 的分工：
+    - audit_logs 记"人做了什么业务动作"，用于追责与对账；
+    - system_logs 记"系统干活时发生了什么"，用于排障（上游扣款后中转失败、
+      面板连不上、密钥解不开这类）。
+    两者都写，但不要合并：审计要长期保留且可读，运行日志量大、只需要留几十天。
+    """
+
+    __tablename__ = "system_logs"
+    __table_args__ = (
+        Index("ix_system_logs_created_at", "created_at"),
+    )
+
+    # info / warning / error
+    level: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    # procurement / transit / impersonation / health / panel / order
+    category: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    # 短动作名，便于聚合统计：transit_provision_failed / procurement_supplier_error
+    action: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    # 上下文或堆栈，截断后落库；不要塞密钥/密码
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    vps_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

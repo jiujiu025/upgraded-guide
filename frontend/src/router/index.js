@@ -14,6 +14,7 @@ import AdminTasksView from '../views/AdminTasksView.vue'
 import AuditLogView from '../views/AuditLogView.vue'
 import ProcurementRecordsView from '../views/ProcurementRecordsView.vue'
 import TransitPanelsView from '../views/TransitPanelsView.vue'
+import SystemLogsView from '../views/SystemLogsView.vue'
 import NotificationChannelsView from '../views/NotificationChannelsView.vue'
 import AdminLayout from '../layouts/AdminLayout.vue'
 import ChangePasswordView from '../views/ChangePasswordView.vue'
@@ -77,6 +78,7 @@ const routes = [
       { path: 'resource-pool', component: SupplierPoolView, meta: { page: 'admin-resource-pool' } },
       { path: 'transit-panels', component: TransitPanelsView, meta: { page: 'admin-transit-panels' } },
       { path: 'procurements', component: ProcurementRecordsView, meta: { page: 'admin-procurements' } },
+      { path: 'logs', component: SystemLogsView, meta: { page: 'admin-logs' } },
       { path: 'orders', component: OrderCenterView, meta: { page: 'admin-orders' } },
       { path: 'finance', component: FinanceView, meta: { page: 'admin-finance' } },
       { path: 'customers', component: CustomerManagerView, meta: { page: 'admin-customers' } },

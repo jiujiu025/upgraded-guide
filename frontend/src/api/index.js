@@ -131,13 +131,22 @@ export const register = payload => withPortalLock('customer', async () => {
   setSession(result.data, 'customer')
   return result
 })
-export const logout = (portal = activePortal.value) => withPortalLock(portal, async () => {
-  try {
-    const config = cookieConfig(portal)
-    const csrf = await client.get('/auth/csrf', config)
-    await client.post('/auth/logout', {}, { ...config, headers: { 'X-CSRF-Token': csrf.data.csrf_token } })
-  } finally { clearSession(true, portal) }
-})
+export const logout = async (portal = activePortal.value) => {
+  // 模拟态下「退出登录」必须只结束模拟：refresh cookie 是整个浏览器共享的，
+  // 走 /auth/logout 会把管理员自己的后台会话一起杀掉。
+  if (impersonationActive()) {
+    try { await client.post('/auth/impersonation/logout', {}, { skipRedirect: true }) } catch { /* 已过期也无所谓 */ }
+    clearImpersonation()
+    return
+  }
+  return withPortalLock(portal, async () => {
+    try {
+      const config = cookieConfig(portal)
+      const csrf = await client.get('/auth/csrf', config)
+      await client.post('/auth/logout', {}, { ...config, headers: { 'X-CSRF-Token': csrf.data.csrf_token } })
+    } finally { clearSession(true, portal) }
+  })
+}
 export const changePassword = (payload, portal = activePortal.value) =>
   withPortalLock(portal, () => client.post('/auth/change-password', payload, portalConfig(portal)))
 export const getSecurityQuestions = () => client.get('/auth/security-questions')
@@ -310,6 +319,9 @@ export const syncSupplierQuotes = () => client.post('/admin/suppliers/sync/quote
 export const mapSupplierProduct = (id, localProductId, resourceCategory = null) => client.patch(`/admin/suppliers/products/${id}/mapping`, { local_product_id: localProductId || null, resource_category: resourceCategory || null })
 export const mapSupplierRegion = (id, localRegionId) => client.patch(`/admin/suppliers/regions/${id}/mapping`, { local_region_id: localRegionId || null })
 export const saveSupplierRule = (payload) => client.post('/admin/suppliers/supply-rules', payload)
+// 系统日志：采购/中转/模拟等关键链路的运行记录
+export const getSystemLogs = (params = {}) => client.get('/admin/logs', { params })
+export const getSystemLogSummary = (params = {}) => client.get('/admin/logs/summary', { params })
 // 模拟登录：超级管理员以销售/客户身份进入（10 分钟，独立 token）
 export const startImpersonation = (userId) => client.post('/admin/impersonation', { user_id: userId })
 export const logoutImpersonation = () => client.post('/auth/impersonation/logout', {}, { skipRedirect: true })

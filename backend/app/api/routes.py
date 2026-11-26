@@ -495,6 +495,11 @@ def refresh(request: Request, response: Response, portal: AuthPortal | None = No
 
 @router.post("/auth/logout", status_code=204)
 def logout(request: Request, response: Response, portal: AuthPortal | None = None, db: Session = Depends(get_db)):
+    # 模拟态禁用：refresh cookie 是浏览器级的，这里退的是管理员自己的会话。
+    # 放在来源校验之前——这条判断与来源无关，先挡住再谈其它。
+    token_header = (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+    if token_header.startswith("imp_"):
+        raise HTTPException(status_code=400, detail="模拟登录请使用「退出模拟」，不要退出管理员会话")
     _origin(request)
     try:
         session, token, _, cookie_name = _portal_refresh(db, request, portal)

@@ -212,3 +212,17 @@ def test_disabling_actor_kills_impersonation(api):
     db.commit()
 
     assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+def test_impersonation_cannot_logout_admin_session(api):
+    """模拟态点退出不能走 /auth/logout：refresh cookie 是浏览器共享的，
+    走这里退掉的是管理员自己的后台会话。"""
+    client = api["client"]
+    headers = login(client, "root", "Admin_123456")
+    token = start(client, headers, api["sales"].id).json()["token"]
+
+    response = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 400
+    assert "退出模拟" in response.json()["detail"]
+    # 管理员自己的会话必须还在
+    assert client.get("/api/auth/me", headers=headers).status_code == 200
