@@ -78,6 +78,9 @@ SPECS = (
     TaskSpec("payment_reconcile", "支付对账与挂单清理", 15, _payment_reconcile),
     # 每天一次：账的变化以天为单位，跑太勤除了多写流水没有收益。
     TaskSpec("wallet_audit", "钱包账本巡检", 1440, _wallet_audit),
+    # 日志清理：每天一次，删 30 天前的运行日志；审计日志不在这里动。
+    # 必须排在库存刷新之前——库存是唯一串行请求几十个国家的任务，要留在最后。
+    TaskSpec("purge_system_logs", "清理过期系统日志", 1440, _purge_system_logs),
     TaskSpec("close_expired_orders", "关闭超时未支付订单", 30, _close_expired_orders),
     # 到期标记必须排在提醒之前：同一轮里先把已到期的线路落成 expired，再算即将到期，
     # 避免刚过期的线路被"提醒"了一遍却没从正常列表里消失。
@@ -88,8 +91,6 @@ SPECS = (
     TaskSpec("supplier_catalog_refresh", "供应商目录刷新", 360, _supplier_catalog_refresh),
     TaskSpec("supplier_quotes_refresh", "供应商报价刷新", 360, _supplier_quotes_refresh),
     TaskSpec("supplier_inventory_refresh", "供应商库存刷新（按国家轮转）", 30, _supplier_inventory_refresh),
-    # 日志清理：每天一次，删 30 天前的运行日志；审计日志不在这里动。
-    TaskSpec("purge_system_logs", "清理过期系统日志", 1440, _purge_system_logs),
 )
 
 TASKS: dict[str, TaskSpec] = {spec.name: spec for spec in SPECS}
