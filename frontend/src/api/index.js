@@ -1,5 +1,9 @@
 import axios from 'axios'
-import { activePortal, clearSession, loginPathForPortal, onSessionChange, passwordPathForPortal, sessionFor, setSession } from './session'
+import {
+  activePortal, clearImpersonation, clearSession, currentUserForPortal, impersonation,
+  impersonationActive, loginPathForPortal, onSessionChange, passwordPathForPortal, sessionFor,
+  setSession, updateImpersonationUser,
+} from './session'
 
 const client = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || '/api', timeout: 10000, withCredentials: true })
 const refreshPromises = new Map()
@@ -18,6 +22,12 @@ onSessionChange((type, portal) => {
 })
 client.interceptors.request.use((config) => {
   config.authPortal ??= activePortal.value
+  // 模拟态优先：这个标签里所有请求都以被模拟者身份发，且不再走 cookie 刷新
+  if (impersonationActive()) {
+    config.headers.Authorization = `Bearer ${impersonation.token}`
+    config.skipRefresh = true
+    return config
+  }
   const token = sessionFor(config.authPortal).accessToken
   if (token && !config.skipBearer) config.headers.Authorization = `Bearer ${token}`
   return config
@@ -30,6 +40,15 @@ const withPortalLock = (portal, work) => globalThis.navigator?.locks?.request
   : work()
 
 async function restoreSession(portal = activePortal.value, force = false) {
+  if (impersonationActive()) {
+    // 模拟态没有 refresh token，靠 /auth/me 确认还在有效期内
+    if (!impersonation.user || force) {
+      const { data } = await client.get('/auth/me')
+      const expiresAt = data.impersonation?.expires_at ? Date.parse(data.impersonation.expires_at) : impersonation.expiresAt
+      updateImpersonationUser(data, expiresAt)
+    }
+    return impersonation.user
+  }
   const state = sessionFor(portal)
   if (!force && state.accessToken) return state.user
   if (!refreshPromises.has(portal)) {
@@ -48,10 +67,20 @@ async function restoreSession(portal = activePortal.value, force = false) {
 }
 export const ensureSession = restoreSession
 export const hasSession = () => Boolean(sessionFor().user)
-export const currentSessionUser = portal => sessionFor(portal).user
+export const currentSessionUser = portal => currentUserForPortal(portal)
 
 client.interceptors.response.use((response) => response, async (error) => {
   const config = error.config
+  // 模拟态出 401（10 分钟到期 / 被后台强制结束 / 发起人被停用）：直接清掉并回后台，
+  // 不要试图 refresh——模拟本来就没有 refresh token。
+  if (error.response?.status === 401 && impersonationActive()) {
+    clearImpersonation()
+    error.userMessage = '模拟登录已结束（到期或已被管理员结束）'
+    if (typeof window !== 'undefined' && !config?.skipRedirect) {
+      window.location.replace('/admin/login?imp=ended')
+    }
+    return Promise.reject(error)
+  }
   const portal = config?.authPortal ?? activePortal.value
   const state = sessionFor(portal)
   const requestToken = config?.headers?.Authorization?.replace(/^Bearer /, '') || ''
@@ -281,6 +310,11 @@ export const syncSupplierQuotes = () => client.post('/admin/suppliers/sync/quote
 export const mapSupplierProduct = (id, localProductId, resourceCategory = null) => client.patch(`/admin/suppliers/products/${id}/mapping`, { local_product_id: localProductId || null, resource_category: resourceCategory || null })
 export const mapSupplierRegion = (id, localRegionId) => client.patch(`/admin/suppliers/regions/${id}/mapping`, { local_region_id: localRegionId || null })
 export const saveSupplierRule = (payload) => client.post('/admin/suppliers/supply-rules', payload)
+// 模拟登录：超级管理员以销售/客户身份进入（10 分钟，独立 token）
+export const startImpersonation = (userId) => client.post('/admin/impersonation', { user_id: userId })
+export const logoutImpersonation = () => client.post('/auth/impersonation/logout', {}, { skipRedirect: true })
+export const listImpersonations = (params = {}) => client.get('/admin/impersonation', { params })
+export const forceEndImpersonation = (id) => client.delete(`/admin/impersonation/${id}`)
 // 管理员线路健康：所有客户线路 + 面板入站
 export const getHealthOverview = () => client.get('/admin/health/overview')
 export const getAdminCustomerLines = (params = {}) => client.get('/admin/health/customer-lines', { params })

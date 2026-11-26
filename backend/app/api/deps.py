@@ -7,12 +7,27 @@ from sqlalchemy.orm import Session
 from app.core.security import decode_access_token
 from app.db import get_db
 from app.models import AuthSession, User
+from app.services.impersonation_service import (
+    BLOCKED_PATHS as IMPERSONATION_BLOCKED_PATHS,
+    TOKEN_PREFIX as IMPERSONATION_PREFIX,
+    resolve as resolve_impersonation,
+)
 from app.services.session_service import SessionError, validate_session
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 def current_user(request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    # 模拟登录走独立 token：身份按被模拟者算，审计按发起人记（见 impersonation_service）
+    if token.startswith(IMPERSONATION_PREFIX):
+        try:
+            _record, target = resolve_impersonation(db, token)
+        except SessionError as exc:
+            raise HTTPException(status_code=401, detail="模拟登录已失效") from exc
+        # 身份类操作照旧拦住：借客户的壳改掉他的密码，客户就再也登不进来了
+        if request.url.path in IMPERSONATION_BLOCKED_PATHS:
+            raise HTTPException(status_code=403, detail="模拟登录不能修改被模拟账号的密码或密保")
+        return target
     try:
         payload = decode_access_token(token)
         user_id = int(payload["sub"])

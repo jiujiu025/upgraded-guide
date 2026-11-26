@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { ArrowUpRight, Menu, X } from 'lucide-vue-next'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import BrandLogo from './components/BrandLogo.vue'
+import ImpersonationBanner from './components/ImpersonationBanner.vue'
 import { session } from './api/session'
 
 const route = useRoute()
@@ -27,6 +28,7 @@ function go(path) { menuOpen.value = false; router.push(path) }
 
 <template>
   <div class="app-shell">
+    <ImpersonationBanner />
     <template v-if="isWorkspace">
       <RouterView v-slot="{ Component }">
         <Transition name="route-view" mode="out-in">

@@ -18,6 +18,8 @@ from app.api.subscription_routes import router as subscription_router
 from app.api.supplier_routes import router as supplier_router
 from app.api.task_admin_routes import router as task_admin_router
 from app.api.health_admin_routes import router as health_admin_router
+from app.api.impersonation_routes import auth_router as impersonation_auth_router
+from app.api.impersonation_routes import router as impersonation_router
 from app.api.transit_admin_routes import router as transit_admin_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
@@ -77,6 +79,9 @@ app.include_router(procurement_router, prefix="/api")
 app.include_router(transit_admin_router, prefix="/api")
 # 管理员线路健康：所有客户线路 + 面板入站，可筛选与批量检测
 app.include_router(health_admin_router, prefix="/api")
+# 模拟登录：超级管理员以销售/客户身份进入，10 分钟自动失效
+app.include_router(impersonation_router, prefix="/api")
+app.include_router(impersonation_auth_router, prefix="/api")
 
 
 @app.get("/healthz")

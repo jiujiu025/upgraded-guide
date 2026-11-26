@@ -440,9 +440,27 @@ def login(
     return _token_out(user, session)
 
 
-@router.get("/auth/me", response_model=UserOut)
-def me(user: User = Depends(current_user)):
-    return user
+@router.get("/auth/me")
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """当前身份。模拟登录时额外带 impersonation，前端据此显示横幅与倒计时。"""
+    from app.models import ImpersonationSession
+    from app.services.impersonation_service import context_of
+
+    payload = {
+        "id": user.id, "username": user.username, "display_name": user.display_name,
+        "role": user.role, "must_change_password": user.must_change_password,
+    }
+    context = context_of(db)
+    if context is not None:
+        record = db.get(ImpersonationSession, context.record_id)
+        payload["impersonation"] = {
+            "record_id": context.record_id,
+            "actor_id": context.actor_id,
+            "actor_name": context.actor_name,
+            "target_name": context.target_name,
+            "expires_at": record.expires_at.isoformat() if record else None,
+        }
+    return payload
 
 
 @router.get("/auth/csrf")

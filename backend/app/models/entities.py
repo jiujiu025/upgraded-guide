@@ -830,3 +830,26 @@ class TransitProvision(TimestampMixin, Base):
     error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     line_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+
+class ImpersonationSession(TimestampMixin, Base):
+    """超级管理员"以某个销售/客户身份查看"的一次记录。
+
+    为什么不复用 AuthSession：模拟必须能**立刻吊销**（管理员点一下就断），
+    也必须在 10 分钟内自动失效。混进真实会话会让"退出模拟"变成"退出登录"，
+    而且审计上分不清是谁在操作。
+    """
+
+    __tablename__ = "impersonation_sessions"
+
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    target_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # manual / expired / actor_disabled / forced
+    end_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    actor_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

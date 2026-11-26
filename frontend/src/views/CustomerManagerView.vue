@@ -8,7 +8,7 @@ import {
   Check, CircleDollarSign, ClipboardList, Copy, CreditCard, FileClock, KeyRound, LogOut, Menu,
   MessageSquare, Package, Pencil, RefreshCw, Search, ShieldCheck, ShoppingCart, UserPlus, UserRound, Users, X,
 } from 'lucide-vue-next'
-import { getAdminCustomer, getAdminCustomerRecords, getAdminCustomers, getAdminSalesOptions, createAdminCustomer, createOfflineRecharge, resetAdminUserPassword, updateAdminCustomer, logout as endSession } from '../api'
+import { getAdminCustomer, getAdminCustomerRecords, getAdminCustomers, getAdminSalesOptions, createAdminCustomer, createOfflineRecharge, resetAdminUserPassword, updateAdminCustomer, startImpersonation, logout as endSession } from '../api'
 import { session } from '../api/session'
 import { getAdminNavigation } from '../navigation/adminNavigation'
 
@@ -184,6 +184,21 @@ function preparePasswordReset() {
     passwordForm.confirm_password = passwordForm.new_password
   } catch (generationError) {
     error.value = generationError.message
+  }
+}
+
+// 只有超级管理员能模拟；客户必须已绑定登录账号，否则进去是空页面
+const canImpersonate = computed(() => session.user?.role === 'super_admin')
+
+async function impersonate(target) {
+  if (!target?.user_id) return
+  try {
+    const { data } = await startImpersonation(target.user_id)
+    // 新标签打开：原后台不丢，也方便同时模拟另一个账号。token 走 hash，不进服务器日志
+    window.open(`/client#imp=${encodeURIComponent(data.token)}`, '_blank', 'noopener')
+    showNotice(`已打开模拟窗口，10 分钟后自动退出（操作记在管理员名下）`)
+  } catch (err) {
+    error.value = err.userMessage || '模拟登录失败'
   }
 }
 
@@ -501,7 +516,7 @@ onMounted(async () => {
               <div class="profile-avatar"><UserRound :size="25" /></div>
               <div class="profile-identity"><h2>{{ detail.customer.name }}</h2><p>{{ detail.customer.username ? `账号 ${detail.customer.username}` : '未绑定登录账号' }}<span>·</span>ID {{ detail.customer.id }}</p></div>
               <span class="customer-status" :data-status="detail.customer.status">{{ detail.customer.status }}</span>
-              <div class="profile-actions"><button class="secondary-control" @click="onBehalfOpen = true"><ShoppingCart :size="15" />代客下单</button><button class="secondary-control" @click="startEdit"><Pencil :size="15" />编辑资料</button><button class="primary-control" :disabled="!detail.customer.user_id || detail.customer.account_active === false" @click="openRecharge(detail.customer)"><ArrowDownToLine :size="15" />线下充值</button></div>
+              <div class="profile-actions"><button v-if="canImpersonate" class="secondary-control" :disabled="!detail.customer.user_id || detail.customer.account_active === false" @click="impersonate(detail.customer)"><UserRound :size="15" />模拟客户登录</button><button class="secondary-control" @click="onBehalfOpen = true"><ShoppingCart :size="15" />代客下单</button><button class="secondary-control" @click="startEdit"><Pencil :size="15" />编辑资料</button><button class="primary-control" :disabled="!detail.customer.user_id || detail.customer.account_active === false" @click="openRecharge(detail.customer)"><ArrowDownToLine :size="15" />线下充值</button></div>
             </section>
             <section class="customer-facts">
               <div><small>钱包余额</small><strong class="large-balance">{{ balanceLabel(detail.customer.balance_cents) }}</strong><button class="fact-link" :disabled="!detail.customer.user_id" @click="openRecharge(detail.customer)"><CircleDollarSign :size="14" />充值</button></div>

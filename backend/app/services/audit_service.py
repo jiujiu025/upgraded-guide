@@ -15,8 +15,16 @@ def write_audit(
 
     系统动作必须留痕：出了问题要能回答"这条线路是谁开的"，哪怕答案是"系统自动开的"。
     """
+    # 模拟登录：操作算在发起的管理员头上，并在 detail 里标明模拟的是谁。
+    # 不能记成"客户自己操作的"——出事要能追到人。
+    context = db.info.get("impersonation")
+    if context is not None:
+        actor_id = context.actor_id
+        detail = f"[模拟 {context.target_name}] {detail or ''}".strip()
+    else:
+        actor_id = actor.id if actor is not None else None
     db.add(AuditLog(
-        actor_id=actor.id if actor is not None else None,
+        actor_id=actor_id,
         action=action,
         resource_type=resource_type,
         resource_id=str(resource_id) if resource_id else None,
