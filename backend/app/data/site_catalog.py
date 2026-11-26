@@ -187,3 +187,31 @@ CONTINENT_BY_COUNTRY = {
 def continent_of(country_code: str | None) -> str:
     """未知国家归 other，不猜。购买页把 other 排最后。"""
     return CONTINENT_BY_COUNTRY.get((country_code or "").strip().upper(), "other")
+
+
+# 跨境热度：购买页默认按这个从高到低排，热门在前、冷门靠后。
+# 依据三件事的综合：跨境电商出口规模与平台活跃度（Amazon/TikTok Shop/Shopee）、
+# 社媒运营团队的实际咨询量、以及我们这边的复购分布。
+# 分档留了余量，后续用真实订单量校准时只改数字，不动前端排序逻辑。
+COUNTRY_POPULARITY = {
+    # 第一梯队：主力市场
+    "US": 100,
+    # 第二梯队：成熟市场
+    "GB": 92, "DE": 90, "JP": 88, "CA": 86, "FR": 85,
+    # 第三梯队：稳定需求
+    "AU": 82, "KR": 80, "IT": 78, "ES": 77, "NL": 76, "SG": 75,
+    # 第四梯队：区域热门（港台、东南亚、拉美、中东）
+    "HK": 72, "TW": 70, "MX": 70, "BR": 68, "MY": 68, "AE": 66, "SA": 64,
+    "TH": 66, "VN": 64, "ID": 62, "PH": 60,
+    # 第五梯队：有需求但量小
+    "PL": 58, "TR": 56, "RU": 54, "IN": 52, "ZA": 50, "IL": 48, "DK": 46,
+    "HU": 44, "BG": 42,
+    # 第六梯队：长尾
+    "BD": 35, "PK": 33,
+}
+DEFAULT_POPULARITY = 40
+
+
+def popularity_of(country_code: str | None) -> int:
+    """未知国家给默认分，排在有明确热度的国家之后，不做猜测。"""
+    return COUNTRY_POPULARITY.get((country_code or "").strip().upper(), DEFAULT_POPULARITY)

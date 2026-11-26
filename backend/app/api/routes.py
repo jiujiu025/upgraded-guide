@@ -49,6 +49,7 @@ from app.services.invite_code_service import (
 )
 from app.data.site_catalog import (
     CATEGORY_TO_LINE, LINE_LABELS, LINE_ORDER, LINE_SUBTITLES, LIVE_SPEC_LABELS, continent_of,
+    popularity_of,
 )
 from app.services.supplier_service import RESOURCE_CATEGORY_CODES
 from app.services.registration_service import (enforce_captcha_rate_limit, enforce_invite_check_rate_limit, enforce_login_rate_limit,
@@ -1025,6 +1026,8 @@ def _build_catalog(db: Session, *, with_price: bool) -> list[dict]:
                 "country_code": region.country_code,
                 # 购买页按大洲分栏；历史地区没有国家码时归 other，不猜
                 "continent": continent_of(region.country_code),
+                # 购买页按热度排序：热门在前，冷门靠后
+                "popularity": popularity_of(region.country_code),
                 "min_price": None,
                 "in_stock": False,
                 "offers": [],

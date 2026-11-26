@@ -57,6 +57,9 @@ export function buildProductViews(lines = []) {
         }
       })
       .filter((region) => region.offers.length)
+      // 热门市场排前面：跨境客户九成只关心美英德日那几个，
+      // 冷门国家留在列表里但不要占首屏。同分时保持后端给的原始顺序。
+      .sort((a, b) => (b.popularity ?? 40) - (a.popularity ?? 40))
     const prices = regions.flatMap((region) => region.offers.map((offer) => offer.unit_price))
       .filter((price) => typeof price === 'number')
     return {

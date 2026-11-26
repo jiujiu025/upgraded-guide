@@ -75,3 +75,25 @@ describe('下单产品派生', () => {
     expect(pickDefaultProduct(buildProductViews([]))).toBeNull()
   })
 })
+
+describe('国家热度排序', () => {
+  const ranked = [
+    { id: 1, name: '巴基斯坦', country_code: 'PK', popularity: 33, offers: [{ product_id: 1, billing_days: 30, unit_price: 120, in_stock: true, spec: null }] },
+    { id: 2, name: '美国', country_code: 'US', popularity: 100, offers: [{ product_id: 2, billing_days: 30, unit_price: 60, in_stock: true, spec: null }] },
+    { id: 3, name: '日本', country_code: 'JP', popularity: 88, offers: [{ product_id: 3, billing_days: 30, unit_price: 85, in_stock: true, spec: null }] },
+    { id: 4, name: '新加坡', country_code: 'SG', popularity: 75, offers: [{ product_id: 4, billing_days: 30, unit_price: 79, in_stock: true, spec: null }] },
+    { id: 5, name: '未知地区', country_code: 'XX', offers: [{ product_id: 5, billing_days: 30, unit_price: 70, in_stock: true, spec: null }] },
+  ]
+
+  it('热门在前、冷门在后，缺失热度按默认分排', () => {
+    const views = buildProductViews([{ code: 'residential', periods: [30], regions: ranked }])
+    const order = views[0].regions.map((item) => item.country_code)
+    expect(order).toEqual(['US', 'JP', 'SG', 'XX', 'PK'])
+  })
+
+  it('排序不影响国家数量与最低价', () => {
+    const views = buildProductViews([{ code: 'residential', periods: [30], regions: ranked }])
+    expect(views[0].regionCount).toBe(5)
+    expect(views[0].minPrice).toBe(60)
+  })
+})

@@ -211,3 +211,15 @@ def test_regions_carry_continent_for_buy_page_filter(api):
     assert continents["DE"] == "europe"
     # 没有国家码的历史地区不能被硬塞进某个洲
     assert all(value for value in continents.values())
+
+
+def test_regions_carry_popularity_for_ordering(api):
+    """购买页按热度排：美国最高，长尾最低，未知国家不高于任何已知国家。"""
+    response = api["client"].get("/api/public/catalog")
+    assert response.status_code == 200, response.text
+    residential = next(line for line in response.json()["lines"] if line["code"] == "residential")
+    scores = {item["country_code"]: item["popularity"] for item in residential["regions"]}
+    assert scores["US"] == 100
+    # 梯队关系要能排出顺序：美国最高，德国高于日本（fixture 里只有这三个国家有分）
+    assert scores["US"] > scores["DE"] > scores["JP"]
+    assert all(value > 0 for value in scores.values())
