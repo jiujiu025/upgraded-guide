@@ -322,6 +322,38 @@ def list_transit_provisions(
     ]
 
 
+@router.post("/transit/provisions/retry-all")
+def retry_all_pending_transit(
+    limit: int = Query(default=5, ge=1, le=20),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("super_admin", "admin")),
+):
+    """把积压的待配中转订单批量补做一遍。
+
+    每单独立事务：一台订单失败（面板满、面板连不上）不会把其它订单一起回滚。
+    默认只跑 5 单——每单都可能触发一次 Xray 重启，一次跑太多等于让同机客户
+    反复瞬断，运营看着也不安心。
+    """
+    orders = list(db.scalars(
+        select(Order).where(Order.status == "pending_transit").order_by(Order.id).limit(limit)
+    ).all())
+    results = []
+    for order in orders:
+        try:
+            created = deliver_pending_transit(db, order, actor=user)
+            results.append({"order_id": order.id, "order_no": order.order_no,
+                            "ok": True, "line_ids": created})
+        except Exception as exc:  # noqa: BLE001 - 单笔失败不能拖垮整批
+            db.rollback()
+            results.append({"order_id": order.id, "order_no": order.order_no,
+                            "ok": False, "error": str(exc)[:200]})
+    succeeded = sum(1 for item in results if item["ok"])
+    return {
+        "attempted": len(results), "succeeded": succeeded,
+        "failed": len(results) - succeeded, "results": results,
+    }
+
+
 @router.post("/orders/{order_id}/retry-transit")
 def retry_transit(order_id: int, db: Session = Depends(get_db),
                   user: User = Depends(require_roles("super_admin", "admin"))):

@@ -8,7 +8,7 @@ import {
 } from 'lucide-vue-next'
 import {
   createTransitPanel, getTransitPanels, getTransitProvisions, getTransitRoutes, getTransitSummary,
-  retryTransitOrder, saveTransitRoute, testTransitPanel, updateTransitPanel,
+  retryAllTransit, retryTransitOrder, saveTransitRoute, testTransitPanel, updateTransitPanel,
 } from '../api'
 import TransitBackupPanel from './TransitBackupPanel.vue'
 
@@ -40,6 +40,7 @@ const routeSaving = ref('')
 const provisions = ref([])
 const provisionsLoading = ref(false)
 const retryingId = ref(0)
+const retryingAll = ref(false)
 
 const dialogOpen = ref(false)
 const editingId = ref(0)
@@ -281,6 +282,24 @@ async function retry(provision) {
   }
 }
 
+async function retryAll() {
+  retryingAll.value = true
+  error.value = ''
+  try {
+    const { data } = await retryAllTransit(5)
+    if (data.succeeded) flash(`批量重试：成功 ${data.succeeded} 单，失败 ${data.failed} 单`)
+    if (data.failed) {
+      const first = data.results.find((item) => !item.ok)
+      error.value = `${data.failed} 单仍未恢复${first ? `：${first.order_no} ${first.error}` : ''}`
+    }
+    await Promise.all([loadProvisions(), loadPanels()])
+  } catch (err) {
+    error.value = err.userMessage || '批量重试失败'
+  } finally {
+    retryingAll.value = false
+  }
+}
+
 function switchTab(key) {
   activeTab.value = key
   error.value = ''
@@ -309,6 +328,27 @@ onMounted(loadPanels)
 
     <p v-if="notice" class="tp-notice"><CheckCircle2 :size="14" />{{ notice }}</p>
     <p v-if="error" class="tp-error"><CircleAlert :size="14" />{{ error }}</p>
+
+    <div v-if="!loading && summary.panels > 0 && !summary.enabled_panels" class="tp-status" data-tone="bad">
+      <CircleAlert :size="15" />
+      <div>
+        <strong>所有中转面板都已停用</strong>
+        <span>
+          社媒/直播订单会停在「待配中转」：IP 已经买了，但没有机器可以建入站。
+          启用一台面板后，去「待配中转」点重试即可补上。
+        </span>
+      </div>
+    </div>
+    <div v-else-if="!loading && !summary.panels" class="tp-status" data-tone="bad">
+      <CircleAlert :size="15" />
+      <div>
+        <strong>还没有录入任何中转面板</strong>
+        <span>
+          社媒/直播专线需要一台 3x-ui 机器落地。先在上面「添加面板」并点「检测」确认能连上，
+          再启用它；此前的订单会停在「待配中转」，补上机器后可以批量重试。
+        </span>
+      </div>
+    </div>
 
     <div class="tp-status" :data-tone="summary.auto_procurement_enabled ? 'ok' : 'warn'">
       <CheckCircle2 v-if="summary.auto_procurement_enabled" :size="15" />
@@ -414,6 +454,10 @@ onMounted(loadPanels)
         <button class="tp-ghost" type="button" :disabled="provisionsLoading" @click="loadProvisions">
           <RefreshCw :size="14" />{{ provisionsLoading ? '加载中…' : '刷新' }}
         </button>
+        <button
+          v-if="provisions.length" class="tp-primary" type="button"
+          :disabled="retryingAll || provisionsLoading" @click="retryAll"
+        >{{ retryingAll ? '重试中…' : '重试全部（最多 5 单）' }}</button>
       </div>
       <p v-if="provisionsLoading" class="tp-empty">正在读取中转记录…</p>
       <p v-else-if="!provisions.length" class="tp-empty">没有待配中转的订单。</p>
@@ -528,6 +572,7 @@ onMounted(loadPanels)
 .tp-status{display:flex;align-items:flex-start;gap:9px;margin:12px 0 0;padding:11px 14px;border-radius:7px;font-size:12px;line-height:1.65}
 .tp-status[data-tone="ok"]{background:#eef8f2;color:#176b58;border:1px solid #cde8da}
 .tp-status[data-tone="warn"]{background:#fdf6e9;color:#8a5a13;border:1px solid #f0ddbc}
+.tp-status[data-tone="bad"]{background:#fcecec;color:#a23232;border:1px solid #f2cfcf}
 .tp-status strong{display:block;font-size:12px;font-weight:680}
 .tp-status em{display:block;margin-top:2px;font-style:normal;font-size:11px;opacity:.85}
 .tp-tabs{display:flex;align-items:center;gap:4px;margin:14px 0 16px;border-bottom:1px solid #dbe5e0}

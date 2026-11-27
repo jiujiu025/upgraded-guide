@@ -271,3 +271,23 @@ def test_patch_with_unknown_field_gets_chinese_hint(api):
                             json={"name": "US-02", "is_enabled": True}, headers=headers)
     assert response.status_code == 422
     assert response.json()["detail"] == "提交了不支持的字段：name"
+
+
+def test_retry_all_reports_each_order_result(api):
+    """批量重试：一单失败不影响其它单，失败原因要逐单返回。
+
+    这个 fixture 里没有任何启用中的面板，所以每单都应该"失败但被记录下来"，
+    而不是整批 500——运营需要看到"哪一单为什么没配起来"。
+    """
+    client, _db, order = api
+    headers = login(client)
+
+    response = client.post("/api/admin/transit/provisions/retry-all",
+                           params={"limit": 5}, headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["attempted"] >= 1
+    assert body["failed"] == body["attempted"]
+    first = next(item for item in body["results"] if item["order_id"] == order.id)
+    assert first["ok"] is False
+    assert "中转机" in first["error"] or "中转" in first["error"]

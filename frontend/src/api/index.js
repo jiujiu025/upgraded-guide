@@ -353,4 +353,6 @@ export const saveTransitRoute = (countryCode, payload) =>
   client.put(`/admin/transit/routes/${encodeURIComponent(countryCode)}`, payload)
 export const getTransitProvisions = (params = {}) => client.get('/admin/transit/provisions', { params })
 export const retryTransitOrder = (orderId) => client.post(`/admin/orders/${orderId}/retry-transit`)
+export const retryAllTransit = (limit = 5) =>
+  client.post('/admin/transit/provisions/retry-all', null, { params: { limit } })
 export default client

@@ -17,6 +17,7 @@ const api = vi.hoisted(() => ({
   saveTransitRoute: vi.fn(),
   getTransitProvisions: vi.fn(),
   retryTransitOrder: vi.fn(),
+  retryAllTransit: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 
@@ -184,6 +185,45 @@ describe('TransitPanelsView', () => {
 
     expect(api.updateTransitPanel).toHaveBeenCalledWith(1, { is_enabled: false })
     expect(wrapper.text()).toContain('us 组暂无可用面板')
+  })
+
+  it('没有启用中的面板时，直接说明「待中转」的原因', async () => {
+    api.getTransitPanels.mockResolvedValue({ data: [{ ...panels[0], is_enabled: false }] })
+    api.getTransitSummary.mockResolvedValue({
+      data: { auto_procurement_enabled: true, panels: 1, enabled_panels: 0, pending_transit_orders: 3 },
+    })
+    const wrapper = mount(TransitPanelsView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('所有中转面板都已停用')
+    expect(wrapper.text()).toContain('停在「待配中转」')
+  })
+
+  it('一台面板都没录时提示先添加并检测', async () => {
+    api.getTransitPanels.mockResolvedValue({ data: [] })
+    api.getTransitSummary.mockResolvedValue({
+      data: { auto_procurement_enabled: true, panels: 0, enabled_panels: 0, pending_transit_orders: 1 },
+    })
+    const wrapper = mount(TransitPanelsView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('还没有录入任何中转面板')
+  })
+
+  it('待配中转可以批量重试', async () => {
+    api.retryAllTransit.mockResolvedValue({
+      data: { attempted: 2, succeeded: 2, failed: 0, results: [] },
+    })
+    const wrapper = mount(TransitPanelsView)
+    await flushPromises()
+
+    await button(wrapper, '待配中转').trigger('click')
+    await flushPromises()
+    await button(wrapper, '重试全部').trigger('click')
+    await flushPromises()
+
+    expect(api.retryAllTransit).toHaveBeenCalledWith(5)
+    expect(wrapper.text()).toContain('批量重试：成功 2 单')
   })
 
   it('待配中转按订单 id 重试', async () => {
