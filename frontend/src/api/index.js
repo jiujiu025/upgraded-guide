@@ -1,13 +1,16 @@
 import axios from 'axios'
 import {
   activePortal, clearImpersonation, clearSession, currentUserForPortal, impersonation,
-  impersonationActive, loginPathForPortal, onSessionChange, passwordPathForPortal, sessionFor,
-  setSession, updateImpersonationUser,
+  impersonationActive, isAuthEntryPath, loginPathForPortal, onSessionChange, passwordPathForPortal,
+  sessionFor, setSession, updateImpersonationUser,
 } from './session'
 
 const client = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || '/api', timeout: 10000, withCredentials: true })
 const refreshPromises = new Map()
 const workspaceRoot = portal => portal === 'customer' ? '/client' : `/${portal}`
+const impersonationBelongsHere = (path = '') => path === '/sales' || path.startsWith('/sales/')
+  || path === '/client' || path.startsWith('/client/')
+
 onSessionChange((type, portal) => {
   if (type !== 'session-cleared') return
   clearSession(false, portal)
@@ -22,8 +25,15 @@ onSessionChange((type, portal) => {
 })
 client.interceptors.request.use((config) => {
   config.authPortal ??= activePortal.value
+  // 登录/注册/找回密码一律不带任何既有身份：带着模拟 token 去登录，
+  // 后端会按模拟态处理，登录页就永远登不进去。
+  if (isAuthEntryPath(config.url || '')) {
+    config.skipRefresh = true
+    config.skipImpersonation = true
+    return config
+  }
   // 模拟态优先：这个标签里所有请求都以被模拟者身份发，且不再走 cookie 刷新
-  if (impersonationActive()) {
+  if (impersonationActive() && !config.skipImpersonation) {
     config.headers.Authorization = `Bearer ${impersonation.token}`
     config.skipRefresh = true
     return config
@@ -40,10 +50,13 @@ const withPortalLock = (portal, work) => globalThis.navigator?.locks?.request
   : work()
 
 async function restoreSession(portal = activePortal.value, force = false) {
+  // 已经在登录页就不要再去恢复任何会话：恢复失败会触发跳转，跳回同一个地址
+  // 就是无限刷新（之前 /admin/login?imp=ended 转圈就是这个原因）。
+  if (typeof window !== 'undefined' && isAuthEntryPath(window.location.pathname)) return null
   if (impersonationActive()) {
     // 模拟态没有 refresh token，靠 /auth/me 确认还在有效期内
     if (!impersonation.user || force) {
-      const { data } = await client.get('/auth/me')
+      const { data } = await client.get('/auth/me', { skipRedirect: true })
       const expiresAt = data.impersonation?.expires_at ? Date.parse(data.impersonation.expires_at) : impersonation.expiresAt
       updateImpersonationUser(data, expiresAt)
     }
@@ -71,16 +84,17 @@ export const currentSessionUser = portal => currentUserForPortal(portal)
 
 client.interceptors.response.use((response) => response, async (error) => {
   const config = error.config
-  // 模拟态出 401（10 分钟到期 / 被后台强制结束 / 发起人被停用）：直接清掉并回后台，
+  // 模拟态出 401（已被结束 / 发起人被停用 / 超过兜底时限）：直接清掉并回后台，
   // 不要试图 refresh——模拟本来就没有 refresh token。
   if (error.response?.status === 401 && impersonationActive()) {
     clearImpersonation()
-    error.userMessage = '模拟登录已结束（到期或已被管理员结束）'
+    error.userMessage = '模拟登录已结束'
     // 只在销售/客户工作台里才跳走。已经回到 /admin 下还跳，就是让登录页
     // 自己刷自己：守卫会尝试恢复会话 → 401 → 再跳回同一个地址。
+    // 带上一个只由这段代码产生的时间戳，避免有人直接敲 URL 就触发一次跳转。
     const path = typeof window !== 'undefined' ? window.location.pathname : ''
-    if (typeof window !== 'undefined' && !config?.skipRedirect && !path.startsWith('/admin')) {
-      window.location.replace('/admin/login?imp=ended')
+    if (typeof window !== 'undefined' && !config?.skipRedirect && impersonationBelongsHere(path)) {
+      window.location.replace('/admin/login')
     }
     return Promise.reject(error)
   }
@@ -333,7 +347,7 @@ export const downloadTransitBackup = (id) =>
 // 系统日志：采购/中转/模拟等关键链路的运行记录
 export const getSystemLogs = (params = {}) => client.get('/admin/logs', { params })
 export const getSystemLogSummary = (params = {}) => client.get('/admin/logs/summary', { params })
-// 模拟登录：超级管理员以销售/客户身份进入（10 分钟，独立 token）
+// 模拟登录：超级管理员以销售/客户身份进入（不限时长，独立 token）
 export const startImpersonation = (userId) => client.post('/admin/impersonation', { user_id: userId })
 export const logoutImpersonation = () => client.post('/auth/impersonation/logout', {}, { skipRedirect: true })
 export const listImpersonations = (params = {}) => client.get('/admin/impersonation', { params })

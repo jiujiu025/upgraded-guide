@@ -89,11 +89,21 @@ export function clearImpersonation() {
   persistImpersonation()
 }
 
-export const impersonationActive = () => impersonation.active && impersonation.expiresAt > Date.now()
+// expiresAt = 0 表示不预设时长（由管理员在后台手动结束）。
+// 不能再用"有没有 expiresAt"判断是否有效，否则无时限的模拟会被当成已过期。
+export const impersonationActive = () =>
+  impersonation.active && (impersonation.expiresAt === 0 || impersonation.expiresAt > Date.now())
 
 /** 模拟只在销售/客户工作台有意义；/admin 下出现模拟态说明它已经结束。 */
 export function impersonationBelongsToPath(path = '') {
   return path === '/sales' || path.startsWith('/sales/') || path === '/client' || path.startsWith('/client/')
+}
+
+const LOGIN_PATHS = ['/login', '/register', '/admin/login', '/sales/login']
+
+/** 登录/注册页永远不携带模拟态：在这里恢复它，只会换来 401 与跳转循环。 */
+export function isAuthEntryPath(path = '') {
+  return LOGIN_PATHS.includes(path) || path.startsWith('/recover-password')
 }
 
 /**
@@ -104,23 +114,26 @@ export function impersonationBelongsToPath(path = '') {
  */
 export function initImpersonation() {
   try {
-    // 落到后台页面时，sessionStorage 里的模拟态已经过期或不该存在：
-    // 不清理的话，登录页恢复会话会拿到 401，再被踢回同一个地址，形成刷新循环。
-    if (globalThis.location && !impersonationBelongsToPath(globalThis.location.pathname)) {
+    // 登录页/注册页/后台页面都不该带模拟态。留着它，守卫会去恢复会话、
+    // 拿到 401、再跳回同一个地址——这就是之前那个"登录页无限刷新"。
+    const here = globalThis.location?.pathname || ''
+    if (here && (!impersonationBelongsToPath(here) || isAuthEntryPath(here))) {
       clearImpersonation()
       return
     }
     const match = /[#&]imp=([^&]+)/.exec(globalThis.location?.hash || '')
     if (match) {
       const token = decodeURIComponent(match[1])
-      setImpersonation({ token, expiresAt: Date.now() + 10 * 60 * 1000 })
+      // 不预设时长：服务端只认记录里有没有结束，不再有 10 分钟硬过期
+      setImpersonation({ token, expiresAt: 0 })
       const url = `${globalThis.location.pathname}${globalThis.location.search}`
       globalThis.history?.replaceState(null, '', url)
     } else {
       const raw = sessionStorage.getItem(IMP_KEY)
       if (raw) {
         const saved = JSON.parse(raw)
-        if (saved?.token && saved?.expiresAt > Date.now()) Object.assign(impersonation, saved, { active: true })
+        const alive = saved?.token && (saved.expiresAt === 0 || saved.expiresAt > Date.now())
+        if (alive) Object.assign(impersonation, saved, { active: true })
         else sessionStorage.removeItem(IMP_KEY)
       }
     }

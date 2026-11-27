@@ -2,7 +2,8 @@
 
 安全边界（与 docs/管理员模拟登录设计.md 对应）：
 
-- token 独立于真实会话，10 分钟硬过期，可在后台立刻吊销；
+- token 独立于真实会话，**不预设时长**，由管理员主动结束（后台可随时强制结束）；
+- 兜底：发起人被停用/降权、被模拟账号被停用、超过 MAX_HOURS 都会失效；
 - 只有 super_admin 能发起，只能模拟 **启用中的销售/客户**，且不能模拟管理员；
 - 不能链式模拟：已经是模拟态时不能再发起；
 - 审计记在管理员头上，并标注"模拟某客户"，不允许变成"客户自己操作的"；
@@ -27,7 +28,10 @@ from app.services.session_service import SessionError
 
 TOKEN_PREFIX = "imp_"
 TOKEN_BYTES = 32
-TTL_MINUTES = 10
+# 不预设时长：模拟一直有效，直到管理员主动结束、或发起人/被模拟者被停用。
+# 之前固定 10 分钟会在排查问题时把人踢出去，反而更容易忘记"自己还在别人账号里"——
+# 现在靠常驻横幅 + 后台可随时强制结束来控制，而不是靠倒计时。
+MAX_HOURS = 24
 MAX_ACTIVE_PER_ACTOR = 3
 ALLOWED_TARGET_ROLES = ("sales", "customer")
 # 模拟态下不允许改的东西：改完客户就登不进来了，属于"用管理员权限伤害客户"
@@ -89,7 +93,7 @@ def start(db: Session, actor: User, target: User, *, ip: str | None = None,
     now = utcnow()
     record = ImpersonationSession(
         actor_id=actor.id, target_user_id=target.id, token_hash=_hash(raw),
-        started_at=now, expires_at=now + timedelta(minutes=TTL_MINUTES),
+        started_at=now, expires_at=now + timedelta(hours=MAX_HOURS),
         actor_ip=(ip or "")[:64] or None, user_agent=(user_agent or "")[:255] or None,
     )
     db.add(record)
@@ -189,7 +193,8 @@ def target_customer_missing(db: Session, target: User) -> bool:
 
 def snapshot(record: ImpersonationSession, actor: User | None, target: User | None) -> dict:
     now = utcnow()
-    remaining = max(0, int((record.expires_at - now).total_seconds())) if record.ended_at is None else 0
+    # 不预设时长：remaining = -1 表示"由管理员手动结束"
+    remaining = -1 if record.ended_at is None else 0
     return {
         "id": record.id,
         "actor_id": record.actor_id,
@@ -198,11 +203,11 @@ def snapshot(record: ImpersonationSession, actor: User | None, target: User | No
         "target_name": _display(target) if target else None,
         "target_role": target.role if target else None,
         "started_at": record.started_at.isoformat(),
-        "expires_at": record.expires_at.isoformat(),
         "ended_at": record.ended_at.isoformat() if record.ended_at else None,
         "end_reason": record.end_reason,
         "remaining_seconds": remaining,
-        "active": record.ended_at is None and remaining > 0,
+        "expires_at": None,
+        "active": record.ended_at is None,
         "actor_ip": record.actor_ip,
         "user_agent": record.user_agent,
     }

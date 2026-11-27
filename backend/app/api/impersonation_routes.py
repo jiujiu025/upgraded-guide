@@ -18,7 +18,6 @@ from app.db import get_db
 from app.models import ImpersonationSession, User
 from app.services.audit_service import write_audit
 from app.services.impersonation_service import (
-    TTL_MINUTES,
     ImpersonationError,
     context_of,
     end,
@@ -70,7 +69,7 @@ def start_impersonation(
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
     write_audit(db, user, "impersonation_start", "user", target.id,
-                f"开始模拟 {target.display_name or target.username}（{target.role}，{TTL_MINUTES} 分钟）")
+                f"开始模拟 {target.display_name or target.username}（{target.role}，手动结束）")
     write_log(db, "warning", "impersonation", "impersonation_start",
               f"{user.display_name or user.username} 开始模拟 {target.display_name or target.username}",
               detail=f"目标角色={target.role} IP={_client_ip(request)}", actor=user)
@@ -78,8 +77,10 @@ def start_impersonation(
     db.refresh(record)
     return {
         "token": raw,
-        "expires_at": record.expires_at.isoformat(),
-        "ttl_minutes": TTL_MINUTES,
+        # 对外不暴露具体失效时间：不限时长，界面上没有任何倒计时
+        "expires_at": None,
+        # 不限时长：由管理员在后台结束
+        "ttl_minutes": None,
         "user": {
             "id": target.id, "username": target.username,
             "display_name": target.display_name, "role": target.role,

@@ -18,6 +18,8 @@ beforeEach(() => {
 describe('模拟态与页面路径', () => {
   it('只有销售/客户工作台才算模拟态该在的地方', async () => {
     const { impersonationBelongsToPath } = await import('../src/api/session')
+    // 登录页不是"模拟态该待的地方"，即便它在 /sales 或 /client 路径下
+    expect(impersonationBelongsToPath('/client')).toBe(true)
     expect(impersonationBelongsToPath('/sales')).toBe(true)
     expect(impersonationBelongsToPath('/sales/lines/12')).toBe(true)
     expect(impersonationBelongsToPath('/client')).toBe(true)
@@ -39,6 +41,31 @@ describe('模拟态与页面路径', () => {
 
     expect(sessionStorage.getItem('ops-impersonation')).toBeNull()
     expect(mod.impersonation.active).toBe(false)
+  })
+
+  it('登录页即使带模拟记录也不恢复（这是之前无限刷新的直接原因）', async () => {
+    sessionStorage.setItem('ops-impersonation', JSON.stringify({
+      token: 'imp_x', user: { role: 'sales' }, expiresAt: 0,
+    }))
+    setPath('/admin/login')
+
+    const mod = await import('../src/api/session')
+    mod.initImpersonation()
+
+    expect(mod.impersonation.active).toBe(false)
+    expect(sessionStorage.getItem('ops-impersonation')).toBeNull()
+  })
+
+  it('不限时长的模拟（expiresAt=0）不会被当成过期', async () => {
+    sessionStorage.setItem('ops-impersonation', JSON.stringify({
+      token: 'imp_x', user: { role: 'customer', display_name: '客户乙' }, expiresAt: 0,
+    }))
+    setPath('/client')
+
+    const mod = await import('../src/api/session')
+    mod.initImpersonation()
+
+    expect(mod.impersonationActive()).toBe(true)
   })
 
   it('工作台页面仍然会恢复模拟态（别把正常功能一起关掉）', async () => {

@@ -196,7 +196,7 @@ async function impersonate(target) {
     const { data } = await startImpersonation(target.user_id)
     // 新标签打开：原后台不丢，也方便同时模拟另一个账号。token 走 hash，不进服务器日志
     window.open(`/client#imp=${encodeURIComponent(data.token)}`, '_blank', 'noopener')
-    showNotice(`已打开模拟窗口，10 分钟后自动退出（操作记在管理员名下）`)
+    showNotice('已打开模拟窗口，不自动退出，用完请点顶部「退出模拟」')
   } catch (err) {
     error.value = err.userMessage || '模拟登录失败'
   }

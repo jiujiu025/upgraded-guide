@@ -146,7 +146,39 @@ def test_two_tabs_two_identities(api):
     assert "impersonation" not in me
 
 
-def test_expired_token_is_rejected(api):
+def test_impersonation_has_no_fixed_ttl(api):
+    """不再预设 10 分钟：只要没被结束，多久都还能用。
+
+    排查客户问题经常看半天，10 分钟一到被踢出去要重新进，反而更容易忘记自己在模拟态里。
+    现在的兜底是"发起人被停用/降权""被模拟账号被停用""主动结束"。
+    """
+    import json
+    from datetime import timedelta
+
+    client = api["client"]
+    db = api["db"]
+    headers = login(client, "root", "Admin_123456")
+    response = start(client, headers, api["sales"].id)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ttl_minutes"] is None
+    assert body["expires_at"] is None
+
+    token = body["token"]
+    record = db.scalar(select(ImpersonationSession).order_by(ImpersonationSession.id.desc()))
+    # 两小时后依然有效
+    record.expires_at = utcnow() + timedelta(hours=2)
+    db.commit()
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+    listing = client.get("/api/admin/impersonation", headers=headers).json()
+    item = next(row for row in listing if row["id"] == record.id)
+    assert item["active"] is True
+    assert item["remaining_seconds"] == -1     # -1 = 由管理员手动结束
+
+
+def test_over_max_hours_still_expires(api):
+    """兜底：万一管理员忘了结束，超过 24 小时自动失效，不会永久留着后门。"""
     client = api["client"]
     db = api["db"]
     headers = login(client, "root", "Admin_123456")
@@ -156,15 +188,7 @@ def test_expired_token_is_rejected(api):
     record.expires_at = utcnow() - timedelta(seconds=1)
     db.commit()
 
-    response = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
-    assert response.status_code == 401
-
-    # 过期标记由管理员打开列表时补写（请求事务里的写入会随 401 回滚）
-    listing = client.get("/api/admin/impersonation", headers=headers)
-    assert listing.status_code == 200
-    target = next(item for item in listing.json() if item["id"] == record.id)
-    assert target["active"] is False
-    assert target["end_reason"] == "expired"
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
 
 
 def test_force_end_kills_the_tab(api):

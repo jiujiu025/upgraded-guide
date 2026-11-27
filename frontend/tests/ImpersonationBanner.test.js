@@ -28,13 +28,14 @@ beforeEach(() => {
 })
 
 describe('ImpersonationBanner', () => {
-  it('显示被模拟身份、审计归属与剩余时间', () => {
+  it('显示被模拟身份、审计归属，且不再有倒计时', () => {
     const wrapper = mount(ImpersonationBanner)
     const text = wrapper.text()
     expect(text).toContain('销售甲')
     expect(text).toContain('超级管理员')
-    expect(text).toContain('剩余')
-    expect(text).toMatch(/08:5\d|09:00/)
+    // 不预设时长：横幅不该出现"剩余 09:58"这类倒计时
+    expect(text).not.toContain('剩余')
+    expect(text).toContain('不限时长')
   })
 
   it('退出时通知后端并清理本地状态', async () => {
@@ -47,9 +48,12 @@ describe('ImpersonationBanner', () => {
     expect(window.location.replace).toHaveBeenCalledWith('/admin/login?imp=ended')
   })
 
-  it('剩余时间进入最后一分钟时变红', () => {
-    state.impersonation.expiresAt = Date.now() + 30 * 1000
+  it('不再是"到期自动跳走"，退出只有手动与后台强制两种', async () => {
+    state.impersonation.expiresAt = 0   // 0 = 不限时长
     const wrapper = mount(ImpersonationBanner)
-    expect(wrapper.find('.imp-clock').classes()).toContain('urgent')
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    // 等一秒也不该自己消失
+    expect(wrapper.find('.imp-bar').exists()).toBe(true)
+    expect(api.logoutImpersonation).not.toHaveBeenCalled()
   })
 })
