@@ -76,7 +76,10 @@ client.interceptors.response.use((response) => response, async (error) => {
   if (error.response?.status === 401 && impersonationActive()) {
     clearImpersonation()
     error.userMessage = '模拟登录已结束（到期或已被管理员结束）'
-    if (typeof window !== 'undefined' && !config?.skipRedirect) {
+    // 只在销售/客户工作台里才跳走。已经回到 /admin 下还跳，就是让登录页
+    // 自己刷自己：守卫会尝试恢复会话 → 401 → 再跳回同一个地址。
+    const path = typeof window !== 'undefined' ? window.location.pathname : ''
+    if (typeof window !== 'undefined' && !config?.skipRedirect && !path.startsWith('/admin')) {
       window.location.replace('/admin/login?imp=ended')
     }
     return Promise.reject(error)

@@ -9,6 +9,8 @@ import ImageCaptcha from './ImageCaptcha.vue'
 
 const props = defineProps({ portal: { type: String, default: 'customer' } })
 const route = useRoute()
+// 模拟登录结束时跳回这里，说明一句，别让人以为系统坏了
+const impersonationEnded = computed(() => route.query.imp === 'ended')
 const router = useRouter()
 const isRegister = ref(route.meta.section === 'register')
 const account = ref('')
@@ -123,6 +125,9 @@ async function submitRegister() {
     </div>
     <form class="auth-card" :class="{ 'register-card': isRegister }" @submit.prevent="submit">
       <BrandLogo class="auth-brand-logo" full eager />
+      <p v-if="impersonationEnded" class="auth-note">
+        模拟登录已结束（10 分钟到期或已被管理员结束），用你自己的账号重新登录即可。
+      </p>
       <div v-if="portal === 'customer'" class="auth-tabs">
         <button type="button" :class="{ active: !isRegister }" @click="isRegister = false; error = ''">登录</button>
         <button type="button" :class="{ active: isRegister }" @click="isRegister = true; error = ''">注册</button>
@@ -169,4 +174,10 @@ async function submitRegister() {
 .recovery-link { justify-self: end; color: #397e73; font-size: 12px; }
 .invite-hint { margin: 10px 0 0; font-size: 12px; color: #2f7a6d; }
 .invite-hint-muted { color: #8a7355; }
+.auth-note {
+  margin: 0 0 14px; padding: 9px 11px;
+  border: 1px solid #e8d9b4; border-radius: 6px;
+  background: #fbf4e6; color: #7a5316;
+  font-size: 12px; line-height: 1.6;
+}
 </style>

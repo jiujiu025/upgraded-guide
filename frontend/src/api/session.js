@@ -91,6 +91,11 @@ export function clearImpersonation() {
 
 export const impersonationActive = () => impersonation.active && impersonation.expiresAt > Date.now()
 
+/** 模拟只在销售/客户工作台有意义；/admin 下出现模拟态说明它已经结束。 */
+export function impersonationBelongsToPath(path = '') {
+  return path === '/sales' || path.startsWith('/sales/') || path === '/client' || path.startsWith('/client/')
+}
+
 /**
  * 页面启动时调用一次：
  * - 新标签从 URL hash 拿 token（放 hash 不进服务器日志），拿到后立刻从地址栏抹掉；
@@ -99,6 +104,12 @@ export const impersonationActive = () => impersonation.active && impersonation.e
  */
 export function initImpersonation() {
   try {
+    // 落到后台页面时，sessionStorage 里的模拟态已经过期或不该存在：
+    // 不清理的话，登录页恢复会话会拿到 401，再被踢回同一个地址，形成刷新循环。
+    if (globalThis.location && !impersonationBelongsToPath(globalThis.location.pathname)) {
+      clearImpersonation()
+      return
+    }
     const match = /[#&]imp=([^&]+)/.exec(globalThis.location?.hash || '')
     if (match) {
       const token = decodeURIComponent(match[1])
