@@ -31,12 +31,18 @@ const panels = [
     is_enabled: true, note: null, has_password: true, has_api_token: false,
     reality_public_key: 'pub-key',
   },
+  {
+    id: 2, name: 'HK-01', group_code: 'hk', base_url: 'https://hk.example.com/abc',
+    username: 'admin', connect_host: '9.9.9.9', sni: 'yahoo.com', dest: 'yahoo.com:443',
+    fingerprint: 'random', port_start: 52000, port_end: 52999, max_inbounds: 200,
+    is_enabled: true, note: null, has_password: true, has_api_token: false,
+    reality_public_key: 'pub-key',
+  },
 ]
 
 beforeEach(() => {
   vi.clearAllMocks()
   // 停用前有确认弹窗；jsdom 里默认没有 window.confirm，需要显式给一个
-  window.confirm = vi.fn(() => true)
   window.confirm = vi.fn(() => true)
   api.getTransitPanels.mockResolvedValue({ data: panels })
   api.getTransitSummary.mockResolvedValue({
@@ -163,6 +169,46 @@ describe('TransitPanelsView', () => {
     // 后端的编辑接口没有 name 字段，多传会被 extra="forbid" 拒掉
     expect('name' in payload).toBe(false)
     expect(payload.is_enabled).toBe(true)
+  })
+
+  it('国家映射可以按组筛选', async () => {
+    api.getTransitRoutes.mockResolvedValue({
+      data: [
+        { country_code: 'US', group_code: 'us', is_enabled: true, note: null },
+        { country_code: 'DE', group_code: 'us', is_enabled: true, note: null },
+        { country_code: 'VN', group_code: 'hk', is_enabled: true, note: null },
+      ],
+    })
+    const wrapper = mount(TransitPanelsView)
+    await flushPromises()
+
+    await button(wrapper, '国家映射').trigger('click')
+    await flushPromises()
+
+    const chips = wrapper.findAll('.tp-route-chips button')
+    expect(chips.map((item) => item.text())).toEqual(['全部 3', 'hk 1', 'us 2'])
+
+    await chips[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.tp-country').map((item) => item.text())).toEqual(['VN'])
+  })
+
+  it('给国家点名面板时只列同组机器', async () => {
+    api.getTransitRoutes.mockResolvedValue({
+      data: [{ country_code: 'VN', group_code: 'us', is_enabled: true, note: null, pinned_vps_id: null }],
+    })
+    const wrapper = mount(TransitPanelsView)
+    await flushPromises()
+
+    await button(wrapper, '国家映射').trigger('click')
+    await flushPromises()
+
+    const select = wrapper.findAll('.tp-tr')[1].findAll('select')[1]
+    const options = select.findAll('option').map((item) => item.text())
+    expect(options[0]).toContain('自动')
+    // 东亚面板（HK-01 等）不能出现在 us 组的候选里
+    expect(options.some((text) => text.includes('US-01'))).toBe(true)
+    expect(options.some((text) => text.includes('HK-01'))).toBe(false)
   })
 
   it('停用前要确认，取消就不发请求', async () => {

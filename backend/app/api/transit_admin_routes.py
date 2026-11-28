@@ -89,6 +89,8 @@ class TransitRouteIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     group_code: str = Field(min_length=1, max_length=20)
+    # 可再点名一台面板：不填 = 组内按负载自动挑
+    pinned_vps_id: int | None = None
     is_enabled: bool = True
     note: str | None = Field(default=None, max_length=200)
 
@@ -263,8 +265,13 @@ def list_transit_routes(db: Session = Depends(get_db),
     ensure_transit_routes(db)
     db.commit()
     rows = db.scalars(select(TransitRoute).order_by(TransitRoute.group_code, TransitRoute.country_code)).all()
+    machines = {item.id: item for item in db.scalars(select(TransitVps)).all()}
     return [
         {"country_code": item.country_code, "group_code": item.group_code,
+         "pinned_vps_id": item.pinned_vps_id,
+         # 面板被删/改名后要能看出映射挂在哪台，所以带上名字而不是只有 id
+         "pinned_vps_name": machines[item.pinned_vps_id].name if item.pinned_vps_id in machines else None,
+         "pinned_vps_enabled": machines[item.pinned_vps_id].is_enabled if item.pinned_vps_id in machines else None,
          "is_enabled": item.is_enabled, "note": item.note}
         for item in rows
     ]
@@ -274,20 +281,36 @@ def list_transit_routes(db: Session = Depends(get_db),
 def update_transit_route(country_code: str, payload: TransitRouteIn, db: Session = Depends(get_db),
                          user: User = Depends(require_roles("super_admin", "admin"))):
     code = country_code.strip().upper()
+    pinned = None
+    if payload.pinned_vps_id:
+        pinned = db.get(TransitVps, payload.pinned_vps_id)
+        if pinned is None:
+            raise HTTPException(status_code=404, detail="指定的面板不存在")
+        if pinned.group_code != payload.group_code:
+            # 钉一台别的组的机器，等于绕过区域映射，之后排查会极其混乱
+            raise HTTPException(
+                status_code=422,
+                detail=f"面板 {pinned.name} 属于 {pinned.group_code} 组，与所选区域 {payload.group_code} 不一致",
+            )
     route = db.scalar(select(TransitRoute).where(TransitRoute.country_code == code))
     if route is None:
         route = TransitRoute(country_code=code, group_code=payload.group_code,
+                             pinned_vps_id=payload.pinned_vps_id,
                              is_enabled=payload.is_enabled, note=payload.note)
         db.add(route)
         db.flush()
     else:
         route.group_code = payload.group_code
+        route.pinned_vps_id = payload.pinned_vps_id
         route.is_enabled = payload.is_enabled
         route.note = payload.note
+    target = f"{payload.group_code}" + (f"/{pinned.name}" if pinned else "/自动")
     write_audit(db, user, "update", "transit_route", route.id,
-                f"{code} → {payload.group_code}（{'启用' if payload.is_enabled else '停用'}）")
+                f"{code} → {target}（{'启用' if payload.is_enabled else '停用'}）")
     db.commit()
     return {"country_code": code, "group_code": payload.group_code,
+            "pinned_vps_id": payload.pinned_vps_id,
+            "pinned_vps_name": pinned.name if pinned else None,
             "is_enabled": payload.is_enabled, "note": payload.note}
 
 

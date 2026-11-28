@@ -787,7 +787,12 @@ class TransitVps(TimestampMixin, Base):
 
 
 class TransitRoute(TimestampMixin, Base):
-    """国家 → 中转机区域组。北美/欧洲默认 us，东南亚/南非默认 hk，后台可改。"""
+    """国家 → 中转机区域组，可选再点名具体面板。
+
+    两级路由：``group_code`` 决定"走哪片区域"，``pinned_vps_id`` 决定"必须用哪台机器"。
+    大多数情况只配到组（组内按负载自动挑）；只有"这个国家必须落在这台机器"时才钉机器，
+    比如香港机只剩一台、或某个国家要放在特定出口。
+    """
 
     __tablename__ = "transit_routes"
     __table_args__ = (
@@ -796,6 +801,8 @@ class TransitRoute(TimestampMixin, Base):
 
     country_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     group_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    # 指定面板：为空 = 组内按负载自动挑；填了就只用这台（端口段/承载上限也按这台算）
+    pinned_vps_id: Mapped[int | None] = mapped_column(ForeignKey("transit_vps.id"), nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False)
     note: Mapped[str | None] = mapped_column(String(200), nullable=True)
 

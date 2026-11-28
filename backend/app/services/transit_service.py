@@ -123,7 +123,8 @@ def ensure_transit_routes(db: Session) -> None:
         db.flush()
 
 
-def group_for_country(db: Session, country_code: str) -> str | None:
+def route_for_country(db: Session, country_code: str) -> TransitRoute | None:
+    """国家 → 映射行（含可选的面板点名）。停用或未配置返回 None。"""
     code = (country_code or "").strip().upper()
     if not code:
         return None
@@ -133,18 +134,31 @@ def group_for_country(db: Session, country_code: str) -> str | None:
         route = db.scalar(select(TransitRoute).where(TransitRoute.country_code == code))
     if route is None or not route.is_enabled:
         return None
-    return route.group_code
+    return route
 
 
-def pick_vps(db: Session, group_code: str) -> TransitVps | None:
-    """同组里挑一台还能接的机器：启用、本地占用未到上限、占用最少的优先。
+def group_for_country(db: Session, country_code: str) -> str | None:
+    route = route_for_country(db, country_code)
+    return route.group_code if route else None
+
+
+def pick_vps(db: Session, group_code: str, pinned_vps_id: int | None = None) -> TransitVps | None:
+    """挑一台还能接的机器：启用、本地占用未到上限、占用最少的优先。
+
+    ``pinned_vps_id`` 非空时只认这台：国家映射里点名了机器，就不能再去别台凑数。
+    钉住的机器满了/停用会返回 None，由调用方把订单停在待配中转并说明原因，
+    而不是悄悄换一台——那是运营明确要避免的"跑错片区"。
 
     容量按 ``transit_provisions`` 计数，不去逐台请求面板——机器多了那样太慢。
     手工在面板上加的入站不计入，所以 ``max_inbounds`` 要留出余量。
     """
+    condition = [TransitVps.is_enabled.is_(True)]
+    if pinned_vps_id:
+        condition.append(TransitVps.id == pinned_vps_id)
+    else:
+        condition.append(TransitVps.group_code == group_code)
     machines = db.scalars(
-        select(TransitVps).where(TransitVps.group_code == group_code, TransitVps.is_enabled.is_(True))
-        .order_by(TransitVps.id)
+        select(TransitVps).where(*condition).order_by(TransitVps.id)
     ).all()
     if not machines:
         return None
@@ -525,9 +539,10 @@ def provision_transit(
     if not accounts:
         raise TransitNotConfigured("没有需要配置中转的住宅 IP")
 
-    group = group_for_country(db, country_code)
-    if group is None:
+    route = route_for_country(db, country_code)
+    if route is None:
         raise TransitNotConfigured(f"{country_code} 没有配置中转区域，请先在后台补国家映射")
+    group = route.group_code
 
     region = db.get(Region, order.region_id) if getattr(order, "region_id", None) else None
     region_name = (region.name if region else "") or country_code
@@ -554,8 +569,13 @@ def provision_transit(
 
         vps = db.get(TransitVps, provision.transit_vps_id) if provision and provision.transit_vps_id else None
         if vps is None:
-            vps = pick_vps(db, group)
+            vps = pick_vps(db, group, getattr(route, "pinned_vps_id", None))
         if vps is None:
+            if getattr(route, "pinned_vps_id", None):
+                raise TransitNotConfigured(
+                    f"{country_code} 指定了面板但该面板不可用（停用或已达承载上限），"
+                    "请到「中转面板 → 国家映射」调整"
+                )
             raise TransitNotConfigured(f"区域 {group} 没有可用中转机（停用或已达承载上限）")
 
         # 锁住机器：同一台机器的模板改动必须串行，并发读改写会丢配置

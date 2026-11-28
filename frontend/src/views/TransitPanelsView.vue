@@ -244,21 +244,67 @@ async function loadRoutes() {
   }
 }
 
-async function changeRoute(route, groupCode) {
+// 区域筛选：国家多的时候按洲/组看，比在一长条列表里找快得多
+const routeFilter = ref('')
+const routeKeyword = ref('')
+
+const routeGroups = computed(() => {
+  const groups = new Map()
+  for (const route of routes.value) {
+    const key = route.group_code
+    groups.set(key, (groups.get(key) || 0) + 1)
+  }
+  return [...groups.entries()].sort().map(([code, count]) => ({ code, count }))
+})
+
+const filteredRoutes = computed(() => {
+  const keyword = routeKeyword.value.trim().toUpperCase()
+  return routes.value.filter((route) => {
+    if (routeFilter.value && route.group_code !== routeFilter.value) return false
+    if (keyword && !route.country_code.includes(keyword)) return false
+    return true
+  })
+})
+
+/** 该组里可用于点名的面板（包含未启用的，未启用的会标出来），
+ *  只列同组机器：跨组点名等于绕过区域映射，后端也会拒。 */
+function panelOptionsFor(groupCode) {
+  return panels.value.filter((panel) => panel.group_code === groupCode)
+}
+
+async function saveRoute(route, patch) {
   routeSaving.value = route.country_code
-  const previous = route.group_code
-  route.group_code = groupCode
+  const snapshot = { group_code: route.group_code, pinned_vps_id: route.pinned_vps_id }
+  Object.assign(route, patch)
   try {
-    await saveTransitRoute(route.country_code, {
-      group_code: groupCode, is_enabled: route.is_enabled, note: route.note || null,
+    const { data } = await saveTransitRoute(route.country_code, {
+      group_code: route.group_code,
+      pinned_vps_id: route.pinned_vps_id || null,
+      is_enabled: route.is_enabled,
+      note: route.note || null,
     })
-    flash(`${route.country_code} 已改为走 ${groupCode} 组`)
+    route.pinned_vps_name = data.pinned_vps_name || null
+    flash(
+      route.pinned_vps_id
+        ? `${route.country_code} 固定走 ${route.pinned_vps_name || '指定面板'}`
+        : `${route.country_code} 走 ${route.group_code} 组（组内按负载自动挑）`,
+    )
   } catch (err) {
-    route.group_code = previous
+    Object.assign(route, snapshot)
     error.value = err.userMessage || '映射保存失败'
+    await loadRoutes()
   } finally {
     routeSaving.value = ''
   }
+}
+
+async function changeRoute(route, groupCode) {
+  // 换组必须清掉点名：原来钉的面板不属于新组，留着会被后端拒
+  await saveRoute(route, { group_code: groupCode, pinned_vps_id: null, pinned_vps_name: null })
+}
+
+async function changePinnedPanel(route, value) {
+  await saveRoute(route, { pinned_vps_id: value ? Number(value) : null })
 }
 
 async function loadProvisions() {
@@ -435,15 +481,33 @@ onMounted(loadPanels)
 
     <template v-else-if="activeTab === 'routes'">
       <div class="tp-toolbar">
-        <p>客户买的国家走哪组机器。改完立即生效，下一单就按新映射选机。</p>
+        <p>
+          两级路由：国家先落到<b>区域组</b>，再决定要不要点名<b>具体面板</b>。
+          不点名时组内按负载自动挑机；点名后只用那一台，它停用或满了会让订单停在待配中转，不会偷换机器。
+        </p>
         <button class="tp-ghost" type="button" :disabled="routesLoading" @click="loadRoutes">
           <RefreshCw :size="14" />{{ routesLoading ? '加载中…' : '刷新' }}
         </button>
       </div>
+
+      <div class="tp-route-filter">
+        <div class="tp-route-chips">
+          <button type="button" :class="{ active: !routeFilter }" @click="routeFilter = ''">
+            全部 <b>{{ routes.length }}</b>
+          </button>
+          <button
+            v-for="group in routeGroups" :key="group.code" type="button"
+            :class="{ active: routeFilter === group.code }" @click="routeFilter = group.code"
+          >{{ group.code }} <b>{{ group.count }}</b></button>
+        </div>
+        <input v-model.trim="routeKeyword" class="tp-route-search" placeholder="按国家代码筛选，如 VN" maxlength="3" />
+      </div>
+
       <p v-if="routesLoading" class="tp-empty">正在读取国家映射…</p>
+      <p v-else-if="!filteredRoutes.length" class="tp-empty">没有符合条件国家。</p>
       <div v-else class="tp-table">
-        <div class="tp-tr tp-th"><span>国家</span><span>走哪组</span><span>状态</span><span>说明</span></div>
-        <div v-for="route in routes" :key="route.country_code" class="tp-tr">
+        <div class="tp-tr tp-th"><span>国家</span><span>走哪组</span><span>指定面板</span><span>状态</span><span>说明</span></div>
+        <div v-for="route in filteredRoutes" :key="route.country_code" class="tp-tr">
           <span class="tp-country">{{ route.country_code }}</span>
           <span>
             <select
@@ -452,6 +516,20 @@ onMounted(loadPanels)
             >
               <option v-for="group in groupOptions" :key="group" :value="group">{{ group }}</option>
             </select>
+          </span>
+          <span>
+            <select
+              :value="route.pinned_vps_id || ''" :disabled="routeSaving === route.country_code"
+              @change="changePinnedPanel(route, $event.target.value)"
+            >
+              <option value="">自动（组内按负载）</option>
+              <option v-for="panel in panelOptionsFor(route.group_code)" :key="panel.id" :value="panel.id">
+                {{ panel.name }}{{ panel.is_enabled ? '' : '（已停用）' }}
+              </option>
+            </select>
+            <small v-if="route.pinned_vps_id && route.pinned_vps_enabled === false" class="tp-route-warn">
+              该面板已停用，此国家的新单会停在待配中转
+            </small>
           </span>
           <span>{{ route.is_enabled ? '启用' : '停用' }}</span>
           <span class="tp-note">{{ route.note || '—' }}</span>
@@ -616,6 +694,14 @@ onMounted(loadPanels)
 .tp-test{display:flex;align-items:flex-start;gap:6px;margin:12px 0 0;padding:8px 10px;border-radius:5px;font-size:11px;line-height:1.6}
 .tp-test[data-tone="ok"]{background:#eef8f2;color:#176b58}
 .tp-test[data-tone="bad"]{background:#fcecec;color:#a23232}
+.tp-route-filter{display:flex;align-items:center;gap:12px;margin:14px 0}
+.tp-route-chips{display:flex;flex-wrap:wrap;gap:6px}
+.tp-route-chips button{display:inline-flex;align-items:center;gap:6px;min-height:28px;padding:0 10px;border:1px solid #dfe8e3;border-radius:99px;background:#fff;color:#5f7469;font-size:11px;font-weight:600}
+.tp-route-chips button b{font-size:10px;color:#93a49c}
+.tp-route-chips button.active{border-color:#9fd3ba;background:#eaf7f0;color:#176b58}
+.tp-route-chips button.active b{color:#176b58}
+.tp-route-search{min-height:28px;width:120px;margin-left:auto;padding:0 9px;border:1px solid #d3e0d9;border-radius:5px;font-size:11px;text-transform:uppercase}
+.tp-route-warn{display:block;margin-top:4px;color:#a23232;font-size:10px}
 .tp-toggle{display:inline-flex;align-items:center;gap:7px;min-height:28px;padding:0 4px;background:none;font-size:11px;font-weight:600;color:#8a9b93}
 .tp-toggle-track{position:relative;width:34px;height:19px;flex:none;border-radius:99px;background:#d6dfdb;transition:background .18s ease}
 .tp-toggle-knob{position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 1px 2px #0f2a1f33;transition:transform .18s ease}
@@ -629,7 +715,7 @@ onMounted(loadPanels)
 .spin{animation:tp-spin 1s linear infinite}
 @keyframes tp-spin{to{transform:rotate(360deg)}}
 .tp-table{border:1px solid #dbe5e0;border-radius:8px;background:#fff;overflow:hidden}
-.tp-tr{display:grid;grid-template-columns:120px 140px 90px minmax(0,1fr);gap:12px;align-items:center;padding:10px 16px;border-top:1px solid #eef3f0;font-size:12px}
+.tp-tr{display:grid;grid-template-columns:110px 130px 190px 70px minmax(0,1fr);gap:12px;align-items:center;padding:10px 16px;border-top:1px solid #eef3f0;font-size:12px}
 .tp-table.wide .tp-tr{grid-template-columns:150px 70px 150px 120px 150px minmax(0,1fr) 110px}
 .tp-tr:first-child{border-top:0}
 .tp-th{background:#f7faf8;color:#7c8f86;font-size:10px;font-weight:650;letter-spacing:.04em}
