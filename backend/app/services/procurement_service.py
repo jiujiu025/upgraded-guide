@@ -469,3 +469,82 @@ def deliver_pending_transit(db: Session, order: Order, *, actor=None) -> list[in
     )
     db.commit()
     return created
+
+
+def run_upgrade_transit_in_background(order_id: int) -> None:
+    """升级单收款后的后台中转任务。
+
+    为什么放后台：改 Xray 模板要重启，最慢会卡十几秒，放在付款响应里会让客户
+    以为没付成功、反复点支付。中转结果落在 transit_provisions 与系统日志里，
+    失败了线路仍是 pending_transit，后台「待配中转」能重试。
+    """
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        apply_upgrade_transit(db, order_id)
+    except Exception:  # noqa: BLE001 - 后台任务不能把异常抛给调用方
+        db.rollback()
+        logger.exception("upgrade transit failed order_id=%s", order_id)
+    finally:
+        db.close()
+
+
+def apply_upgrade_transit(db: Session, order_id: int) -> str:
+    """给升级单把中转真正配上。成功把线路切回 active，失败停在待配中转。
+
+    幂等：已经配好的直接返回；重试接口也走这里，所以不用担心重复建入站。
+    """
+    from app.services.transit_service import (
+        TransitNotConfigured,
+        TransitProvisionError,
+        attach_upgrade_transit,
+    )
+
+    order = db.get(Order, order_id)
+    if order is None or order.order_type != "upgrade" or not order.renewal_line_id:
+        return "skipped"
+    line = db.get(CustomerLine, order.renewal_line_id)
+    if line is None or line.status == "deleted":
+        return "skipped"
+
+    product = db.get(Product, order.product_id)
+    from app.services.transit_service import requires_transit
+    if product is None or not requires_transit(product.resource_category):
+        return "not_needed"
+
+    try:
+        endpoint = attach_upgrade_transit(db, order=order, line=line)
+    except (TransitNotConfigured, TransitProvisionError) as exc:
+        # 客户仍然能用原来的直连地址，所以这里不是故障单，只是"还没好"
+        line.status = "pending_transit"
+        write_log(db, "error", "transit", "upgrade_transit_failed",
+                  f"升级单 {order.order_no} 中转未完成：{getattr(exc, 'code', 'NOT_READY')}",
+                  detail=str(exc)[:800], order_id=order.id, line_id=line.id)
+        db.commit()
+        return "pending_transit"
+    except Exception as exc:  # noqa: BLE001 - 面板侧的意外异常也要落在可恢复状态
+        line.status = "pending_transit"
+        write_log(db, "error", "transit", "upgrade_transit_failed",
+                  f"升级单 {order.order_no} 中转异常：{type(exc).__name__}",
+                  detail=str(exc)[:800], order_id=order.id, line_id=line.id)
+        db.commit()
+        return "pending_transit"
+
+    line.status = "active" if line.expires_at and line.expires_at > _utcnow() else "expired"
+    write_audit(db, None, "upgrade_transit_ready", "customer_line", line.id,
+                f"升级单={order.order_no}; 入口={endpoint.server}:{endpoint.port}")
+    write_log(db, "info", "transit", "upgrade_transit_ready",
+              f"升级单 {order.order_no} 中转已配置：{endpoint.server}:{endpoint.port}",
+              order_id=order.id, line_id=line.id)
+    db.commit()
+    if line.customer_id:
+        customer = db.get(Customer, line.customer_id)
+        if customer is not None:
+            notify_order_parties(
+                db, customer, order, "升级已完成，专线可用了",
+                f"订单 {order.order_no} 的中转已配置完成，可在「我的线路」查看新的连接信息。"
+                "到期时间不变。", "upgrade",
+            )
+            db.commit()
+    return "active"

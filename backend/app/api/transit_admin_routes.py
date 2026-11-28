@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
 from app.db import get_db
-from app.models import Order, TransitProvision, TransitRoute, TransitVps, User
+from app.models import CustomerLine, Order, TransitProvision, TransitRoute, TransitVps, User
 from app.services.audit_service import write_audit
 from app.services.procurement_service import deliver_pending_transit
 from app.services.settings_service import auto_procurement_enabled
@@ -334,12 +334,34 @@ def retry_all_pending_transit(
     默认只跑 5 单——每单都可能触发一次 Xray 重启，一次跑太多等于让同机客户
     反复瞬断，运营看着也不安心。
     """
-    orders = list(db.scalars(
+    # 采购单看订单状态；升级单看线路状态，两者都要覆盖
+    pending = list(db.scalars(
         select(Order).where(Order.status == "pending_transit").order_by(Order.id).limit(limit)
     ).all())
+    upgrade_lines = list(db.scalars(
+        select(CustomerLine).where(CustomerLine.status == "pending_transit")
+        .order_by(CustomerLine.id).limit(limit)
+    ).all())
+    upgrade_orders = []
+    for line in upgrade_lines:
+        order = db.scalar(select(Order).where(
+            Order.renewal_line_id == line.id, Order.order_type == "upgrade",
+        ).order_by(Order.id.desc()))
+        if order is not None and order.id not in {item.id for item in pending}:
+            upgrade_orders.append(order)
+    orders = (pending + upgrade_orders)[:limit]
     results = []
     for order in orders:
         try:
+            if order.order_type == "upgrade":
+                from app.services.procurement_service import apply_upgrade_transit
+
+                outcome = apply_upgrade_transit(db, order.id)
+                ok = outcome != "pending_transit"
+                results.append({"order_id": order.id, "order_no": order.order_no,
+                                "ok": ok, "line_ids": [order.renewal_line_id] if ok else [],
+                                **({} if ok else {"error": "中转仍未配置成功，见系统日志"})})
+                continue
             created = deliver_pending_transit(db, order, actor=user)
             results.append({"order_id": order.id, "order_no": order.order_no,
                             "ok": True, "line_ids": created})
@@ -354,6 +376,26 @@ def retry_all_pending_transit(
     }
 
 
+def _retry_upgrade_transit(db: Session, order: Order, user: User) -> dict:
+    """升级单补中转：成功把线路切回 active，失败保留待配中转并说明原因。"""
+    from app.services.procurement_service import apply_upgrade_transit
+
+    line = db.get(CustomerLine, order.renewal_line_id) if order.renewal_line_id else None
+    if line is None:
+        raise HTTPException(status_code=409, detail="升级单缺少原线路，无法补中转")
+    if line.status not in ("pending_transit", "active", "expired"):
+        raise HTTPException(status_code=409, detail=f"线路当前状态 {line.status}，不需要补中转")
+
+    result = apply_upgrade_transit(db, order.id)
+    if result == "pending_transit":
+        raise HTTPException(
+            status_code=409,
+            detail="中转仍未配置成功，请到「系统日志 → 中转」查看具体原因（面板不可用或缺少出口账密）",
+        )
+    db.refresh(line)
+    return {"status": line.status, "line_ids": [line.id], "result": result}
+
+
 @router.post("/orders/{order_id}/retry-transit")
 def retry_transit(order_id: int, db: Session = Depends(get_db),
                   user: User = Depends(require_roles("super_admin", "admin"))):
@@ -361,6 +403,9 @@ def retry_transit(order_id: int, db: Session = Depends(get_db),
     order = db.get(Order, order_id)
     if order is None:
         raise HTTPException(status_code=404, detail="订单不存在")
+    # 升级单不走采购/交付那套：它只需要给既有线路补一个中转入站
+    if order.order_type == "upgrade":
+        return _retry_upgrade_transit(db, order, user)
     if order.status != "pending_transit":
         raise HTTPException(status_code=409, detail="订单不在待配中转状态")
     try:

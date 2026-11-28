@@ -17,7 +17,7 @@ from app.db import get_db
 from app.main import app
 from app.models import TransitBackup, TransitVps, User
 from app.models.base import Base
-from app.services import transit_backup_service
+from app.services import transit_backup_service, transit_service  # noqa: F401
 
 
 class FakePanel:
@@ -129,7 +129,7 @@ def login(client, username="root") -> dict:
 
 def test_backup_contains_everything_needed_to_rebuild(api, monkeypatch):
     panel = FakePanel(inbounds=[SAMPLE_INBOUND])
-    monkeypatch.setattr(transit_backup_service, "XuiClient", lambda *a, **k: panel)
+    monkeypatch.setattr(transit_service, "XuiClient", lambda *a, **k: panel)
 
     client = api["client"]
     headers = login(client)
@@ -153,7 +153,7 @@ def test_backup_contains_everything_needed_to_rebuild(api, monkeypatch):
 
 
 def test_only_super_admin_can_touch_backups(api, monkeypatch):
-    monkeypatch.setattr(transit_backup_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
+    monkeypatch.setattr(transit_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
     headers = login(api["client"], "ops")
     response = api["client"].post(f"/api/admin/transit/vps/{api['source'].id}/backups", headers=headers)
     assert response.status_code == 403
@@ -162,7 +162,7 @@ def test_only_super_admin_can_touch_backups(api, monkeypatch):
 def test_restore_dry_run_reports_conflicts_without_writing(api, monkeypatch):
     source_panel = FakePanel(inbounds=[SAMPLE_INBOUND])
     target_panel = FakePanel(inbounds=[{"id": 1, "port": 52000, "remark": "已占用"}])
-    monkeypatch.setattr(transit_backup_service, "XuiClient",
+    monkeypatch.setattr(transit_service, "XuiClient",
                         lambda *a, **k: source_panel if "old" in str(a[0]) else target_panel)
 
     client = api["client"]
@@ -181,7 +181,7 @@ def test_restore_dry_run_reports_conflicts_without_writing(api, monkeypatch):
 def test_restore_rebuilds_inbounds_and_xray(api, monkeypatch):
     source_panel = FakePanel(inbounds=[SAMPLE_INBOUND])
     target_panel = FakePanel(inbounds=[])
-    monkeypatch.setattr(transit_backup_service, "XuiClient",
+    monkeypatch.setattr(transit_service, "XuiClient",
                         lambda *a, **k: source_panel if "old" in str(a[0]) else target_panel)
 
     client = api["client"]
@@ -210,7 +210,7 @@ def test_restore_rebuilds_inbounds_and_xray(api, monkeypatch):
 
 
 def test_download_returns_archive(api, monkeypatch):
-    monkeypatch.setattr(transit_backup_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
+    monkeypatch.setattr(transit_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
     client = api["client"]
     headers = login(client)
     backup = client.post(f"/api/admin/transit/vps/{api['source'].id}/backups", headers=headers).json()
@@ -223,7 +223,7 @@ def test_download_returns_archive(api, monkeypatch):
 
 
 def test_delete_removes_file_and_record(api, monkeypatch):
-    monkeypatch.setattr(transit_backup_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
+    monkeypatch.setattr(transit_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
     client = api["client"]
     headers = login(client)
     backup = client.post(f"/api/admin/transit/vps/{api['source'].id}/backups", headers=headers).json()
@@ -247,7 +247,7 @@ def test_migration_backs_up_both_panels_and_moves_records(api, monkeypatch):
                                "outboundTag": "socks-ORD-1-1"}]},
     })
     target_panel = FakePanel(inbounds=[])
-    monkeypatch.setattr(transit_backup_service, "XuiClient",
+    monkeypatch.setattr(transit_service, "XuiClient",
                         lambda *a, **k: source_panel if "old" in str(a[0]) else target_panel)
 
     db = api["db"]
@@ -284,7 +284,7 @@ def test_migration_backs_up_both_panels_and_moves_records(api, monkeypatch):
 
 
 def test_migration_rejects_same_or_disabled_target(api, monkeypatch):
-    monkeypatch.setattr(transit_backup_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[]))
+    monkeypatch.setattr(transit_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[]))
     client = api["client"]
     headers = login(client)
 
@@ -303,7 +303,7 @@ def test_migration_rejects_same_or_disabled_target(api, monkeypatch):
 
 
 def test_rollback_requires_a_rollback_point(api, monkeypatch):
-    monkeypatch.setattr(transit_backup_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
+    monkeypatch.setattr(transit_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
     client = api["client"]
     headers = login(client)
     backup = client.post(f"/api/admin/transit/vps/{api['source'].id}/backups", headers=headers).json()

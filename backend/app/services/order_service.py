@@ -175,7 +175,9 @@ def settle_upgrade(db: Session, order: Order, payment_status: str) -> CustomerLi
     if line.status == "expired":
         line.status = "active"
     # 到期时间不动：升级只换交付方式，不重算周期。
-    if requires_transit(target.resource_category):
+    needs_transit = requires_transit(target.resource_category)
+    if needs_transit:
+        # 先标待配中转：中转没配好之前不能宣称已开通，否则客户拿到地址连不上。
         line.status = "pending_transit"
 
     order.status = "completed"

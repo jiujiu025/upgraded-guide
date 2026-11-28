@@ -624,3 +624,116 @@ def retry_provision(db: Session, *, order) -> list[TransitEndpoint]:
             )
         accounts.append(account)
     return provision_transit(db, order=order, accounts=accounts, country_code=region.country_code)
+
+
+def upgrade_transit_account(db: Session, *, order, line) -> "SimpleNamespace | None":
+    """升级要用的出口账号 = 这条线路自己的固定 IP（含账密，如果上游给过）。
+
+    升级不会再买 IP，所以只能"复用已有的"：
+    1. 这条线以前走过中转 → 中转记录里加密存着的出口账密；
+    2. 否则从采购记录里找同一个 line_id 的那条；
+    3. 都没有但线路有 static_ip → 只有 IP 没有账密，中转出站会连不上，
+       交给调用方决定（通常意味着历史上是纯住宅直连，需要人工给账密）。
+    """
+    from types import SimpleNamespace
+
+    for record in db.scalars(
+        select(TransitProvision).where(TransitProvision.line_id == line.id)
+        .order_by(TransitProvision.line_index)
+    ).all():
+        account = _account_from_record(record, order_id=record.order_id)
+        if account is not None:
+            break
+    else:
+        account = None
+    if account is None:
+        from app.models import Procurement
+
+        for record in db.scalars(
+            select(Procurement).where(Procurement.order_id == order.id)
+        ).all():
+            if (record.line_id or None) != line.id:
+                continue
+            account = _account_from_record(
+                SimpleNamespace(encrypted_exit_credentials=record.encrypted_exit_credentials,
+                                line_index=record.line_index or 0),
+                order_id=order.id,
+            )
+            if account is not None:
+                break
+    if account is None:
+        return None
+    if line.static_ip and line.static_ip != account.ip:
+        # 以线路上的固定 IP 为准：客户买的、也一直在用的就是这个出口
+        account = SimpleNamespace(ip=line.static_ip, host=line.static_ip, port=account.port,
+                                  username=account.username, password=account.password, expires_at=None)
+    return account
+
+
+def upgrade_endpoint_ready(db: Session, *, order, line_id: int) -> TransitEndpoint | None:
+    """线路是否已经有一条配置好的中转（重试/后台任务都要幂等）。"""
+    provision = db.scalar(select(TransitProvision).where(
+        TransitProvision.order_id == order.id,
+        TransitProvision.line_id == line_id,
+        TransitProvision.status == "configured",
+    ))
+    if provision is None or not provision.node_link:
+        return None
+    vps = db.get(TransitVps, provision.transit_vps_id) if provision.transit_vps_id else None
+    return TransitEndpoint(
+        server=vps.connect_host if vps else "", port=provision.inbound_port or 0,
+        protocol="vless", username=None, password=None, exit_ip=provision.exit_ip or "",
+        panel_ref=f"{provision.transit_vps_id}#{provision.inbound_id}",
+        link=provision.node_link, remark=provision.remark,
+    )
+
+
+def _node_for_endpoint(db: Session, endpoint: TransitEndpoint, region_id: int):
+    """线路的入口指向中转机，客户在「我的线路」里看到的就是新地址。"""
+    from app.models import Node
+
+    node = db.scalar(select(Node).where(Node.server == endpoint.server, Node.port == endpoint.port))
+    if node is None:
+        node = Node(name=f"中转 {endpoint.server}:{endpoint.port}", server=endpoint.server,
+                    port=endpoint.port, protocol="vless", region_id=region_id)
+        db.add(node)
+        db.flush()
+    return node
+
+
+def attach_upgrade_transit(db: Session, *, order, line) -> TransitEndpoint | None:
+    """升级单据的中转准备：出口用线路自己的固定 IP，数量恒为 1。
+
+    与采购单的 ``provision_transit`` 分开写，因为约束完全不同：
+    - 不向上游买 IP，也不扣上游余额；
+    - 一条既有线路升一次档，不存在多条线路；
+    - 失败不算故障：客户仍能用原地址，线路停在 pending_transit 即可。
+    """
+    ready = upgrade_endpoint_ready(db, order=order, line_id=line.id)
+    if ready is not None:
+        return ready
+
+    account = upgrade_transit_account(db, order=order, line=line)
+    if account is None:
+        raise TransitNotConfigured(
+            "找不到这条线路的出口账密，无法自动配置中转；请在面板上为该线路人工建入站"
+        )
+    region = db.get(Region, order.region_id or 0)
+    if region is None or not region.country_code:
+        raise TransitNotConfigured("升级订单缺少国家信息，无法判断走哪组中转机")
+
+    endpoints = provision_transit(db, order=order, accounts=[account],
+                                  country_code=region.country_code)
+    if not endpoints:
+        raise TransitNotConfigured("中转未返回可用入口")
+    # 中转记录挂到既有线路上：重试与回滚都要能按 line_id 找到
+    for record in db.scalars(select(TransitProvision).where(
+            TransitProvision.order_id == order.id)).all():
+        record.line_id = line.id
+    endpoint = endpoints[0]
+    line.node_id = _node_for_endpoint(db, endpoint, region.id).id
+    if endpoint.link:
+        line.node_link = endpoint.link
+    line.remark = endpoint.remark
+    db.flush()
+    return endpoint

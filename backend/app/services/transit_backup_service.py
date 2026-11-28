@@ -61,8 +61,13 @@ def resolve_path(backup: TransitBackup) -> Path:
 
 
 def _client_for(db: Session, vps: TransitVps) -> XuiClient:
+    # 测试与本地联调会把 XuiClient 整体替换成假面板，这里必须走模块属性，
+    # 不能 from ... import XuiClient 绑死（那样替换不生效，还会因缺凭据报错）。
+    from app.services import transit_service
+
+    client_cls = getattr(transit_service, "XuiClient", XuiClient)
     password, token = panel_credentials(db, vps)
-    return XuiClient(vps.base_url, username=vps.username, password=password, api_token=token)
+    return client_cls(vps.base_url, username=vps.username, password=password, api_token=token)
 
 
 def create_backup(db: Session, vps: TransitVps, *, actor=None, note: str | None = None) -> TransitBackup:

@@ -27,7 +27,9 @@ from app.services.payment_gateway import (
     PAYMENT_API_URL, PaymentGatewayError, config_for_update, create_provider_payment,
     decrypt_secret, encrypt_secret, new_payment_order_values, verify_signature,
 )
-from app.services.procurement_service import run_auto_procure_in_background
+from app.services.procurement_service import (
+    run_auto_procure_in_background, run_upgrade_transit_in_background,
+)
 from app.services.order_service import (
     is_payable_order, rollback_renewal_extension, rollback_upgrade, settle_renewal, settle_upgrade,
 )
@@ -120,16 +122,17 @@ def _require_scoped_order(db: Session, user: User, order_id: int) -> tuple[Order
 CLOSED_ORDER_STATUSES = {"cancelled", "refunding", "refunded"}
 
 
-def _record_paid_order(db: Session, payment_order: PaymentOrder, customer: Customer, actor: User | None) -> None:
+def _record_paid_order(db: Session, payment_order: PaymentOrder, customer: Customer, actor: User | None) -> str:
+    """记账并把订单推进到已付。返回升级单需要补中转时回 upgrade。"""
     if not payment_order.order_id:
-        return
+        return "paid"
     order = db.get(Order, payment_order.order_id)
     if not order:
         payment_order.status = "manual_review"
-        return
+        return "paid"
     if order.source_type == "resource_pool":
         payment_order.status = "manual_review"
-        return
+        return "paid"
     if order.status in CLOSED_ORDER_STATUSES:
         # 迟到回调：订单已被取消或已退款，钱却到了。不能把订单改回已付款（会出现
         # "取消了又变成已付"），也不能给续费单延线路，一律转人工退款。
@@ -145,17 +148,20 @@ def _record_paid_order(db: Session, payment_order: PaymentOrder, customer: Custo
             "finance",
             marker=f"PAY-CLOSED-ORDER:{payment_order.out_trade_no}",
         )
-        return
+        return "paid"
     if order.order_type == "renewal":
         # 续费单收款即视为条件已满足：延长线路并结单，不再等管理员二次确认。
         settle_renewal(db, order, "paid")
     elif order.order_type == "upgrade":
-        # 升级单同理：收款即切换产品线，到期时间不变。
+        # 升级单同理：收款即切换产品线，到期时间不变。中转由调用方在提交后起后台任务。
         settle_upgrade(db, order, "paid")
+        accrue_sales_commission(db, payment_order, customer, actor.id if actor else None)
+        return "upgrade"
     else:
         order.status = "paid"
         order.payment_status = "paid"
     accrue_sales_commission(db, payment_order, customer, actor.id if actor else None)
+    return "paid"
 
 
 def _create_online_order(db: Session, user: User, payment_order: PaymentOrder, payment_type: str) -> dict:
@@ -551,6 +557,8 @@ def pay_order_with_balance(order_id: int, payload: IdempotencyIn, background_tas
             settle_renewal(db, order, "paid")
         elif order.order_type == "upgrade":
             settle_upgrade(db, order, "paid")
+            # 中转到后台去配：要重启面板，别让支付响应等十几秒
+            background_tasks.add_task(run_upgrade_transit_in_background, order.id)
         else:
             order.status = "paid"
             order.payment_status = "paid"
@@ -665,7 +673,7 @@ async def suisui_payment_notify(request: Request, response: Response, db: Sessio
         if not customer or not is_payable_order(order) or order.source_type == "resource_pool":
             item.status = "manual_review"
         else:
-            _record_paid_order(db, item, customer, None)
+            settled = _record_paid_order(db, item, customer, None)
             paid_ok = True
             # 在线支付回调没有登录用户，按系统动作记一条到账审计
             write_audit(db, None, "payment_notify", "order", order.id,
@@ -675,6 +683,9 @@ async def suisui_payment_notify(request: Request, response: Response, db: Sessio
     # 这里起一个后台线程去采购，失败由 procurements 记下来转人工。
     if paid_ok and order is not None and order.order_type == "purchase":
         asyncio.create_task(asyncio.to_thread(run_auto_procure_in_background, order.id))
+    # 升级单到账后要配中转：同样不能在回调里等（支付平台会超时重试）
+    if paid_ok and order is not None and settled == "upgrade":
+        asyncio.create_task(asyncio.to_thread(run_upgrade_transit_in_background, order.id))
     return Response(content="success", media_type="text/plain")
 
 
@@ -702,6 +713,7 @@ def record_offline_order_payment(order_id: int, payload: OfflineOrderPaymentIn, 
             settle_renewal(db, order, "manually_confirmed")
         elif order.order_type == "upgrade":
             settle_upgrade(db, order, "manually_confirmed")
+            background_tasks.add_task(run_upgrade_transit_in_background, order.id)
         else:
             order.status = "paid"
             order.payment_status = "manually_confirmed"
