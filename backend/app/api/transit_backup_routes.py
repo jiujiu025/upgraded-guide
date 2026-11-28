@@ -132,6 +132,44 @@ def restore_backup(backup_id: int, payload: RestoreIn, db: Session = Depends(get
     return plan
 
 
+class MigrateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_vps_id: int
+    target_vps_id: int
+    dry_run: bool = True
+
+
+@router.post("/migrate")
+def migrate_panel(payload: MigrateIn, db: Session = Depends(get_db),
+                  user: User = Depends(require_roles("super_admin"))):
+    """把源面板整体迁到目标面板，并留下回滚点。
+
+    默认 dry_run：迁移是覆盖性操作，先让运营确认"几台机器、要不要改 DNS"再执行。
+    """
+    from app.services import transit_migration_service as migration
+
+    source = db.get(TransitVps, payload.source_vps_id)
+    target = db.get(TransitVps, payload.target_vps_id)
+    if source is None or target is None:
+        raise HTTPException(status_code=404, detail="面板不存在")
+    try:
+        return migration.migrate(db, source, target, dry_run=payload.dry_run, actor=user)
+    except migration.MigrationError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@router.post("/migrations/{backup_id}/rollback")
+def rollback_migration(backup_id: int, db: Session = Depends(get_db),
+                       user: User = Depends(require_roles("super_admin"))):
+    from app.services import transit_migration_service as migration
+
+    try:
+        return migration.rollback_migration(db, backup_id, actor=user)
+    except migration.MigrationError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
 @router.delete("/backups/{backup_id}")
 def delete_backup(backup_id: int, db: Session = Depends(get_db),
                   user: User = Depends(require_roles("super_admin"))):

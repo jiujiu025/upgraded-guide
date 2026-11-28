@@ -41,6 +41,7 @@ const provisions = ref([])
 const provisionsLoading = ref(false)
 const retryingId = ref(0)
 const retryingAll = ref(false)
+const togglingId = ref(0)
 
 const dialogOpen = ref(false)
 const editingId = ref(0)
@@ -198,6 +199,7 @@ async function toggleEnabled(panel) {
     const message = [`停用 ${panel.name}？`, ...warnings].join('\n')
     if (!window.confirm(message)) return
   }
+  togglingId.value = panel.id
   try {
     await updateTransitPanel(panel.id, { is_enabled: !panel.is_enabled })
     if (panel.is_enabled && !otherMachinesInGroup(panel)) {
@@ -208,6 +210,8 @@ async function toggleEnabled(panel) {
     await loadPanels()
   } catch (err) {
     error.value = err.userMessage || '状态修改失败'
+  } finally {
+    togglingId.value = 0
   }
 }
 
@@ -414,8 +418,15 @@ onMounted(loadPanels)
               {{ testingId === panel.id ? '检测中…' : '检测' }}
             </button>
             <button class="tp-ghost" type="button" @click="openEdit(panel)">编辑</button>
-            <button class="tp-ghost" :class="{ danger: panel.is_enabled }" type="button" @click="toggleEnabled(panel)">
-              {{ panel.is_enabled ? '停用' : '启用' }}
+            <button
+              class="tp-toggle" :class="{ on: panel.is_enabled }" type="button"
+              role="switch" :aria-checked="panel.is_enabled"
+              :aria-label="`${panel.name} ${panel.is_enabled ? '已启用，点击停用' : '已停用，点击启用'}`"
+              :title="panel.is_enabled ? '点击停用：新订单不再分配给这台' : '点击启用：可以接新单'"
+              :disabled="togglingId === panel.id" @click="toggleEnabled(panel)"
+            >
+              <i class="tp-toggle-track"><b class="tp-toggle-knob"></b></i>
+              <span>{{ panel.is_enabled ? '已启用' : '已停用' }}</span>
             </button>
           </div>
         </article>
@@ -605,6 +616,13 @@ onMounted(loadPanels)
 .tp-test{display:flex;align-items:flex-start;gap:6px;margin:12px 0 0;padding:8px 10px;border-radius:5px;font-size:11px;line-height:1.6}
 .tp-test[data-tone="ok"]{background:#eef8f2;color:#176b58}
 .tp-test[data-tone="bad"]{background:#fcecec;color:#a23232}
+.tp-toggle{display:inline-flex;align-items:center;gap:7px;min-height:28px;padding:0 4px;background:none;font-size:11px;font-weight:600;color:#8a9b93}
+.tp-toggle-track{position:relative;width:34px;height:19px;flex:none;border-radius:99px;background:#d6dfdb;transition:background .18s ease}
+.tp-toggle-knob{position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 1px 2px #0f2a1f33;transition:transform .18s ease}
+.tp-toggle.on{color:#176b58}
+.tp-toggle.on .tp-toggle-track{background:#1c8a6b}
+.tp-toggle.on .tp-toggle-knob{transform:translateX(15px)}
+.tp-toggle:disabled{opacity:.55;cursor:wait}
 .tp-card-actions{display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid #edf2ef}
 .tp-card-actions .tp-ghost{min-height:30px;padding:0 10px;font-size:11px}
 .tp-ghost.danger{color:#a23232;border-color:#eccfcf}

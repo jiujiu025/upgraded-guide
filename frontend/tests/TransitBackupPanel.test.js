@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
   restoreTransitBackup: vi.fn(),
   deleteTransitBackup: vi.fn(),
   downloadTransitBackup: vi.fn(),
+  migrateTransitPanel: vi.fn(),
+  rollbackTransitMigration: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 
@@ -127,5 +129,84 @@ describe('TransitBackupPanel', () => {
     await wrapper.find('.tb-actions button.danger').trigger('click')
     await flushPromises()
     expect(api.deleteTransitBackup).not.toHaveBeenCalled()
+  })
+})
+
+describe('迁移面板', () => {
+  const panelsOn = [
+    { id: 1, name: 'HK-01', group_code: 'hk', connect_host: '1.1.1.1', is_enabled: true },
+    { id: 2, name: 'HK-02', group_code: 'hk', connect_host: '2.2.2.2', is_enabled: true },
+    { id: 3, name: 'HK-03', group_code: 'hk', connect_host: '3.3.3.3', is_enabled: false },
+  ]
+
+  it('迁移必须先预检，预检结果说明是否需要改 DNS', async () => {
+    api.migrateTransitPanel.mockResolvedValue({
+      data: {
+        dry_run: true, provisions: 34, same_connect_host: false, requires_dns: true,
+        source: { id: 1, name: 'HK-01', connect_host: '1.1.1.1' },
+        target: { id: 2, name: 'HK-02', connect_host: '2.2.2.2' },
+      },
+    })
+    const wrapper = mount(TransitBackupPanel, { props: { panels: panelsOn } })
+    await flushPromises()
+
+    await button(wrapper, '迁移面板').trigger('click')
+    await flushPromises()
+
+    const selects = wrapper.findAll('.tb-pair select')
+    await selects[0].setValue('1')
+    await flushPromises()
+    // 停用的 HK-03 不能作为目标
+    const targets = wrapper.findAll('.tb-pair select')[1].findAll('option').map((item) => item.text())
+    expect(targets.some((text) => text.includes('HK-03'))).toBe(false)
+
+    await wrapper.findAll('.tb-pair select')[1].setValue('2')
+    await button(wrapper, '预检').trigger('click')
+    await flushPromises()
+
+    expect(api.migrateTransitPanel).toHaveBeenCalledWith({
+      source_vps_id: 1, target_vps_id: 2, dry_run: true,
+    })
+    expect(wrapper.text()).toContain('需要改 DNS')
+    expect(wrapper.text()).toContain('会备份目标机')
+  })
+
+  it('确认迁移后给出 DNS 与客户无感切换的下一步', async () => {
+    api.migrateTransitPanel
+      .mockResolvedValueOnce({
+        data: {
+          dry_run: true, provisions: 3, same_connect_host: false, requires_dns: true,
+          source: { id: 1, name: 'HK-01', connect_host: '1.1.1.1' },
+          target: { id: 2, name: 'HK-02', connect_host: '2.2.2.2' },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          dry_run: false, provisions: 3, rollback_backup_id: 88,
+          source: { id: 1, name: 'HK-01', connect_host: '1.1.1.1' },
+          target: { id: 2, name: 'HK-02', connect_host: '2.2.2.2' },
+          restored: { created: [52000, 52001, 52002] }, updated_provisions: 3,
+          next_steps: ['把 1.1.1.1 的 DNS 解析改到 HK-02 的机器 IP', '客户客户端无需任何改动'],
+        },
+      })
+
+    const wrapper = mount(TransitBackupPanel, { props: { panels: panelsOn } })
+    await flushPromises()
+    await button(wrapper, '迁移面板').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.tb-pair select')[0].setValue('1')
+    await flushPromises()
+    await wrapper.findAll('.tb-pair select')[1].setValue('2')
+    await button(wrapper, '预检').trigger('click')
+    await flushPromises()
+    await button(wrapper, '确认迁移').trigger('click')
+    await flushPromises()
+
+    expect(api.migrateTransitPanel).toHaveBeenLastCalledWith({
+      source_vps_id: 1, target_vps_id: 2, dry_run: false,
+    })
+    expect(wrapper.text()).toContain('新建 3 条入站')
+    expect(wrapper.text()).toContain('回滚点备份 #88')
+    expect(wrapper.text()).toContain('DNS')
   })
 })

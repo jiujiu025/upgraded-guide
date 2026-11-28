@@ -35,6 +35,8 @@ const panels = [
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // 停用前有确认弹窗；jsdom 里默认没有 window.confirm，需要显式给一个
+  window.confirm = vi.fn(() => true)
   window.confirm = vi.fn(() => true)
   api.getTransitPanels.mockResolvedValue({ data: panels })
   api.getTransitSummary.mockResolvedValue({
@@ -168,7 +170,8 @@ describe('TransitPanelsView', () => {
     const wrapper = mount(TransitPanelsView)
     await flushPromises()
 
-    await button(wrapper, '停用').trigger('click')
+    // 启用/停用已经改成开关：文案是"已启用"，点一下变"已停用"
+    await wrapper.find('.tp-toggle.on').trigger('click')
     await flushPromises()
 
     expect(window.confirm).toHaveBeenCalled()
@@ -180,7 +183,8 @@ describe('TransitPanelsView', () => {
     const wrapper = mount(TransitPanelsView)
     await flushPromises()
 
-    await button(wrapper, '停用').trigger('click')
+    // 启用/停用已经改成开关：文案是"已启用"，点一下变"已停用"
+    await wrapper.find('.tp-toggle.on').trigger('click')
     await flushPromises()
 
     expect(api.updateTransitPanel).toHaveBeenCalledWith(1, { is_enabled: false })

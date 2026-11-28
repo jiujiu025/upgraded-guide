@@ -341,6 +341,9 @@ export const createTransitBackup = (vpsId) => client.post(`/admin/transit/vps/${
 export const getTransitBackups = (params = {}) => client.get('/admin/transit/backups', { params })
 export const restoreTransitBackup = (id, payload) => client.post(`/admin/transit/backups/${id}/restore`, payload)
 export const deleteTransitBackup = (id) => client.delete(`/admin/transit/backups/${id}`)
+export const migrateTransitPanel = (payload) => client.post('/admin/transit/migrate', payload)
+export const rollbackTransitMigration = (backupId) =>
+  client.post(`/admin/transit/migrations/${backupId}/rollback`)
 // 备份含私钥，必须带 Bearer 下载，不能用普通 <a href>
 export const downloadTransitBackup = (id) =>
   client.get(`/admin/transit/backups/${id}/download`, { responseType: 'blob' })

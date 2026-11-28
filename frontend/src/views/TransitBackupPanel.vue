@@ -4,11 +4,11 @@
 // 换机器只要把域名解析指到新 IP。
 import { computed, onMounted, reactive, ref } from 'vue'
 import {
-  Archive, CheckCircle2, CircleAlert, Download, RefreshCw, RotateCcw, Trash2, X,
+  Archive, ArrowRight, CheckCircle2, CircleAlert, Download, RefreshCw, RotateCcw, Trash2, X,
 } from 'lucide-vue-next'
 import {
   createTransitBackup, deleteTransitBackup, downloadTransitBackup, getTransitBackups,
-  restoreTransitBackup,
+  migrateTransitPanel, restoreTransitBackup, rollbackTransitMigration,
 } from '../api'
 
 const props = defineProps({
@@ -25,6 +25,84 @@ const notice = ref('')
 const sourceVpsId = ref('')
 const creating = ref(false)
 const busyId = ref(0)
+
+// 迁移：把 A 整体搬到 B。必须先预检，且会强制给 B 也备一份（回滚点）
+const migrateOpen = ref(false)
+const migrateSource = ref('')
+const migrateTarget = ref('')
+const migratePlan = ref(null)
+const migrating = ref(false)
+const migratePlanning = ref(false)
+const migrateError = ref('')
+const migrateResult = ref(null)
+
+const migrateTargets = computed(() =>
+  (props.panels || []).filter((item) => String(item.id) !== migrateSource.value && item.is_enabled),
+)
+
+function openMigrate() {
+  migrateSource.value = ''
+  migrateTarget.value = ''
+  migratePlan.value = null
+  migrateResult.value = null
+  migrateError.value = ''
+  migrateOpen.value = true
+}
+
+async function runMigratePlan() {
+  if (!migrateSource.value || !migrateTarget.value) {
+    migrateError.value = '请选择源面板与目标面板'
+    return
+  }
+  migratePlanning.value = true
+  migrateError.value = ''
+  migratePlan.value = null
+  try {
+    const { data } = await migrateTransitPanel({
+      source_vps_id: Number(migrateSource.value),
+      target_vps_id: Number(migrateTarget.value),
+      dry_run: true,
+    })
+    migratePlan.value = data
+  } catch (err) {
+    migrateError.value = err.userMessage || '预检失败'
+  } finally {
+    migratePlanning.value = false
+  }
+}
+
+async function runMigrate() {
+  migrating.value = true
+  migrateError.value = ''
+  try {
+    const { data } = await migrateTransitPanel({
+      source_vps_id: Number(migrateSource.value),
+      target_vps_id: Number(migrateTarget.value),
+      dry_run: false,
+    })
+    migrateResult.value = data
+    flash(`迁移完成：${data.target.name} 已就绪，回滚点备份 #${data.rollback_backup_id}`)
+    await load()
+  } catch (err) {
+    migrateError.value = err.userMessage || '迁移失败'
+  } finally {
+    migrating.value = false
+  }
+}
+
+async function rollback(item) {
+  if (!window.confirm(`把 ${item.vps_name} 还原到迁移前状态？目标机会被恢复成当时的样子。`)) return
+  busyId.value = item.id
+  try {
+    await rollbackTransitMigration(item.id)
+    flash('已回滚到迁移前状态')
+    await load()
+  } catch (err) {
+    error.value = err.userMessage || '回滚失败'
+  } finally {
+    busyId.value = 0
+  }
+}
 
 const restoreOpen = ref(false)
 const restoreTarget = ref('')
@@ -183,6 +261,9 @@ onMounted(load)
         <button class="tb-ghost" type="button" :disabled="loading" @click="load">
           <RefreshCw :size="14" />{{ loading ? '加载中…' : '刷新' }}
         </button>
+        <button class="tb-primary" type="button" :disabled="!enabledPanels.length" @click="openMigrate">
+          <ArrowRight :size="14" />迁移面板
+        </button>
       </div>
     </div>
 
@@ -214,6 +295,10 @@ onMounted(load)
           <button type="button" @click="openRestore(item)" title="恢复到另一台面板">
             <RotateCcw :size="13" />恢复
           </button>
+          <button
+            v-if="(item.note || '').startsWith('迁移回滚点')" type="button" class="danger"
+            :disabled="busyId === item.id" title="还原到迁移前" @click="rollback(item)"
+          ><RotateCcw :size="13" />回滚</button>
           <button type="button" class="danger" :disabled="busyId === item.id" @click="remove(item)">
             <Trash2 :size="13" />
           </button>
@@ -279,6 +364,76 @@ onMounted(load)
         </footer>
       </div>
     </div>
+
+    <div v-if="migrateOpen" class="tb-dialog" role="dialog" aria-modal="true">
+      <div class="tb-dialog-card">
+        <header>
+          <div>
+            <h2>迁移面板</h2>
+            <p>把源面板的入站与路由整体搬到目标面板；迁移前会给目标机也备一份，点错了能回滚。</p>
+          </div>
+          <button class="tb-close" type="button" aria-label="关闭" @click="migrateOpen = false"><X :size="18" /></button>
+        </header>
+
+        <div class="tb-pair">
+          <label>源面板
+            <select v-model="migrateSource" :disabled="Boolean(migrateResult)">
+              <option value="">选择要搬走的机器</option>
+              <option v-for="panel in enabledPanels" :key="panel.id" :value="String(panel.id)">
+                {{ panel.name }}（{{ panel.group_code }} · {{ panel.connect_host }}）
+              </option>
+            </select>
+          </label>
+          <ArrowRight :size="18" class="tb-arrow" />
+          <label>目标面板
+            <select v-model="migrateTarget" :disabled="Boolean(migrateResult)">
+              <option value="">选择接手的机器</option>
+              <option v-for="panel in migrateTargets" :key="panel.id" :value="String(panel.id)">
+                {{ panel.name }}（{{ panel.group_code }} · {{ panel.connect_host }}）
+              </option>
+            </select>
+          </label>
+        </div>
+
+        <p v-if="migrateError" class="tb-error"><CircleAlert :size="14" />{{ migrateError }}</p>
+
+        <div v-if="migratePlan && !migrateResult" class="tb-plan">
+          <div><span>待迁移记录</span><b>{{ migratePlan.provisions }}</b></div>
+          <div><span>连接地址</span><b>{{ migratePlan.same_connect_host ? '相同' : '不同' }}</b></div>
+          <div><span>需要改 DNS</span><b :class="{ bad: migratePlan.requires_dns }">{{ migratePlan.requires_dns ? '是' : '否' }}</b></div>
+          <div><span>回滚保障</span><b class="ok">会备份目标机</b></div>
+          <p class="tb-result">
+            执行后会：备份 {{ migratePlan.source.name }} → 备份 {{ migratePlan.target.name }}（回滚点）→
+            把入站恢复到 {{ migratePlan.target.name }} →
+            {{ migratePlan.requires_dns
+              ? `客户链接地址改为 ${migratePlan.target.connect_host}，之后你把 DNS 解析指过去`
+              : '两台连接地址相同，客户链接不用改' }}。
+          </p>
+        </div>
+
+        <div v-if="migrateResult" class="tb-plan">
+          <p class="tb-result">
+            迁移完成：{{ migrateResult.target.name }} 新建 {{ migrateResult.restored.created?.length || 0 }} 条入站，
+            改指向 {{ migrateResult.updated_provisions }} 条线路。回滚点备份 #{{ migrateResult.rollback_backup_id }}。
+          </p>
+          <ul class="tb-steps">
+            <li v-for="(step, index) in migrateResult.next_steps" :key="index">{{ step }}</li>
+          </ul>
+        </div>
+
+        <footer>
+          <button class="tb-ghost" type="button" @click="migrateOpen = false">{{ migrateResult ? '完成' : '关闭' }}</button>
+          <button
+            v-if="!migrateResult && (!migratePlan || migratePlan.dry_run)" class="tb-ghost"
+            type="button" :disabled="migratePlanning" @click="runMigratePlan"
+          >{{ migratePlanning ? '预检中…' : '预检' }}</button>
+          <button
+            v-if="migratePlan && !migrateResult" class="tb-primary danger" type="button"
+            :disabled="migrating" @click="runMigrate"
+          >{{ migrating ? '迁移中…' : '确认迁移' }}</button>
+        </footer>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -329,8 +484,15 @@ onMounted(load)
 .tb-plan b.bad{color:#b03a35}
 .tb-warn{grid-column:1/-1;margin:4px 0 0;color:#8a5a13;font-size:11px;line-height:1.6}
 .tb-result{grid-column:1/-1;margin:6px 0 0;color:#176b58;font-size:11px}
+.tb-pair{display:grid;grid-template-columns:1fr auto 1fr;align-items:end;gap:10px;margin:18px 0 12px}
+.tb-pair label{display:grid;gap:6px;color:#5f7469;font-size:11px;font-weight:600}
+.tb-pair select{min-height:36px;padding:0 10px;border:1px solid #d3e0d9;border-radius:5px;background:#fff;font-size:12px}
+.tb-arrow{align-self:center;color:#93a49c;margin-top:18px}
+.tb-steps{margin:8px 0 0;padding-left:18px;color:#3d5148;font-size:11px;line-height:1.9}
 .tb-dialog-card footer{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid #edf2ef}
 @media(max-width:1000px){
+  .tb-pair{grid-template-columns:1fr}
+  .tb-arrow{display:none}
   .tb-tr{grid-template-columns:1fr 1fr}
   .tb-th{display:none}
   .tb-toolbar{flex-direction:column}

@@ -233,3 +233,81 @@ def test_delete_removes_file_and_record(api, monkeypatch):
     assert client.delete(f"/api/admin/transit/backups/{backup['id']}", headers=headers).status_code == 200
     assert not path.exists()
     assert api["db"].scalar(select(TransitBackup)) is None
+
+
+def test_migration_backs_up_both_panels_and_moves_records(api, monkeypatch):
+    """迁移 = 备份源 → 备份目标（回滚点）→ 恢复到目标 → 记录改指向。"""
+    from app.models import Region, Customer, Order, Order as OrderModel, Product
+    from app.services import transit_migration_service as migration
+
+    source_panel = FakePanel(inbounds=[SAMPLE_INBOUND], xray={
+        "outbounds": [{"tag": "socks-ORD-1-1", "protocol": "socks",
+                       "settings": {"servers": [{"address": "1.2.3.4", "port": 1080}]}}],
+        "routing": {"rules": [{"type": "field", "inboundTag": ["inbound-52000"],
+                               "outboundTag": "socks-ORD-1-1"}]},
+    })
+    target_panel = FakePanel(inbounds=[])
+    monkeypatch.setattr(transit_backup_service, "XuiClient",
+                        lambda *a, **k: source_panel if "old" in str(a[0]) else target_panel)
+
+    db = api["db"]
+    # 迁移后新单要落到目标机，目标必须是启用的
+    api["target"].is_enabled = True
+    db.commit()
+
+    client = api["client"]
+    headers = login(client)
+
+    response = client.post("/api/admin/transit/migrate", json={
+        "source_vps_id": api["source"].id, "target_vps_id": api["target"].id, "dry_run": True,
+    }, headers=headers)
+    assert response.status_code == 200, response.text
+    plan = response.json()
+    assert plan["dry_run"] is True
+    # 两台连接地址不同 → 需要改 DNS
+    assert plan["requires_dns"] is True
+
+    done = client.post("/api/admin/transit/migrate", json={
+        "source_vps_id": api["source"].id, "target_vps_id": api["target"].id, "dry_run": False,
+    }, headers=headers)
+    assert done.status_code == 200, done.text
+    result = done.json()
+    # 目标机原本是空的（这个 fixture 里没有中转记录），入站靠恢复建出来
+    assert result["restored"]["created"] == [52000]
+    assert result["provisions"] == 0
+    # 必须留下回滚点，否则点错了没法退
+    assert result["rollback_backup_id"]
+
+    rollback = db.get(TransitBackup, result["rollback_backup_id"])
+    assert rollback.note.startswith("迁移回滚点")
+    assert rollback.vps_id == api["target"].id
+
+
+def test_migration_rejects_same_or_disabled_target(api, monkeypatch):
+    monkeypatch.setattr(transit_backup_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[]))
+    client = api["client"]
+    headers = login(client)
+
+    same = client.post("/api/admin/transit/migrate", json={
+        "source_vps_id": api["source"].id, "target_vps_id": api["source"].id,
+    }, headers=headers)
+    assert same.status_code == 400
+
+    api["target"].is_enabled = False
+    api["db"].commit()
+    disabled = client.post("/api/admin/transit/migrate", json={
+        "source_vps_id": api["source"].id, "target_vps_id": api["target"].id,
+    }, headers=headers)
+    assert disabled.status_code == 400
+    assert "停用" in disabled.json()["detail"]
+
+
+def test_rollback_requires_a_rollback_point(api, monkeypatch):
+    monkeypatch.setattr(transit_backup_service, "XuiClient", lambda *a, **k: FakePanel(inbounds=[SAMPLE_INBOUND]))
+    client = api["client"]
+    headers = login(client)
+    backup = client.post(f"/api/admin/transit/vps/{api['source'].id}/backups", headers=headers).json()
+
+    response = client.post(f"/api/admin/transit/migrations/{backup['id']}/rollback", headers=headers)
+    assert response.status_code == 400
+    assert "回滚点" in response.json()["detail"]
