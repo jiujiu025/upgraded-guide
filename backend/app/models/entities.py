@@ -802,7 +802,8 @@ class TransitRoute(TimestampMixin, Base):
     country_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     group_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     # 指定面板：为空 = 组内按负载自动挑；填了就只用这台（端口段/承载上限也按这台算）
-    pinned_vps_id: Mapped[int | None] = mapped_column(ForeignKey("transit_vps.id"), nullable=True)
+    pinned_vps_id: Mapped[int | None] = mapped_column(
+        ForeignKey("transit_vps.id", ondelete="SET NULL"), nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False)
     note: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
